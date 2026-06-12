@@ -49,6 +49,12 @@ winit = "0.30"
 # postcard is no_std-friendly (alloc only) so it also rides to wasm (M3).
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
+# egui input/output bridge for winit (M2 UI); egui itself comes via
+# `roxlap_render::egui` (hud feature) so the versions can't drift.
+egui-winit = { version = "0.29", default-features = false }
+# Native file dialogs (open/save .kv6 and .demiurg). Web uses a
+# different path (M3), so this stays a native-only dep on demiurg-app.
+rfd = "0.15"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

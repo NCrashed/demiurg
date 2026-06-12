@@ -64,6 +64,24 @@ impl Document {
         self.redo.clear();
     }
 
+    /// Model dimensions `(xsiz, ysiz, zsiz)`.
+    #[must_use]
+    pub fn dims(&self) -> (u32, u32, u32) {
+        self.model.dims()
+    }
+
+    /// The model pivot (voxel units).
+    #[must_use]
+    pub fn pivot(&self) -> [f32; 3] {
+        self.model.pivot
+    }
+
+    /// Set the model pivot. Not part of the undo history (it is a cheap,
+    /// always-reversible scalar the inspector edits live).
+    pub fn set_pivot(&mut self, pivot: [f32; 3]) {
+        self.model.pivot = pivot;
+    }
+
     #[must_use]
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()

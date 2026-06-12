@@ -1,22 +1,25 @@
-//! demiurg native viewer (M1): open a window, load a `.kv6`, and orbit
-//! around it rendered by roxlap's own renderer — what you see is exactly
-//! what the engine draws.
+//! demiurg native editor (M2): open a window, load/edit a `.kv6` voxel
+//! model, and see it rendered by roxlap's own renderer. An egui overlay
+//! provides the tools, palette, mirror, pivot, and file menu.
 //!
 //! Usage:
-//!   demiurg [path.kv6]      # no path -> a built-in demo model
+//!   demiurg [path.kv6 | path.demiurg]   # no path -> a blank canvas
 //!
-//! Controls: arrow keys orbit, `W`/`S` zoom, mouse-drag orbits, scroll
-//! zooms, `Esc` quits. `ROXLAP_GPU=1` tries the wgpu backend (CPU
-//! otherwise; roxlap falls back automatically if GPU init fails).
+//! Controls: left mouse applies the active tool at the voxel under the
+//! cursor; right-mouse drag orbits; mouse wheel and `W`/`S` zoom; arrow
+//! keys orbit; `Esc` quits. `ROXLAP_GPU=1` tries the wgpu backend.
+
+mod ui;
 
 use std::process::exit;
 use std::sync::Arc;
 
-use demiurg_core::VoxelModel;
-use demiurg_view::{ModelView, OrbitCamera};
+use demiurg_core::{Document, VoxelModel, project};
+use demiurg_view::{ModelView, OrbitCamera, PickHit, pick_voxel};
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::sprite::SpriteLighting;
-use roxlap_render::{FrameParams, RenderOptions, SceneRenderer};
+use roxlap_render::{FrameParams, RenderOptions, SceneRenderer, egui};
+use ui::UiActions;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -24,16 +27,105 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-/// Packed `0x00RRGGBB` sky/clear colour (matches the monada host).
+/// Packed `0x00RRGGBB` sky/clear colour.
 const SKY_COLOR: u32 = 0x0099_b3d9;
+/// Default canvas size for a new model.
+const NEW_DIMS: u32 = 32;
+
+/// The active editing tool.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tool {
+    Place,
+    Erase,
+    Paint,
+    Eyedropper,
+    Box,
+    Sphere,
+    Fill,
+}
+
+/// The mutable editor document + tool state the UI drives.
+struct Editor {
+    document: Document,
+    tool: Tool,
+    /// Current voxlap-packed `0x80RRGGBB` paint colour.
+    color: u32,
+    /// Sphere-tool radius in voxels.
+    radius: i32,
+    /// First corner of an in-progress box (set on the first click).
+    box_anchor: Option<[i32; 3]>,
+    /// The viewport sprite needs a rebuild from the model.
+    dirty: bool,
+}
+
+impl Editor {
+    fn new(model: VoxelModel) -> Self {
+        Self {
+            document: Document::new(model),
+            tool: Tool::Place,
+            color: 0x80c8_c8c8,
+            radius: 2,
+            box_anchor: None,
+            dirty: false,
+        }
+    }
+
+    /// Apply the active tool at a resolved pick.
+    #[allow(clippy::cast_possible_wrap)] // voxel coords are far below i32::MAX
+    fn apply(&mut self, hit: PickHit) {
+        let color = self.color;
+        let changed = match self.tool {
+            Tool::Place => match in_bounds(hit.place, self.document.dims()) {
+                Some(p) => self.document.set_voxel(p, color),
+                None => false,
+            },
+            Tool::Erase => self.document.erase_voxel(hit.voxel),
+            Tool::Paint => self.document.paint_voxel(hit.voxel, color),
+            Tool::Eyedropper => {
+                self.color = self
+                    .document
+                    .model()
+                    .get(hit.voxel[0], hit.voxel[1], hit.voxel[2]);
+                false
+            }
+            Tool::Sphere => self.document.fill_sphere(
+                [
+                    hit.voxel[0] as i32,
+                    hit.voxel[1] as i32,
+                    hit.voxel[2] as i32,
+                ],
+                self.radius,
+                color,
+            ),
+            Tool::Fill => self.document.flood_fill(hit.voxel, color),
+            Tool::Box => match self.box_anchor.take() {
+                None => {
+                    self.box_anchor = Some(hit.place);
+                    false
+                }
+                Some(anchor) => {
+                    let dims = self.document.dims();
+                    self.document.fill_rect(
+                        clamp_cell(anchor, dims),
+                        clamp_cell(hit.place, dims),
+                        color,
+                    )
+                }
+            },
+        };
+        if changed {
+            self.dirty = true;
+        }
+    }
+}
 
 fn main() {
     let path = std::env::args().nth(1);
     let model = if let Some(p) = &path {
-        load_model(p)
+        load_any(p)
     } else {
-        eprintln!("demiurg: no .kv6 given; showing a demo model (pass a path to view a file)");
-        demo_model()
+        eprintln!("demiurg: blank canvas (pass a .kv6 or .demiurg path to open one)");
+        new_model()
     };
 
     let view = ModelView::new(&model);
@@ -43,15 +135,14 @@ fn main() {
         renderer: None,
         view,
         camera,
+        editor: Editor::new(model),
         lighting: SpriteLighting::default_oracle(),
+        egui_ctx: egui::Context::default(),
+        egui_state: None,
         keys: Keys::default(),
-        dragging: false,
+        orbiting: false,
+        cursor: (0.0, 0.0),
         last_drag: None,
-        // DEMIURG_CAPTURE=<path.ppm>: render one frame, write it, exit.
-        // A headless smoke hook (CPU backend only); also a seed for
-        // future screenshot tests.
-        capture: std::env::var("DEMIURG_CAPTURE").ok(),
-        done: false,
     };
 
     let event_loop = EventLoop::new().expect("winit: create event loop");
@@ -59,40 +150,62 @@ fn main() {
     event_loop.run_app(&mut app).expect("winit: run_app");
 }
 
-/// Read and parse a `.kv6`, or exit with a message.
-fn load_model(path: &str) -> VoxelModel {
+/// Load a `.kv6` or `.demiurg` by extension, or exit with a message.
+fn load_any(path: &str) -> VoxelModel {
     let bytes = std::fs::read(path).unwrap_or_else(|e| {
         eprintln!("demiurg: cannot read {path}: {e}");
         exit(2);
     });
-    VoxelModel::from_kv6_bytes(&bytes).unwrap_or_else(|e| {
+    let model = if path.ends_with(".demiurg") {
+        project::from_bytes(&bytes).map_err(|e| e.to_string())
+    } else {
+        VoxelModel::from_kv6_bytes(&bytes).map_err(|e| e.to_string())
+    };
+    model.unwrap_or_else(|e| {
         eprintln!("demiurg: {path}: {e}");
         exit(2);
     })
 }
 
-/// A 16³ colour-gradient cube shell, so `demiurg` shows something with
-/// no file argument.
-#[allow(clippy::cast_possible_truncation)] // channel math is bounded to 0..=255
-fn demo_model() -> VoxelModel {
-    const N: u32 = 16;
-    let mut m = VoxelModel::new(N, N, N);
-    for z in 0..N {
-        for y in 0..N {
-            for x in 0..N {
-                let on_shell = x == 0 || y == 0 || z == 0 || x == N - 1 || y == N - 1 || z == N - 1;
-                if !on_shell {
-                    continue;
-                }
-                let r = (x * 255 / (N - 1)) as u8;
-                let g = (y * 255 / (N - 1)) as u8;
-                let b = (z * 255 / (N - 1)) as u8;
-                let col = 0x8000_0000 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
-                m.set(x, y, z, col);
-            }
-        }
-    }
+/// A blank canvas with a single seed voxel at the centre, so the place
+/// tool has a face to build on.
+fn new_model() -> VoxelModel {
+    let mut m = VoxelModel::new(NEW_DIMS, NEW_DIMS, NEW_DIMS);
+    let c = NEW_DIMS / 2;
+    m.set(c, c, c, 0x80c8_c8c8);
     m
+}
+
+/// Clamp an `i32` cell into `[0, dims)` per axis.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)] // dims are small; clamped non-negative below the dim
+fn clamp_cell(p: [i32; 3], dims: (u32, u32, u32)) -> [u32; 3] {
+    let d = [dims.0 as i32, dims.1 as i32, dims.2 as i32];
+    [
+        p[0].clamp(0, d[0] - 1) as u32,
+        p[1].clamp(0, d[1] - 1) as u32,
+        p[2].clamp(0, d[2] - 1) as u32,
+    ]
+}
+
+/// `Some` voxel coord if `p` is in `[0, dims)`, else `None`.
+#[allow(clippy::cast_sign_loss)] // guarded non-negative before the cast
+fn in_bounds(p: [i32; 3], dims: (u32, u32, u32)) -> Option<[u32; 3]> {
+    let (dx, dy, dz) = dims;
+    if p[0] >= 0
+        && p[1] >= 0
+        && p[2] >= 0
+        && (p[0] as u32) < dx
+        && (p[1] as u32) < dy
+        && (p[2] as u32) < dz
+    {
+        Some([p[0] as u32, p[1] as u32, p[2] as u32])
+    } else {
+        None
+    }
 }
 
 /// Held-key state, applied per frame for smooth orbiting.
@@ -112,12 +225,15 @@ struct App {
     renderer: Option<SceneRenderer>,
     view: ModelView,
     camera: OrbitCamera,
+    editor: Editor,
     lighting: SpriteLighting<'static>,
+    egui_ctx: egui::Context,
+    egui_state: Option<egui_winit::State>,
     keys: Keys,
-    dragging: bool,
+    /// Right-mouse drag orbits the camera (left mouse edits).
+    orbiting: bool,
+    cursor: (f64, f64),
     last_drag: Option<(f64, f64)>,
-    capture: Option<String>,
-    done: bool,
 }
 
 impl App {
@@ -132,6 +248,115 @@ impl App {
         }
     }
 
+    /// Pick the voxel under the cursor and apply the active tool.
+    fn on_click(&mut self) {
+        let cam = self.camera.to_roxlap();
+        let ray = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.view_ray(&cam, self.cursor.0, self.cursor.1));
+        let Some(ray) = ray else {
+            return;
+        };
+        if let Some(hit) = pick_voxel(self.editor.document.model(), ray.origin, ray.dir) {
+            self.editor.apply(hit);
+        }
+    }
+
+    /// Build the egui frame and tessellate it (borrows only egui state +
+    /// the editor, never the renderer).
+    fn run_ui(
+        &mut self,
+        window: &Window,
+    ) -> (
+        Vec<egui::ClippedPrimitive>,
+        egui::TexturesDelta,
+        f32,
+        UiActions,
+    ) {
+        let ctx = self.egui_ctx.clone();
+        let raw = self
+            .egui_state
+            .as_mut()
+            .expect("egui state")
+            .take_egui_input(window);
+        let editor = &mut self.editor;
+        let mut actions = UiActions::default();
+        let out = ctx.run(raw, |c| ui::build(c, editor, &mut actions));
+        self.egui_state
+            .as_mut()
+            .expect("egui state")
+            .handle_platform_output(window, out.platform_output);
+        let jobs = ctx.tessellate(out.shapes, out.pixels_per_point);
+        (jobs, out.textures_delta, out.pixels_per_point, actions)
+    }
+
+    /// Run the deferred menu actions (file dialogs, undo/redo).
+    #[allow(clippy::too_many_lines)] // a flat dispatch over the menu items
+    fn apply_actions(&mut self, a: &UiActions) {
+        if a.undo && self.editor.document.undo() {
+            self.editor.dirty = true;
+        }
+        if a.redo && self.editor.document.redo() {
+            self.editor.dirty = true;
+        }
+        if a.new_model {
+            self.load_model(new_model());
+        }
+        if a.open_kv6 {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("kv6", &["kv6"])
+                .pick_file()
+            {
+                match std::fs::read(&path).map(|b| VoxelModel::from_kv6_bytes(&b)) {
+                    Ok(Ok(m)) => self.load_model(m),
+                    Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
+                    Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
+                }
+            }
+        }
+        if a.open_project {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("demiurg", &["demiurg"])
+                .pick_file()
+            {
+                match std::fs::read(&path).map(|b| project::from_bytes(&b)) {
+                    Ok(Ok(m)) => self.load_model(m),
+                    Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
+                    Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
+                }
+            }
+        }
+        if a.save_kv6 {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("kv6", &["kv6"])
+                .set_file_name("model.kv6")
+                .save_file()
+            {
+                let bytes = self.editor.document.model().to_kv6_bytes();
+                report_write(&path, std::fs::write(&path, bytes));
+            }
+        }
+        if a.save_project {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("demiurg", &["demiurg"])
+                .set_file_name("model.demiurg")
+                .save_file()
+            {
+                let bytes = project::to_bytes(self.editor.document.model());
+                report_write(&path, std::fs::write(&path, bytes));
+            }
+        }
+    }
+
+    /// Replace the document model, rebuild the sprite, and reframe.
+    fn load_model(&mut self, model: VoxelModel) {
+        self.editor.document.replace_model(model);
+        self.view.set_model(self.editor.document.model());
+        self.camera = self.view.framing_camera();
+        self.editor.dirty = false;
+    }
+
     fn redraw(&mut self) {
         let Some(window) = self.window.clone() else {
             return;
@@ -141,6 +366,13 @@ impl App {
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 {
             return;
+        }
+
+        let (jobs, textures, ppp, actions) = self.run_ui(&window);
+        self.apply_actions(&actions);
+        if self.editor.dirty {
+            self.view.set_model(self.editor.document.model());
+            self.editor.dirty = false;
         }
 
         let camera = self.camera.to_roxlap();
@@ -155,10 +387,7 @@ impl App {
             gpu_mip_scan_dist: 64.0,
             gpu_max_outer_steps: 64,
             gpu_fov_y_rad: 1.2,
-            // Required (Some) for the CPU backend to draw sprites.
             sprite_lighting: Some(&self.lighting),
-            // No per-face grid shading: a lone sprite has no voxel grid
-            // to side-shade, and [0; 6] keeps voxlap's sideshademode off.
             side_shades: [0; 6],
         };
 
@@ -166,56 +395,30 @@ impl App {
             return;
         };
         renderer.set_sprites(self.view.sprites());
-        if self.capture.is_some() {
-            renderer.request_capture();
-        }
         renderer.render(self.view.scene_mut(), &camera, &frame);
-        renderer.present();
-
-        if let Some(path) = self.capture.take() {
-            match renderer.take_capture() {
-                Some((pixels, w, h)) => {
-                    if let Err(e) = write_ppm(&path, &pixels, w, h) {
-                        eprintln!("demiurg: capture write failed: {e}");
-                    } else {
-                        let lit = pixels
-                            .iter()
-                            .filter(|&&p| p & 0x00ff_ffff != SKY_COLOR)
-                            .count();
-                        eprintln!("demiurg: captured {w}x{h} to {path} ({lit} non-sky pixels)");
-                    }
-                }
-                None => eprintln!("demiurg: capture unavailable (GPU backend?)"),
-            }
-            self.done = true;
-            return;
-        }
+        renderer.paint_egui(&jobs, &textures, ppp);
 
         window.request_redraw();
     }
 }
 
-/// Write packed `0x00RRGGBB` pixels as a binary PPM (P6) — no deps.
-fn write_ppm(path: &str, pixels: &[u32], width: u32, height: u32) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut buf = Vec::with_capacity(pixels.len() * 3 + 32);
-    write!(buf, "P6\n{width} {height}\n255\n")?;
-    for &p in pixels {
-        // 0x00RRGGBB little-endian = [BB, GG, RR, 00]
-        let [b, g, r, _] = p.to_le_bytes();
-        buf.extend_from_slice(&[r, g, b]);
+/// Log the result of a file write.
+fn report_write(path: &std::path::Path, result: std::io::Result<()>) {
+    match result {
+        Ok(()) => eprintln!("demiurg: saved {}", path.display()),
+        Err(e) => eprintln!("demiurg: write {} failed: {e}", path.display()),
     }
-    std::fs::write(path, buf)
 }
 
 impl ApplicationHandler for App {
+    #[allow(clippy::cast_possible_truncation)] // scale_factor f64->f32 is exact in practice
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
         let attrs = Window::default_attributes()
             .with_title("demiurg")
-            .with_inner_size(LogicalSize::new(960.0, 720.0));
+            .with_inner_size(LogicalSize::new(1100.0, 760.0));
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -234,12 +437,28 @@ impl ApplicationHandler for App {
             None => eprintln!("demiurg: CPU backend"),
         }
 
+        self.egui_state = Some(egui_winit::State::new(
+            self.egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            window.as_ref(),
+            Some(window.scale_factor() as f32),
+            None,
+            None,
+        ));
+
         self.renderer = Some(renderer);
         window.request_redraw();
         self.window = Some(window);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Let egui see the event first; `consumed` means a widget took it
+        // (a click on a panel), so we skip camera / editing.
+        let consumed = match (self.window.clone(), self.egui_state.as_mut()) {
+            (Some(window), Some(state)) => state.on_window_event(&window, &event).consumed,
+            _ => false,
+        };
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -255,7 +474,7 @@ impl ApplicationHandler for App {
                         ..
                     },
                 ..
-            } => {
+            } if !consumed => {
                 let pressed = state == ElementState::Pressed;
                 match code {
                     KeyCode::ArrowLeft => self.keys.left = pressed,
@@ -269,23 +488,31 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput {
+                state: ElementState::Pressed,
                 button: MouseButton::Left,
+                ..
+            } if !consumed => self.on_click(),
+            WindowEvent::MouseInput {
                 state,
+                button: MouseButton::Right,
                 ..
             } => {
-                self.dragging = state == ElementState::Pressed;
-                if !self.dragging {
+                self.orbiting = state == ElementState::Pressed;
+                if !self.orbiting {
                     self.last_drag = None;
                 }
             }
-            WindowEvent::CursorMoved { position, .. } if self.dragging => {
-                if let Some((lx, ly)) = self.last_drag {
-                    self.camera
-                        .orbit((position.x - lx) * 0.01, -(position.y - ly) * 0.01, 0.0);
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x, position.y);
+                if self.orbiting {
+                    if let Some((lx, ly)) = self.last_drag {
+                        self.camera
+                            .orbit((position.x - lx) * 0.01, -(position.y - ly) * 0.01, 0.0);
+                    }
+                    self.last_drag = Some((position.x, position.y));
                 }
-                self.last_drag = Some((position.x, position.y));
             }
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, .. } if !consumed => {
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     MouseScrollDelta::PixelDelta(p) => p.y / 40.0,
@@ -294,12 +521,6 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
-        }
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.done {
-            event_loop.exit();
         }
     }
 }
