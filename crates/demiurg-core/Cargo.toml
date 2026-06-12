@@ -11,6 +11,8 @@ description = "Editor document model and engine-format conversion for the demiur
 
 [dependencies]
 roxlap-formats.workspace = true
+serde.workspace = true
+postcard.workspace = true
 
 [lints]
 workspace = true

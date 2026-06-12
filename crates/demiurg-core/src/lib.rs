@@ -24,6 +24,11 @@
 use roxlap_formats::Rgb6;
 use roxlap_formats::kv6::{self, Kv6};
 
+pub mod edit;
+pub mod project;
+
+pub use edit::Document;
+
 /// A dense, editable voxel model: the in-memory document the editor
 /// mutates and previews.
 ///
@@ -166,6 +171,38 @@ impl VoxelModel {
     /// Returns [`kv6::ParseError`] if the bytes are not a valid `.kv6`.
     pub fn from_kv6_bytes(bytes: &[u8]) -> Result<Self, kv6::ParseError> {
         kv6::parse(bytes).map(|kv6| Self::from_kv6(&kv6))
+    }
+
+    /// The raw dense voxel buffer (`0` = empty), indexed
+    /// `x + xsiz·(y + ysiz·z)`. Used by the `.demiurg` project codec.
+    #[must_use]
+    pub fn voxels(&self) -> &[u32] {
+        &self.voxels
+    }
+
+    /// Reconstruct a model from raw parts (e.g. a loaded `.demiurg`
+    /// project). Returns `None` if `voxels.len()` does not equal
+    /// `xsiz·ysiz·zsiz`.
+    #[must_use]
+    pub fn from_parts(
+        xsiz: u32,
+        ysiz: u32,
+        zsiz: u32,
+        pivot: [f32; 3],
+        palette: Option<[Rgb6; 256]>,
+        voxels: Vec<u32>,
+    ) -> Option<Self> {
+        if voxels.len() != xsiz as usize * ysiz as usize * zsiz as usize {
+            return None;
+        }
+        Some(Self {
+            xsiz,
+            ysiz,
+            zsiz,
+            pivot,
+            palette,
+            voxels,
+        })
     }
 }
 

@@ -9,8 +9,10 @@
 //! screen is the model exactly as the game would render it.
 
 mod camera;
+mod pick;
 
 pub use camera::OrbitCamera;
+pub use pick::{PickHit, pick_voxel};
 
 use demiurg_core::VoxelModel;
 use glam::DVec3;

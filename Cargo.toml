@@ -45,6 +45,10 @@ roxlap-render = { path = "../roxlap/crates/roxlap-render", version = "0.8.0" }
 glam = { version = "0.30", default-features = false, features = ["std"] }
 # Native windowing + input for demiurg-app (M1). Matches monada-host.
 winit = "0.30"
+# `.demiurg` project codec (M2): serde schema + postcard wire format.
+# postcard is no_std-friendly (alloc only) so it also rides to wasm (M3).
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
