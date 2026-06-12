@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# demiurg project files written during manual editing sessions live in
+# the user's own asset dirs, not the repo; ignore any stray exports.
+*.demiurg.bak
+
+# wasm dist output (trunk).
+/dist

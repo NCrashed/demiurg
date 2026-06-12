@@ -1,0 +1,11 @@
+# Pinned to the same nightly as roxlap / monada. The nightly is
+# required only for the wasm threading path (`wasm-bindgen-rayon`
+# rebuilds std with `+atomics` via `-Z build-std`, which needs nightly
+# cargo + the `rust-src` component) that demiurg-web (M3) inherits from
+# roxlap. Native builds and tests behave identically to stable on this
+# nightly — there are no nightly-only features off the wasm32 target.
+[toolchain]
+channel = "nightly-2026-04-15"
+components = ["rustc", "cargo", "rust-src", "rustfmt", "clippy", "rust-analyzer"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

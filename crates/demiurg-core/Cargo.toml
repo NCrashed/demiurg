@@ -1,0 +1,16 @@
+[package]
+name = "demiurg-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+description = "Editor document model and engine-format conversion for the demiurg voxel asset editor."
+
+[dependencies]
+roxlap-formats.workspace = true
+
+[lints]
+workspace = true
