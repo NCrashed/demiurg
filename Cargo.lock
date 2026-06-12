@@ -1569,14 +1569,14 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "roxlap-cavegen"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "roxlap-formats",
 ]
 
 [[package]]
 name = "roxlap-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "rayon",
  "roxlap-formats",
@@ -1584,11 +1584,11 @@ dependencies = [
 
 [[package]]
 name = "roxlap-formats"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "roxlap-gpu"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bytemuck",
  "glam",
@@ -1600,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "roxlap-render"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "glam",
  "raw-window-handle",
@@ -1614,7 +1614,7 @@ dependencies = [
 
 [[package]]
 name = "roxlap-scene"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "crossbeam-channel",
  "glam",

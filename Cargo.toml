@@ -35,10 +35,10 @@ demiurg-view = { path = "crates/demiurg-view", version = "0.0.1" }
 # roxlap-scene:   Scene graph the renderer composites.
 # roxlap-render:  unified CPU/GPU facade (SceneRenderer, SpriteSet).
 # roxlap-voxvideo lands at M5.
-roxlap-formats = { path = "../roxlap/crates/roxlap-formats", version = "0.7.0" }
-roxlap-core = { path = "../roxlap/crates/roxlap-core", version = "0.7.0" }
-roxlap-scene = { path = "../roxlap/crates/roxlap-scene", version = "0.7.0" }
-roxlap-render = { path = "../roxlap/crates/roxlap-render", version = "0.7.0" }
+roxlap-formats = { path = "../roxlap/crates/roxlap-formats", version = "0.8.0" }
+roxlap-core = { path = "../roxlap/crates/roxlap-core", version = "0.8.0" }
+roxlap-scene = { path = "../roxlap/crates/roxlap-scene", version = "0.8.0" }
+roxlap-render = { path = "../roxlap/crates/roxlap-render", version = "0.8.0" }
 
 # Render-side world math (f64 orbit camera). Mirrors roxlap's pin so
 # the workspaces share one glam.

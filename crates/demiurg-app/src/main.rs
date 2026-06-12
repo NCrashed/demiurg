@@ -157,6 +157,9 @@ impl App {
             gpu_fov_y_rad: 1.2,
             // Required (Some) for the CPU backend to draw sprites.
             sprite_lighting: Some(&self.lighting),
+            // No per-face grid shading: a lone sprite has no voxel grid
+            // to side-shade, and [0; 6] keeps voxlap's sideshademode off.
+            side_shades: [0; 6],
         };
 
         let Some(renderer) = self.renderer.as_mut() else {
