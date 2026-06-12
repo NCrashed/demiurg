@@ -1,0 +1,25 @@
+[package]
+name = "demiurg-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+description = "demiurg native viewer/editor binary: winit window + roxlap render facade."
+publish = false
+
+[[bin]]
+name = "demiurg"
+path = "src/main.rs"
+
+[dependencies]
+demiurg-core.workspace = true
+demiurg-view.workspace = true
+roxlap-render.workspace = true
+roxlap-core.workspace = true
+winit.workspace = true
+
+[lints]
+workspace = true

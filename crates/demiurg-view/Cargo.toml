@@ -1,0 +1,20 @@
+[package]
+name = "demiurg-view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+description = "Viewport bridge: builds a roxlap scene + sprite set from a demiurg document and orbits a camera."
+
+[dependencies]
+demiurg-core.workspace = true
+roxlap-render.workspace = true
+roxlap-core.workspace = true
+roxlap-scene.workspace = true
+glam.workspace = true
+
+[lints]
+workspace = true

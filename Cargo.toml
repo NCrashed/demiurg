@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "crates/demiurg-core",
+    "crates/demiurg-view",
+    "crates/demiurg-app",
 ]
 resolver = "3"
 
@@ -17,12 +19,32 @@ rust-version = "1.85"
 readme = "README.md"
 
 [workspace.dependencies]
-# demiurg depends on roxlap ONLY (see DESIGN.md §1). Path deps to the
-# sibling checkout during local dev; `version` is what a future
-# `cargo publish` would record. roxlap-formats is the sole dependency
-# for M0 (kv6 read/write + surface extraction via `Kv6::from_fn`);
-# roxlap-render/scene/core land at M1, roxlap-voxvideo at M5.
+# Internal crates, by path during local dev.
+demiurg-core = { path = "crates/demiurg-core", version = "0.0.1" }
+demiurg-view = { path = "crates/demiurg-view", version = "0.0.1" }
+
+# demiurg depends on roxlap ONLY (see DESIGN.md §1). All roxlap crates
+# are path deps to the SIBLING checkout (not crates.io): the whole
+# point is "rendered by the in-dev engine", and mixing a local
+# roxlap-formats with a crates.io roxlap-render would link two
+# incompatible `Kv6`/`Sprite` types. `version` is what a future
+# `cargo publish` would record.
+#
+# roxlap-formats: kv6 read/write + surface extraction (`Kv6::from_fn`).
+# roxlap-core:    Camera, OpticastSettings, SpriteLighting.
+# roxlap-scene:   Scene graph the renderer composites.
+# roxlap-render:  unified CPU/GPU facade (SceneRenderer, SpriteSet).
+# roxlap-voxvideo lands at M5.
 roxlap-formats = { path = "../roxlap/crates/roxlap-formats", version = "0.7.0" }
+roxlap-core = { path = "../roxlap/crates/roxlap-core", version = "0.7.0" }
+roxlap-scene = { path = "../roxlap/crates/roxlap-scene", version = "0.7.0" }
+roxlap-render = { path = "../roxlap/crates/roxlap-render", version = "0.7.0" }
+
+# Render-side world math (f64 orbit camera). Mirrors roxlap's pin so
+# the workspaces share one glam.
+glam = { version = "0.30", default-features = false, features = ["std"] }
+# Native windowing + input for demiurg-app (M1). Matches monada-host.
+winit = "0.30"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
