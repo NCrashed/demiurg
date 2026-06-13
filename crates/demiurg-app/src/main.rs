@@ -8,8 +8,8 @@
 //! Controls: left mouse applies the active tool (hold to drag-paint);
 //! right-mouse drag orbits; wheel and `W`/`S` zoom; arrow keys orbit.
 //! Hotkeys: `1`-`7` pick a tool, `Ctrl+Z` undo, `Ctrl+Y` / `Ctrl+Shift+Z`
-//! redo, `Esc` quits. `DEMIURG_LANG=ru` starts in Russian.
-//! `ROXLAP_GPU=1` tries the wgpu backend.
+//! redo, `Esc` quits. `DEMIURG_LANG=ru` starts in Russian. The GPU
+//! backend is used by default; `ROXLAP_GPU=0` forces the CPU renderer.
 
 mod ui;
 
@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use demiurg_core::{Document, VoxelModel, project};
 use demiurg_i18n::Lang;
-use demiurg_view::{ModelView, OrbitCamera, PickHit, pick_voxel, voxel_screen_edges};
+use demiurg_view::{ModelView, OrbitCamera, PickHit, RenderMode, pick_voxel, voxel_screen_edges};
 use roxlap_core::Camera;
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::sprite::SpriteLighting;
@@ -39,6 +39,12 @@ const SKY_COLOR: u32 = 0x005a_6b7a;
 const SPRITE_MATERIAL: u32 = 0x0080_8080;
 /// Default canvas size for a new model.
 const NEW_DIMS: u32 = 32;
+/// The render mode the editor opens in — the voxel grid, whose per-face
+/// `side_shades` make voxels easy to read while editing.
+const DEFAULT_RENDER_MODE: RenderMode = RenderMode::Voxel;
+/// voxlap `setsideshades(top, bot, left, right, up, down)` for the voxel
+/// render: leave the top bright and darken the others so top faces pop.
+const VOXEL_SIDE_SHADES: [i8; 6] = [0, 28, 16, 16, 16, 28];
 
 /// The active editing tool.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -81,7 +87,9 @@ struct Editor {
     lang: Lang,
     /// Directional sprite lighting (lightmode 1) on; off renders flat.
     lighting: bool,
-    /// The viewport sprite needs a rebuild from the model.
+    /// Sprite vs voxel-grid render.
+    render_mode: RenderMode,
+    /// The viewport scene needs a rebuild from the model.
     dirty: bool,
 }
 
@@ -101,6 +109,7 @@ impl Editor {
             model_palette,
             lang,
             lighting: true,
+            render_mode: DEFAULT_RENDER_MODE,
             dirty: false,
         }
     }
@@ -168,7 +177,7 @@ fn main() {
         new_model()
     };
 
-    let view = ModelView::new(&model);
+    let view = ModelView::new(&model, DEFAULT_RENDER_MODE);
     let camera = view.framing_camera();
     let mut app = App {
         window: None,
@@ -475,7 +484,8 @@ impl App {
     /// palette, and reframe.
     fn load_model(&mut self, model: VoxelModel) {
         self.editor.document.replace_model(model);
-        self.view.set_model(self.editor.document.model());
+        self.view
+            .set_model(self.editor.document.model(), self.editor.render_mode);
         self.editor.refresh_palette();
         self.camera = self.view.framing_camera();
         self.editor.dirty = false;
@@ -501,7 +511,8 @@ impl App {
         let (jobs, textures, ppp, actions) = self.run_ui(&window, &edges);
         self.apply_actions(&actions);
         if self.editor.dirty {
-            self.view.set_model(self.editor.document.model());
+            self.view
+                .set_model(self.editor.document.model(), self.editor.render_mode);
             self.editor.refresh_palette();
             self.editor.dirty = false;
         }
@@ -515,6 +526,12 @@ impl App {
             lightmode: u32::from(self.editor.lighting),
             lights: &[],
         };
+        // Per-face shading applies to the voxel-grid render only (the
+        // sprite path shades per voxel, not per face).
+        let side_shades = match self.editor.render_mode {
+            RenderMode::Voxel if self.editor.lighting => VOXEL_SIDE_SHADES,
+            _ => [0; 6],
+        };
         let frame = FrameParams {
             settings: &settings,
             sky_color: SKY_COLOR,
@@ -526,7 +543,7 @@ impl App {
             gpu_max_outer_steps: 64,
             gpu_fov_y_rad: 1.2,
             sprite_lighting: Some(&sprite_lighting),
-            side_shades: [0; 6],
+            side_shades,
         };
 
         let Some(renderer) = self.renderer.as_mut() else {
@@ -589,7 +606,9 @@ impl ApplicationHandler for App {
                 .expect("winit: create_window"),
         );
 
-        let want_gpu = std::env::var_os("ROXLAP_GPU").is_some_and(|v| v != "0" && !v.is_empty());
+        // GPU backend by default (roxlap falls back to CPU if init
+        // fails); set ROXLAP_GPU=0 to force the CPU renderer.
+        let want_gpu = std::env::var("ROXLAP_GPU").map_or(true, |v| v != "0");
         let opts = RenderOptions {
             want_gpu,
             // The empty (sprite-only) scene's background comes from the

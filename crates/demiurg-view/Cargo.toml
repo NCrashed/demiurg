@@ -14,6 +14,9 @@ demiurg-core.workspace = true
 roxlap-render.workspace = true
 roxlap-core.workspace = true
 roxlap-scene.workspace = true
+# Voxel-grid render path: build a chunk Vxl from the model via the
+# edit primitives (set_cube) for the side-shaded preview.
+roxlap-formats.workspace = true
 glam.workspace = true
 
 [lints]

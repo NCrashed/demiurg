@@ -8,6 +8,7 @@
 //! `editor.lang`, switchable live from the Language menu.
 
 use demiurg_i18n::{Lang, Msg, tr};
+use demiurg_view::RenderMode;
 use roxlap_render::egui;
 
 use crate::{Editor, Tool};
@@ -93,6 +94,28 @@ pub fn build(
             });
             ui.menu_button(t(Msg::View), |ui| {
                 ui.checkbox(&mut editor.lighting, t(Msg::Lighting));
+                ui.separator();
+                ui.label(t(Msg::Render));
+                if ui
+                    .selectable_value(
+                        &mut editor.render_mode,
+                        RenderMode::Voxel,
+                        t(Msg::RenderVoxel),
+                    )
+                    .changed()
+                {
+                    editor.dirty = true;
+                }
+                if ui
+                    .selectable_value(
+                        &mut editor.render_mode,
+                        RenderMode::Sprite,
+                        t(Msg::RenderSprite),
+                    )
+                    .changed()
+                {
+                    editor.dirty = true;
+                }
             });
             ui.menu_button(t(Msg::Language), |ui| {
                 for l in Lang::all() {

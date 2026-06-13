@@ -94,6 +94,9 @@ pub enum Msg {
     Redo,
     View,
     Lighting,
+    Render,
+    RenderSprite,
+    RenderVoxel,
     Language,
     // Help line
     HelpApply,
@@ -102,7 +105,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 29] = [
+    pub const ALL: [Msg; 32] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -129,6 +132,9 @@ impl Msg {
         Msg::Redo,
         Msg::View,
         Msg::Lighting,
+        Msg::Render,
+        Msg::RenderSprite,
+        Msg::RenderVoxel,
         Msg::Language,
         Msg::HelpApply,
         Msg::HelpOrbit,
@@ -172,6 +178,9 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Redo => "Redo",
         Msg::View => "View",
         Msg::Lighting => "Lighting",
+        Msg::Render => "Render",
+        Msg::RenderSprite => "Sprite",
+        Msg::RenderVoxel => "Voxel grid",
         Msg::Language => "Language",
         Msg::HelpApply => "LMB: apply tool",
         Msg::HelpOrbit => "RMB drag: orbit · wheel: zoom",
@@ -206,6 +215,9 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Redo => "Повторить",
         Msg::View => "Вид",
         Msg::Lighting => "Освещение",
+        Msg::Render => "Рендер",
+        Msg::RenderSprite => "Спрайт",
+        Msg::RenderVoxel => "Воксельная сетка",
         Msg::Language => "Язык",
         Msg::HelpApply => "ЛКМ: применить инструмент",
         Msg::HelpOrbit => "ПКМ: вращение · колесо: зум",

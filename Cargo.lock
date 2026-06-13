@@ -634,6 +634,7 @@ dependencies = [
  "demiurg-core",
  "glam",
  "roxlap-core",
+ "roxlap-formats",
  "roxlap-render",
  "roxlap-scene",
 ]
