@@ -12,7 +12,7 @@ mod camera;
 mod pick;
 
 pub use camera::OrbitCamera;
-pub use pick::{PickHit, pick_voxel};
+pub use pick::{PickHit, pick_voxel, project_to_screen, voxel_screen_edges};
 
 use demiurg_core::VoxelModel;
 use glam::DVec3;

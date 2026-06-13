@@ -18,7 +18,8 @@ use std::sync::Arc;
 
 use demiurg_core::{Document, VoxelModel, project};
 use demiurg_i18n::Lang;
-use demiurg_view::{ModelView, OrbitCamera, PickHit, pick_voxel};
+use demiurg_view::{ModelView, OrbitCamera, PickHit, pick_voxel, voxel_screen_edges};
+use roxlap_core::Camera;
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::sprite::SpriteLighting;
 use roxlap_render::{FrameParams, RenderOptions, SceneRenderer, egui};
@@ -293,6 +294,29 @@ impl App {
         }
     }
 
+    /// Wire-box edges (framebuffer pixels) for the voxel the active tool
+    /// would affect under the cursor. Empty when the pointer is over a
+    /// panel or misses the model.
+    #[allow(clippy::cast_possible_wrap)] // voxel coords are far below i32::MAX
+    fn hover_edges(&self, camera: &Camera, width: f64, height: f64) -> Vec<[(f64, f64); 2]> {
+        if self.egui_ctx.is_pointer_over_area() {
+            return Vec::new();
+        }
+        let Some(hit) = self.pointer_pick() else {
+            return Vec::new();
+        };
+        let cell = if matches!(self.editor.tool, Tool::Place) {
+            hit.place
+        } else {
+            [
+                hit.voxel[0] as i32,
+                hit.voxel[1] as i32,
+                hit.voxel[2] as i32,
+            ]
+        };
+        voxel_screen_edges(camera, width, height, self.editor.document.pivot(), cell)
+    }
+
     /// The voxel under the cursor, if any.
     fn pointer_pick(&self) -> Option<PickHit> {
         let cam = self.camera.to_roxlap();
@@ -365,6 +389,7 @@ impl App {
     fn run_ui(
         &mut self,
         window: &Window,
+        highlight: &[[(f64, f64); 2]],
     ) -> (
         Vec<egui::ClippedPrimitive>,
         egui::TexturesDelta,
@@ -379,7 +404,7 @@ impl App {
             .take_egui_input(window);
         let editor = &mut self.editor;
         let mut actions = UiActions::default();
-        let out = ctx.run(raw, |c| ui::build(c, editor, &mut actions));
+        let out = ctx.run(raw, |c| ui::build(c, editor, &mut actions, highlight));
         self.egui_state
             .as_mut()
             .expect("egui state")
@@ -467,7 +492,13 @@ impl App {
             return;
         }
 
-        let (jobs, textures, ppp, actions) = self.run_ui(&window);
+        let camera = self.camera.to_roxlap();
+        // Hover wire box (uses last frame's projection — `is_pointer_over_area`
+        // and the pick ray both read the previous frame, which is fine at
+        // redraw cadence).
+        let edges = self.hover_edges(&camera, f64::from(size.width), f64::from(size.height));
+
+        let (jobs, textures, ppp, actions) = self.run_ui(&window, &edges);
         self.apply_actions(&actions);
         if self.editor.dirty {
             self.view.set_model(self.editor.document.model());
@@ -475,7 +506,6 @@ impl App {
             self.editor.dirty = false;
         }
 
-        let camera = self.camera.to_roxlap();
         let settings = OpticastSettings::for_oracle_framebuffer(size.width, size.height);
         // Lit (lightmode 1) by default for directional shading; the View
         // menu can switch it to flat (lightmode 0). `R==G==B` material

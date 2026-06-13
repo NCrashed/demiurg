@@ -37,9 +37,15 @@ pub struct UiActions {
     pub redo: bool,
 }
 
-/// Draw the editor chrome for one frame.
+/// Draw the editor chrome for one frame. `highlight` is the wire box of
+/// the voxel under the cursor, as framebuffer-pixel line segments.
 #[allow(clippy::too_many_lines)] // a flat panel layout reads better unsplit
-pub fn build(ctx: &egui::Context, editor: &mut Editor, actions: &mut UiActions) {
+pub fn build(
+    ctx: &egui::Context,
+    editor: &mut Editor,
+    actions: &mut UiActions,
+    highlight: &[[(f64, f64); 2]],
+) {
     let lang = editor.lang;
     let t = |m: Msg| tr(lang, m);
 
@@ -186,6 +192,31 @@ pub fn build(ctx: &egui::Context, editor: &mut Editor, actions: &mut UiActions) 
             ui.small(t(Msg::HelpApply));
             ui.small(t(Msg::HelpOrbit));
         });
+
+    // Paint the hover wire box over the 3D render. A bare layer painter
+    // (not a panel) is used on purpose: a CentralPanel would register an
+    // interactive area over the whole viewport and swallow clicks /
+    // scroll. Clip to the region the panels leave so it never draws over
+    // them.
+    if !highlight.is_empty() {
+        let ppp = f64::from(ctx.pixels_per_point());
+        let painter = ctx
+            .layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("voxel-highlight"),
+            ))
+            .with_clip_rect(ctx.available_rect());
+        let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 230, 0));
+        for seg in highlight {
+            painter.line_segment([to_point(seg[0], ppp), to_point(seg[1], ppp)], stroke);
+        }
+    }
+}
+
+/// Framebuffer pixel -> egui point (logical).
+#[allow(clippy::cast_possible_truncation)] // screen coords fit f32 comfortably
+fn to_point((x, y): (f64, f64), ppp: f64) -> egui::Pos2 {
+    egui::pos2((x / ppp) as f32, (y / ppp) as f32)
 }
 
 /// A small square colour button for `0x80RRGGBB`.

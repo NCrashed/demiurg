@@ -11,6 +11,7 @@
 
 use demiurg_core::VoxelModel;
 use glam::DVec3;
+use roxlap_core::Camera;
 
 /// A resolved voxel pick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +118,97 @@ pub fn pick_voxel(model: &VoxelModel, origin: DVec3, dir: DVec3) -> Option<PickH
     }
 }
 
+/// Project a world point to framebuffer pixels (physical), or `None` if
+/// it is at/behind the camera plane.
+///
+/// Exact inverse of roxlap's `setcamera` pixel ray
+/// (`dir = (x-hx)·right + (y-hy)·down + hz·forward`, with
+/// `hx = hy = w/2`, `hz = w/2` from `OpticastSettings::for_oracle_
+/// framebuffer`): for a point at relative offset `rel = P − cam.pos`,
+/// `x = hx + hz·(rel·right)/(rel·forward)` and likewise for `y`. The
+/// basis is orthonormal so the dot products read off the components.
+#[must_use]
+pub fn project_to_screen(
+    camera: &Camera,
+    width: f64,
+    height: f64,
+    world: [f64; 3],
+) -> Option<(f64, f64)> {
+    let rel = [
+        world[0] - camera.pos[0],
+        world[1] - camera.pos[1],
+        world[2] - camera.pos[2],
+    ];
+    let dot = |a: [f64; 3]| a[0] * rel[0] + a[1] * rel[1] + a[2] * rel[2];
+    let f = dot(camera.forward);
+    if f <= 1e-6 {
+        return None;
+    }
+    let (hx, hy, hz) = (width * 0.5, height * 0.5, width * 0.5);
+    Some((
+        hx + hz * dot(camera.right) / f,
+        hy + hz * dot(camera.down) / f,
+    ))
+}
+
+/// The 12 edges of voxel `cell` projected to framebuffer pixels, as
+/// `[start, end]` segments. Edges with an endpoint behind the camera are
+/// dropped. Uses the same world↔voxel mapping as [`pick_voxel`]
+/// (`world = voxel − pivot`, sprite at the origin), so the wire box lines
+/// up exactly with the rendered voxel.
+#[must_use]
+#[allow(clippy::cast_sign_loss)] // i,j,k are 0/1 so the corner index is non-negative
+pub fn voxel_screen_edges(
+    camera: &Camera,
+    width: f64,
+    height: f64,
+    pivot: [f32; 3],
+    cell: [i32; 3],
+) -> Vec<[(f64, f64); 2]> {
+    const EDGES: [(usize, usize); 12] = [
+        (0, 1),
+        (2, 3),
+        (4, 5),
+        (6, 7), // along x
+        (0, 2),
+        (1, 3),
+        (4, 6),
+        (5, 7), // along y
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7), // along z
+    ];
+
+    let pv = [
+        f64::from(pivot[0]),
+        f64::from(pivot[1]),
+        f64::from(pivot[2]),
+    ];
+    // Corner c = (i, j, k) with index i + 2j + 4k; world = (cell + c) - pivot.
+    let mut pts: [Option<(f64, f64)>; 8] = [None; 8];
+    for k in 0..2i32 {
+        for j in 0..2i32 {
+            for i in 0..2i32 {
+                let world = [
+                    f64::from(cell[0] + i) - pv[0],
+                    f64::from(cell[1] + j) - pv[1],
+                    f64::from(cell[2] + k) - pv[2],
+                ];
+                pts[(i + 2 * j + 4 * k) as usize] = project_to_screen(camera, width, height, world);
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(12);
+    for (a, b) in EDGES {
+        if let (Some(pa), Some(pb)) = (pts[a], pts[b]) {
+            out.push([pa, pb]);
+        }
+    }
+    out
+}
+
 /// Slab-method ray vs `[0, dims]` box. Returns `(t_enter, t_exit,
 /// enter_axis)` or `None` if the ray misses.
 fn ray_box(o: [f64; 3], d: [f64; 3], dims: [f64; 3]) -> Option<(f64, f64, usize)> {
@@ -196,5 +288,40 @@ mod tests {
     fn empty_model_misses() {
         let m = VoxelModel::new(8, 8, 8);
         assert!(pick_voxel(&m, DVec3::new(0.0, 0.0, -10.0), DVec3::new(0.0, 0.0, 1.0)).is_none());
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact-centre projection is an exact value
+    fn projection_centres_a_forward_point_and_drops_behind() {
+        // Camera at origin looking +y; right=+x, down=+z.
+        let cam = Camera {
+            pos: [0.0, 0.0, 0.0],
+            right: [1.0, 0.0, 0.0],
+            down: [0.0, 0.0, 1.0],
+            forward: [0.0, 1.0, 0.0],
+        };
+        let (x, y) = project_to_screen(&cam, 100.0, 80.0, [0.0, 10.0, 0.0]).unwrap();
+        assert!((x - 50.0).abs() < 1e-9, "hx centre"); // width/2
+        assert!((y - 40.0).abs() < 1e-9, "hy centre"); // height/2
+
+        let (xr, _) = project_to_screen(&cam, 100.0, 80.0, [2.0, 10.0, 0.0]).unwrap();
+        assert!(xr > 50.0, "a +x point lands right of centre");
+
+        assert!(
+            project_to_screen(&cam, 100.0, 80.0, [0.0, -10.0, 0.0]).is_none(),
+            "behind the camera projects to None"
+        );
+    }
+
+    #[test]
+    fn voxel_edges_visible_when_in_front() {
+        let cam = Camera {
+            pos: [0.0, -20.0, 0.0],
+            right: [1.0, 0.0, 0.0],
+            down: [0.0, 0.0, 1.0],
+            forward: [0.0, 1.0, 0.0],
+        };
+        let edges = voxel_screen_edges(&cam, 100.0, 100.0, [4.0, 4.0, 4.0], [4, 4, 4]);
+        assert_eq!(edges.len(), 12, "all 12 edges in front of the camera");
     }
 }
