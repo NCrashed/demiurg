@@ -30,12 +30,12 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-/// Packed `0x00RRGGBB` sky/clear colour — a calm dark slate so the
-/// model stands out (the old sky blue was glaring).
-const SKY_COLOR: u32 = 0x0028_2d35;
+/// Packed `0x00RRGGBB` sky/clear colour — a calm muted slate-blue: light
+/// enough to read as sky, not the glaring cyan it started as.
+const SKY_COLOR: u32 = 0x005a_6b7a;
 /// Sprite material colour (`R==G==B` so the cheap shading path applies);
-/// a mid grey keeps the model from rendering blown-out bright.
-const SPRITE_MATERIAL: u32 = 0x00b0_b0b0;
+/// a darker grey keeps the model from rendering blown-out bright.
+const SPRITE_MATERIAL: u32 = 0x0080_8080;
 /// Default canvas size for a new model.
 const NEW_DIMS: u32 = 32;
 
