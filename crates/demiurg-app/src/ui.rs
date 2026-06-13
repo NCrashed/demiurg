@@ -1,9 +1,13 @@
 //! The egui editor UI: a top menu bar and a left tool panel. The panels
-//! mutate the [`Editor`] in place (tool, colour, mirror, pivot) and
-//! record one-shot menu choices in [`UiActions`] for the host to run
-//! after the frame (file dialogs, undo/redo) — egui closures can't
-//! borrow the renderer, so deferred actions keep the borrow graph clean.
+//! mutate the [`Editor`] in place (tool, colour, mirror, pivot, language)
+//! and record one-shot menu choices in [`UiActions`] for the host to run
+//! after the frame (file dialogs, undo/redo) — egui closures can't borrow
+//! the renderer, so deferred actions keep the borrow graph clean.
+//!
+//! All user-facing strings come from [`demiurg_i18n`]; the language is
+//! `editor.lang`, switchable live from the Language menu.
 
+use demiurg_i18n::{Lang, Msg, tr};
 use roxlap_render::egui;
 
 use crate::{Editor, Tool};
@@ -36,90 +40,113 @@ pub struct UiActions {
 /// Draw the editor chrome for one frame.
 #[allow(clippy::too_many_lines)] // a flat panel layout reads better unsplit
 pub fn build(ctx: &egui::Context, editor: &mut Editor, actions: &mut UiActions) {
+    let lang = editor.lang;
+    let t = |m: Msg| tr(lang, m);
+
     egui::TopBottomPanel::top("menubar").show(ctx, |ui| {
         egui::menu::bar(ui, |ui| {
-            ui.menu_button("File", |ui| {
-                if ui.button("New").clicked() {
+            ui.menu_button(t(Msg::File), |ui| {
+                if ui.button(t(Msg::New)).clicked() {
                     actions.new_model = true;
                     ui.close_menu();
                 }
                 ui.separator();
-                if ui.button("Open .kv6…").clicked() {
+                if ui.button(t(Msg::OpenKv6)).clicked() {
                     actions.open_kv6 = true;
                     ui.close_menu();
                 }
-                if ui.button("Save .kv6…").clicked() {
+                if ui.button(t(Msg::SaveKv6)).clicked() {
                     actions.save_kv6 = true;
                     ui.close_menu();
                 }
                 ui.separator();
-                if ui.button("Open project…").clicked() {
+                if ui.button(t(Msg::OpenProject)).clicked() {
                     actions.open_project = true;
                     ui.close_menu();
                 }
-                if ui.button("Save project…").clicked() {
+                if ui.button(t(Msg::SaveProject)).clicked() {
                     actions.save_project = true;
                     ui.close_menu();
                 }
             });
-            ui.menu_button("Edit", |ui| {
+            ui.menu_button(t(Msg::Edit), |ui| {
                 if ui
-                    .add_enabled(editor.document.can_undo(), egui::Button::new("Undo"))
+                    .add_enabled(editor.document.can_undo(), egui::Button::new(t(Msg::Undo)))
                     .clicked()
                 {
                     actions.undo = true;
                     ui.close_menu();
                 }
                 if ui
-                    .add_enabled(editor.document.can_redo(), egui::Button::new("Redo"))
+                    .add_enabled(editor.document.can_redo(), egui::Button::new(t(Msg::Redo)))
                     .clicked()
                 {
                     actions.redo = true;
                     ui.close_menu();
                 }
             });
+            ui.menu_button(t(Msg::View), |ui| {
+                ui.checkbox(&mut editor.lighting, t(Msg::Lighting));
+            });
+            ui.menu_button(t(Msg::Language), |ui| {
+                for l in Lang::all() {
+                    ui.selectable_value(&mut editor.lang, l, l.native_name());
+                }
+            });
         });
     });
 
     egui::SidePanel::left("tools")
-        .default_width(190.0)
+        .default_width(200.0)
         .show(ctx, |ui| {
-            ui.heading("Tools");
-            for (tool, label) in [
-                (Tool::Place, "Place"),
-                (Tool::Erase, "Erase"),
-                (Tool::Paint, "Paint"),
-                (Tool::Eyedropper, "Eyedropper"),
-                (Tool::Box, "Box (2 clicks)"),
-                (Tool::Sphere, "Sphere"),
-                (Tool::Fill, "Flood fill"),
+            ui.heading(t(Msg::Tools));
+            for (tool, msg) in [
+                (Tool::Place, Msg::Place),
+                (Tool::Erase, Msg::Erase),
+                (Tool::Paint, Msg::Paint),
+                (Tool::Eyedropper, Msg::Eyedropper),
+                (Tool::Box, Msg::BoxTool),
+                (Tool::Sphere, Msg::Sphere),
+                (Tool::Fill, Msg::FloodFill),
             ] {
-                ui.selectable_value(&mut editor.tool, tool, label);
+                ui.selectable_value(&mut editor.tool, tool, t(msg));
             }
             if editor.tool == Tool::Sphere {
-                ui.add(egui::Slider::new(&mut editor.radius, 0..=8).text("radius"));
+                ui.add(egui::Slider::new(&mut editor.radius, 0..=8).text(t(Msg::Radius)));
             }
 
             ui.separator();
-            ui.label("Colour");
+            ui.label(t(Msg::Colour));
             let mut rgb = color_to_rgb(editor.color);
             if ui.color_edit_button_srgb(&mut rgb).changed() {
                 editor.color = rgb_to_color(rgb);
             }
             ui.horizontal_wrapped(|ui| {
                 for &preset in &PRESETS {
-                    let p = color_to_rgb(preset);
-                    let swatch = egui::Button::new("")
-                        .min_size(egui::vec2(18.0, 18.0))
-                        .fill(egui::Color32::from_rgb(p[0], p[1], p[2]));
-                    if ui.add(swatch).clicked() {
+                    if swatch(ui, preset).clicked() {
                         editor.color = preset;
                     }
                 }
             });
 
+            // Colours already used in the model, so artists can re-pick an
+            // exact existing shade. Cloned out first to avoid borrowing
+            // `editor` immutably while the closure writes `editor.color`.
+            if !editor.model_palette.is_empty() {
+                ui.separator();
+                ui.label(t(Msg::ModelColours));
+                let used = editor.model_palette.clone();
+                ui.horizontal_wrapped(|ui| {
+                    for c in used {
+                        if swatch(ui, c).clicked() {
+                            editor.color = c;
+                        }
+                    }
+                });
+            }
+
             ui.separator();
-            ui.label("Mirror");
+            ui.label(t(Msg::Mirror));
             ui.horizontal(|ui| {
                 ui.checkbox(&mut editor.document.mirror[0], "X");
                 ui.checkbox(&mut editor.document.mirror[1], "Y");
@@ -127,7 +154,7 @@ pub fn build(ctx: &egui::Context, editor: &mut Editor, actions: &mut UiActions) 
             });
 
             ui.separator();
-            ui.label("Pivot");
+            ui.label(t(Msg::Pivot));
             let mut pivot = editor.document.pivot();
             let mut changed = false;
             ui.horizontal(|ui| {
@@ -148,16 +175,27 @@ pub fn build(ctx: &egui::Context, editor: &mut Editor, actions: &mut UiActions) 
 
             ui.separator();
             let (dx, dy, dz) = editor.document.dims();
-            ui.label(format!("dims  {dx} × {dy} × {dz}"));
+            ui.label(format!("{}  {dx} × {dy} × {dz}", t(Msg::Size)));
             ui.label(format!(
-                "voxels  {}",
+                "{}  {}",
+                t(Msg::Voxels),
                 editor.document.model().occupied_count()
             ));
 
             ui.separator();
-            ui.small("LMB: apply tool");
-            ui.small("RMB drag: orbit · wheel: zoom");
+            ui.small(t(Msg::HelpApply));
+            ui.small(t(Msg::HelpOrbit));
         });
+}
+
+/// A small square colour button for `0x80RRGGBB`.
+fn swatch(ui: &mut egui::Ui, color: u32) -> egui::Response {
+    let [r, g, b] = color_to_rgb(color);
+    ui.add(
+        egui::Button::new("")
+            .min_size(egui::vec2(18.0, 18.0))
+            .fill(egui::Color32::from_rgb(r, g, b)),
+    )
 }
 
 /// `0x80RRGGBB` -> `[r, g, b]`.

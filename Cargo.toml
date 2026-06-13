@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/demiurg-core",
+    "crates/demiurg-i18n",
     "crates/demiurg-view",
     "crates/demiurg-app",
 ]
@@ -21,24 +22,24 @@ readme = "README.md"
 [workspace.dependencies]
 # Internal crates, by path during local dev.
 demiurg-core = { path = "crates/demiurg-core", version = "0.0.1" }
+demiurg-i18n = { path = "crates/demiurg-i18n", version = "0.0.1" }
 demiurg-view = { path = "crates/demiurg-view", version = "0.0.1" }
 
-# demiurg depends on roxlap ONLY (see DESIGN.md §1). All roxlap crates
-# are path deps to the SIBLING checkout (not crates.io): the whole
-# point is "rendered by the in-dev engine", and mixing a local
-# roxlap-formats with a crates.io roxlap-render would link two
-# incompatible `Kv6`/`Sprite` types. `version` is what a future
-# `cargo publish` would record.
+# demiurg depends on roxlap ONLY (see DESIGN.md §1). Pinned to the
+# PUBLISHED crates.io release (not the local ../roxlap checkout, which
+# is mid-development on 1.0.0 and not ready). All four come from the
+# same source so `Kv6`/`Sprite` types stay compatible; bump them
+# together when a new roxlap is published. (mirrors monada's stance.)
 #
 # roxlap-formats: kv6 read/write + surface extraction (`Kv6::from_fn`).
 # roxlap-core:    Camera, OpticastSettings, SpriteLighting.
 # roxlap-scene:   Scene graph the renderer composites.
 # roxlap-render:  unified CPU/GPU facade (SceneRenderer, SpriteSet).
 # roxlap-voxvideo lands at M5.
-roxlap-formats = { path = "../roxlap/crates/roxlap-formats", version = "0.8.0" }
-roxlap-core = { path = "../roxlap/crates/roxlap-core", version = "0.8.0" }
-roxlap-scene = { path = "../roxlap/crates/roxlap-scene", version = "0.8.0" }
-roxlap-render = { path = "../roxlap/crates/roxlap-render", version = "0.8.0" }
+roxlap-formats = "0.8.0"
+roxlap-core = "0.8.0"
+roxlap-scene = "0.8.0"
+roxlap-render = "0.8.0"
 
 # Render-side world math (f64 orbit camera). Mirrors roxlap's pin so
 # the workspaces share one glam.

@@ -605,6 +605,7 @@ name = "demiurg-app"
 version = "0.0.1"
 dependencies = [
  "demiurg-core",
+ "demiurg-i18n",
  "demiurg-view",
  "egui-winit",
  "rfd",
@@ -621,6 +622,10 @@ dependencies = [
  "roxlap-formats",
  "serde",
 ]
+
+[[package]]
+name = "demiurg-i18n"
+version = "0.0.1"
 
 [[package]]
 name = "demiurg-view"
@@ -2255,6 +2260,8 @@ dependencies = [
 [[package]]
 name = "roxlap-cavegen"
 version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96cf2de104e9177026ce8a583ec0a02ce31381f9786004306e8920eba726c090"
 dependencies = [
  "roxlap-formats",
 ]
@@ -2262,6 +2269,8 @@ dependencies = [
 [[package]]
 name = "roxlap-core"
 version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a6230cff578cbb93faa16c6ba2fe547c95a0830559db6a0082e6c71ff484cd4"
 dependencies = [
  "rayon",
  "roxlap-formats",
@@ -2270,10 +2279,14 @@ dependencies = [
 [[package]]
 name = "roxlap-formats"
 version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "deb5fb059da162180bafbac88d6d8d80bfd70f02d84b06a5f7593766830dc4e5"
 
 [[package]]
 name = "roxlap-gpu"
 version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9dfb63323f8fa5f704037265b46ce3db7cea52ca300dec7a9e887634ef5d0282"
 dependencies = [
  "bytemuck",
  "egui",
@@ -2282,15 +2295,15 @@ dependencies = [
  "pollster 0.3.0",
  "raw-window-handle",
  "roxlap-formats",
- "web-sys",
  "wgpu",
 ]
 
 [[package]]
 name = "roxlap-render"
 version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43eb1300b83cdb4598d3e848130cfd7d30a2f22adba7a57b08a5f3a587a499b0"
 dependencies = [
- "bytemuck",
  "egui",
  "glam",
  "raw-window-handle",
@@ -2300,13 +2313,13 @@ dependencies = [
  "roxlap-gpu",
  "roxlap-scene",
  "softbuffer",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]
 name = "roxlap-scene"
 version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96e109191f52d33485c58d1ceb9b22769d6aa8f9157609ec2383df1ec484d5f6"
 dependencies = [
  "crossbeam-channel",
  "glam",

@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 demiurg-core.workspace = true
+demiurg-i18n.workspace = true
 demiurg-view.workspace = true
 # `hud` enables roxlap's egui overlay (SceneRenderer::paint_egui) and
 # re-exports `egui` so we tessellate with the exact version it paints.

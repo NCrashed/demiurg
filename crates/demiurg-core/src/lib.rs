@@ -180,6 +180,19 @@ impl VoxelModel {
         &self.voxels
     }
 
+    /// The distinct non-empty voxel colours in the model, ascending.
+    /// Drives the editor's "colours used in this model" palette.
+    #[must_use]
+    pub fn used_colors(&self) -> Vec<u32> {
+        let mut set: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        for &c in &self.voxels {
+            if c != 0 {
+                set.insert(c);
+            }
+        }
+        set.into_iter().collect()
+    }
+
     /// Reconstruct a model from raw parts (e.g. a loaded `.demiurg`
     /// project). Returns `None` if `voxels.len()` does not equal
     /// `xsiz·ysiz·zsiz`.
@@ -269,6 +282,16 @@ mod tests {
         let back = VoxelModel::from_kv6_bytes(&m.to_kv6_bytes()).unwrap();
         assert_eq!(back.occupied_count(), 26);
         assert_eq!(back.get(1, 1, 1), 0, "enclosed centre voxel is dropped");
+    }
+
+    #[test]
+    fn used_colors_are_distinct_and_sorted() {
+        let mut m = VoxelModel::new(4, 4, 4);
+        m.set(0, 0, 0, 0x8000_00ff);
+        m.set(1, 0, 0, 0x80ff_0000);
+        m.set(2, 0, 0, 0x80ff_0000); // duplicate colour
+        assert_eq!(m.used_colors(), vec![0x8000_00ff, 0x80ff_0000]);
+        assert!(VoxelModel::new(2, 2, 2).used_colors().is_empty());
     }
 
     #[test]

@@ -34,6 +34,10 @@ pub struct Document {
     model: VoxelModel,
     undo: Vec<Edit>,
     redo: Vec<Edit>,
+    /// An open stroke (drag-paint): commits accumulate here, keeping each
+    /// voxel's *original* pre-stroke value, until [`end_stroke`] folds
+    /// them into a single undo step.
+    stroke: Option<BTreeMap<[u32; 3], (u32, u32)>>,
     /// Mirror planes about the model centre (x, y, z). An edit is
     /// duplicated across each enabled plane within the same undo step.
     pub mirror: [bool; 3],
@@ -47,8 +51,35 @@ impl Document {
             model,
             undo: Vec::new(),
             redo: Vec::new(),
+            stroke: None,
             mirror: [false; 3],
         }
+    }
+
+    /// Begin a drag-paint stroke: subsequent edits coalesce into one undo
+    /// step until [`end_stroke`](Self::end_stroke). No-op if already open.
+    pub fn begin_stroke(&mut self) {
+        if self.stroke.is_none() {
+            self.stroke = Some(BTreeMap::new());
+            self.redo.clear();
+        }
+    }
+
+    /// End the current stroke, pushing it as a single undo step. Returns
+    /// `true` if the stroke changed anything.
+    pub fn end_stroke(&mut self) -> bool {
+        let Some(map) = self.stroke.take() else {
+            return false;
+        };
+        if map.is_empty() {
+            return false;
+        }
+        let deltas = map
+            .into_iter()
+            .map(|(pos, (old, new))| Delta { pos, old, new })
+            .collect();
+        self.undo.push(Edit { deltas });
+        true
     }
 
     /// The current model.
@@ -163,6 +194,23 @@ impl Document {
             for mirrored in mirror_positions(pos, dims, self.mirror) {
                 map.insert(mirrored, col);
             }
+        }
+
+        // Inside a stroke, accumulate into the open map (keeping the
+        // first-seen `old` per voxel) instead of pushing an undo step.
+        if let Some(stroke) = self.stroke.as_mut() {
+            let mut any = false;
+            for (pos, new) in map {
+                let old = self.model.get(pos[0], pos[1], pos[2]);
+                if old != new && self.model.set(pos[0], pos[1], pos[2], new) {
+                    any = true;
+                    stroke
+                        .entry(pos)
+                        .and_modify(|e| e.1 = new)
+                        .or_insert((old, new));
+                }
+            }
+            return any;
         }
 
         let mut deltas = Vec::new();
@@ -297,6 +345,7 @@ mod tests {
 
     const RED: u32 = 0x80ff_0000;
     const GREEN: u32 = 0x8000_ff00;
+    const BLUE: u32 = 0x8000_00ff;
 
     fn doc(n: u32) -> Document {
         Document::new(VoxelModel::new(n, n, n))
@@ -373,6 +422,48 @@ mod tests {
         assert_eq!(d.model().get(0, 0, 0), GREEN);
         assert_eq!(d.model().get(1, 0, 0), GREEN);
         assert_eq!(d.model().get(3, 3, 3), RED, "disconnected voxel untouched");
+    }
+
+    #[test]
+    fn stroke_coalesces_into_one_undo_step() {
+        let mut d = doc(4);
+        d.begin_stroke();
+        d.set_voxel([0, 0, 0], RED);
+        d.set_voxel([1, 0, 0], RED);
+        d.set_voxel([2, 0, 0], RED);
+        assert!(d.end_stroke());
+        assert_eq!(d.model().occupied_count(), 3);
+
+        assert!(d.undo());
+        assert_eq!(d.model().occupied_count(), 0, "one undo reverts the stroke");
+        assert!(!d.can_undo());
+    }
+
+    #[test]
+    fn stroke_keeps_pre_stroke_value_when_a_voxel_is_repainted() {
+        let mut d = doc(4);
+        d.set_voxel([0, 0, 0], RED); // committed before the stroke
+        d.begin_stroke();
+        d.paint_voxel([0, 0, 0], GREEN);
+        d.paint_voxel([0, 0, 0], BLUE);
+        d.end_stroke();
+        assert_eq!(d.model().get(0, 0, 0), BLUE);
+
+        d.undo();
+        assert_eq!(
+            d.model().get(0, 0, 0),
+            RED,
+            "undo restores the pre-stroke colour"
+        );
+    }
+
+    #[test]
+    fn empty_stroke_records_nothing() {
+        let mut d = doc(4);
+        d.begin_stroke();
+        assert!(!d.set_voxel([0, 0, 0], 0)); // clearing empty: no change
+        assert!(!d.end_stroke());
+        assert!(!d.can_undo());
     }
 
     #[test]

@@ -5,9 +5,11 @@
 //! Usage:
 //!   demiurg [path.kv6 | path.demiurg]   # no path -> a blank canvas
 //!
-//! Controls: left mouse applies the active tool at the voxel under the
-//! cursor; right-mouse drag orbits; mouse wheel and `W`/`S` zoom; arrow
-//! keys orbit; `Esc` quits. `ROXLAP_GPU=1` tries the wgpu backend.
+//! Controls: left mouse applies the active tool (hold to drag-paint);
+//! right-mouse drag orbits; wheel and `W`/`S` zoom; arrow keys orbit.
+//! Hotkeys: `1`-`7` pick a tool, `Ctrl+Z` undo, `Ctrl+Y` / `Ctrl+Shift+Z`
+//! redo, `Esc` quits. `DEMIURG_LANG=ru` starts in Russian.
+//! `ROXLAP_GPU=1` tries the wgpu backend.
 
 mod ui;
 
@@ -15,6 +17,7 @@ use std::process::exit;
 use std::sync::Arc;
 
 use demiurg_core::{Document, VoxelModel, project};
+use demiurg_i18n::Lang;
 use demiurg_view::{ModelView, OrbitCamera, PickHit, pick_voxel};
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::sprite::SpriteLighting;
@@ -24,11 +27,15 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-/// Packed `0x00RRGGBB` sky/clear colour.
-const SKY_COLOR: u32 = 0x0099_b3d9;
+/// Packed `0x00RRGGBB` sky/clear colour — a calm dark slate so the
+/// model stands out (the old sky blue was glaring).
+const SKY_COLOR: u32 = 0x0028_2d35;
+/// Sprite material colour (`R==G==B` so the cheap shading path applies);
+/// a mid grey keeps the model from rendering blown-out bright.
+const SPRITE_MATERIAL: u32 = 0x00b0_b0b0;
 /// Default canvas size for a new model.
 const NEW_DIMS: u32 = 32;
 
@@ -44,6 +51,18 @@ enum Tool {
     Fill,
 }
 
+impl Tool {
+    /// Tools that drag-paint (a held-drag applies them along the path,
+    /// coalesced into one undo step). Only recolouring qualifies: it
+    /// leaves geometry untouched, so a drag can't "tunnel" along the
+    /// click ray the way place/erase/sphere would (each removed or added
+    /// front voxel re-exposes the one behind it, cascading through the
+    /// model). Those stay click-once.
+    fn is_continuous(self) -> bool {
+        matches!(self, Tool::Paint)
+    }
+}
+
 /// The mutable editor document + tool state the UI drives.
 struct Editor {
     document: Document,
@@ -54,20 +73,40 @@ struct Editor {
     radius: i32,
     /// First corner of an in-progress box (set on the first click).
     box_anchor: Option<[i32; 3]>,
+    /// Distinct colours used in the model, for the "colours in model"
+    /// palette. Refreshed whenever the model changes.
+    model_palette: Vec<u32>,
+    /// UI language.
+    lang: Lang,
+    /// Directional sprite lighting (lightmode 1) on; off renders flat.
+    lighting: bool,
     /// The viewport sprite needs a rebuild from the model.
     dirty: bool,
 }
 
 impl Editor {
     fn new(model: VoxelModel) -> Self {
+        let lang = std::env::var("DEMIURG_LANG")
+            .ok()
+            .and_then(|c| Lang::from_code(&c))
+            .unwrap_or_default();
+        let model_palette = model.used_colors();
         Self {
             document: Document::new(model),
             tool: Tool::Place,
             color: 0x80c8_c8c8,
             radius: 2,
             box_anchor: None,
+            model_palette,
+            lang,
+            lighting: true,
             dirty: false,
         }
+    }
+
+    /// Recompute the model-colour palette (after any edit / load).
+    fn refresh_palette(&mut self) {
+        self.model_palette = self.document.model().used_colors();
     }
 
     /// Apply the active tool at a resolved pick.
@@ -136,11 +175,13 @@ fn main() {
         view,
         camera,
         editor: Editor::new(model),
-        lighting: SpriteLighting::default_oracle(),
         egui_ctx: egui::Context::default(),
         egui_state: None,
         keys: Keys::default(),
+        modifiers: ModifiersState::empty(),
         orbiting: false,
+        painting: false,
+        last_paint: None,
         cursor: (0.0, 0.0),
         last_drag: None,
     };
@@ -226,12 +267,16 @@ struct App {
     view: ModelView,
     camera: OrbitCamera,
     editor: Editor,
-    lighting: SpriteLighting<'static>,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     keys: Keys,
+    modifiers: ModifiersState,
     /// Right-mouse drag orbits the camera (left mouse edits).
     orbiting: bool,
+    /// Left mouse held with a continuous tool: an open drag-paint stroke.
+    painting: bool,
+    /// Last cell painted this stroke, to skip redundant re-applies.
+    last_paint: Option<[i32; 3]>,
     cursor: (f64, f64),
     last_drag: Option<(f64, f64)>,
 }
@@ -248,18 +293,70 @@ impl App {
         }
     }
 
-    /// Pick the voxel under the cursor and apply the active tool.
-    fn on_click(&mut self) {
+    /// The voxel under the cursor, if any.
+    fn pointer_pick(&self) -> Option<PickHit> {
         let cam = self.camera.to_roxlap();
         let ray = self
             .renderer
-            .as_ref()
-            .and_then(|r| r.view_ray(&cam, self.cursor.0, self.cursor.1));
-        let Some(ray) = ray else {
+            .as_ref()?
+            .view_ray(&cam, self.cursor.0, self.cursor.1)?;
+        pick_voxel(self.editor.document.model(), ray.origin, ray.dir)
+    }
+
+    /// Left-button press: start a drag-paint stroke (continuous tools) or
+    /// apply a click-once tool.
+    fn begin_paint(&mut self) {
+        if self.editor.tool.is_continuous() {
+            self.editor.document.begin_stroke();
+            self.painting = true;
+            self.last_paint = None;
+            self.paint_step();
+        } else if let Some(hit) = self.pointer_pick() {
+            self.editor.apply(hit);
+        }
+    }
+
+    /// Apply the active tool at the current cursor, skipping the cell we
+    /// last painted this stroke.
+    #[allow(clippy::cast_possible_wrap)] // voxel coords are far below i32::MAX
+    fn paint_step(&mut self) {
+        let Some(hit) = self.pointer_pick() else {
             return;
         };
-        if let Some(hit) = pick_voxel(self.editor.document.model(), ray.origin, ray.dir) {
-            self.editor.apply(hit);
+        let cell = if matches!(self.editor.tool, Tool::Place) {
+            hit.place
+        } else {
+            [
+                hit.voxel[0] as i32,
+                hit.voxel[1] as i32,
+                hit.voxel[2] as i32,
+            ]
+        };
+        if self.last_paint == Some(cell) {
+            return;
+        }
+        self.last_paint = Some(cell);
+        self.editor.apply(hit);
+    }
+
+    /// Left-button release: close the drag-paint stroke (one undo step).
+    fn end_paint(&mut self) {
+        if self.painting {
+            self.editor.document.end_stroke();
+            self.painting = false;
+            self.last_paint = None;
+        }
+    }
+
+    fn do_undo(&mut self) {
+        if self.editor.document.undo() {
+            self.editor.dirty = true;
+        }
+    }
+
+    fn do_redo(&mut self) {
+        if self.editor.document.redo() {
+            self.editor.dirty = true;
         }
     }
 
@@ -294,11 +391,11 @@ impl App {
     /// Run the deferred menu actions (file dialogs, undo/redo).
     #[allow(clippy::too_many_lines)] // a flat dispatch over the menu items
     fn apply_actions(&mut self, a: &UiActions) {
-        if a.undo && self.editor.document.undo() {
-            self.editor.dirty = true;
+        if a.undo {
+            self.do_undo();
         }
-        if a.redo && self.editor.document.redo() {
-            self.editor.dirty = true;
+        if a.redo {
+            self.do_redo();
         }
         if a.new_model {
             self.load_model(new_model());
@@ -349,10 +446,12 @@ impl App {
         }
     }
 
-    /// Replace the document model, rebuild the sprite, and reframe.
+    /// Replace the document model, rebuild the sprite, refresh the
+    /// palette, and reframe.
     fn load_model(&mut self, model: VoxelModel) {
         self.editor.document.replace_model(model);
         self.view.set_model(self.editor.document.model());
+        self.editor.refresh_palette();
         self.camera = self.view.framing_camera();
         self.editor.dirty = false;
     }
@@ -372,11 +471,20 @@ impl App {
         self.apply_actions(&actions);
         if self.editor.dirty {
             self.view.set_model(self.editor.document.model());
+            self.editor.refresh_palette();
             self.editor.dirty = false;
         }
 
         let camera = self.camera.to_roxlap();
         let settings = OpticastSettings::for_oracle_framebuffer(size.width, size.height);
+        // Lit (lightmode 1) by default for directional shading; the View
+        // menu can switch it to flat (lightmode 0). `R==G==B` material
+        // takes the cheap shading path either way.
+        let sprite_lighting = SpriteLighting {
+            kv6col: SPRITE_MATERIAL,
+            lightmode: u32::from(self.editor.lighting),
+            lights: &[],
+        };
         let frame = FrameParams {
             settings: &settings,
             sky_color: SKY_COLOR,
@@ -387,7 +495,7 @@ impl App {
             gpu_mip_scan_dist: 64.0,
             gpu_max_outer_steps: 64,
             gpu_fov_y_rad: 1.2,
-            sprite_lighting: Some(&self.lighting),
+            sprite_lighting: Some(&sprite_lighting),
             side_shades: [0; 6],
         };
 
@@ -399,6 +507,32 @@ impl App {
         renderer.paint_egui(&jobs, &textures, ppp);
 
         window.request_redraw();
+    }
+
+    /// Dispatch a key press/release (camera holds, tool hotkeys, undo).
+    fn on_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, pressed: bool) {
+        let ctrl = self.modifiers.control_key();
+        let shift = self.modifiers.shift_key();
+        match code {
+            KeyCode::Digit1 if pressed => self.editor.tool = Tool::Place,
+            KeyCode::Digit2 if pressed => self.editor.tool = Tool::Erase,
+            KeyCode::Digit3 if pressed => self.editor.tool = Tool::Paint,
+            KeyCode::Digit4 if pressed => self.editor.tool = Tool::Eyedropper,
+            KeyCode::Digit5 if pressed => self.editor.tool = Tool::Box,
+            KeyCode::Digit6 if pressed => self.editor.tool = Tool::Sphere,
+            KeyCode::Digit7 if pressed => self.editor.tool = Tool::Fill,
+            KeyCode::KeyZ if pressed && ctrl && !shift => self.do_undo(),
+            KeyCode::KeyZ if pressed && ctrl && shift => self.do_redo(),
+            KeyCode::KeyY if pressed && ctrl => self.do_redo(),
+            KeyCode::ArrowLeft => self.keys.left = pressed,
+            KeyCode::ArrowRight => self.keys.right = pressed,
+            KeyCode::ArrowUp => self.keys.up = pressed,
+            KeyCode::ArrowDown => self.keys.down = pressed,
+            KeyCode::KeyW => self.keys.zoom_in = pressed,
+            KeyCode::KeyS => self.keys.zoom_out = pressed,
+            KeyCode::Escape if pressed => event_loop.exit(),
+            _ => {}
+        }
     }
 }
 
@@ -428,6 +562,10 @@ impl ApplicationHandler for App {
         let want_gpu = std::env::var_os("ROXLAP_GPU").is_some_and(|v| v != "0" && !v.is_empty());
         let opts = RenderOptions {
             want_gpu,
+            // The empty (sprite-only) scene's background comes from the
+            // construction-time clear colour, so set it here too — not
+            // just FrameParams.sky_color (which feeds sky-miss / GPU).
+            clear_sky: SKY_COLOR,
             ..RenderOptions::default()
         };
         let size = window.inner_size();
@@ -466,6 +604,7 @@ impl ApplicationHandler for App {
                     renderer.resize(size.width, size.height);
                 }
             }
+            WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -474,24 +613,17 @@ impl ApplicationHandler for App {
                         ..
                     },
                 ..
-            } if !consumed => {
-                let pressed = state == ElementState::Pressed;
-                match code {
-                    KeyCode::ArrowLeft => self.keys.left = pressed,
-                    KeyCode::ArrowRight => self.keys.right = pressed,
-                    KeyCode::ArrowUp => self.keys.up = pressed,
-                    KeyCode::ArrowDown => self.keys.down = pressed,
-                    KeyCode::KeyW => self.keys.zoom_in = pressed,
-                    KeyCode::KeyS => self.keys.zoom_out = pressed,
-                    KeyCode::Escape if pressed => event_loop.exit(),
-                    _ => {}
-                }
-            }
+            } if !consumed => self.on_key(event_loop, code, state == ElementState::Pressed),
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if !consumed => self.on_click(),
+            } if !consumed => self.begin_paint(),
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => self.end_paint(),
             WindowEvent::MouseInput {
                 state,
                 button: MouseButton::Right,
@@ -504,6 +636,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
+                if self.painting {
+                    self.paint_step();
+                }
                 if self.orbiting {
                     if let Some((lx, ly)) = self.last_drag {
                         self.camera
