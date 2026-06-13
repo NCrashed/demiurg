@@ -36,6 +36,9 @@ pub struct UiActions {
     pub save_project: bool,
     pub undo: bool,
     pub redo: bool,
+    /// Quit-confirmation modal: the user chose to quit / to cancel.
+    pub quit_confirm: bool,
+    pub quit_cancel: bool,
 }
 
 /// Draw the editor chrome for one frame. `highlight` is the wire box of
@@ -46,6 +49,7 @@ pub fn build(
     editor: &mut Editor,
     actions: &mut UiActions,
     highlight: &[[(f64, f64); 2]],
+    show_quit_confirm: bool,
 ) {
     let lang = editor.lang;
     let t = |m: Msg| tr(lang, m);
@@ -129,7 +133,9 @@ pub fn build(
         .default_width(200.0)
         .show(ctx, |ui| {
             ui.heading(t(Msg::Tools));
-            for (tool, msg) in [
+            // The 1-7 digits double as keyboard shortcuts (see on_key);
+            // show them on the buttons so they're discoverable.
+            for (i, (tool, msg)) in [
                 (Tool::Place, Msg::Place),
                 (Tool::Erase, Msg::Erase),
                 (Tool::Paint, Msg::Paint),
@@ -137,8 +143,11 @@ pub fn build(
                 (Tool::Box, Msg::BoxTool),
                 (Tool::Sphere, Msg::Sphere),
                 (Tool::Fill, Msg::FloodFill),
-            ] {
-                ui.selectable_value(&mut editor.tool, tool, t(msg));
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                ui.selectable_value(&mut editor.tool, tool, format!("{}.  {}", i + 1, t(msg)));
             }
             if editor.tool == Tool::Sphere {
                 ui.add(egui::Slider::new(&mut editor.radius, 0..=8).text(t(Msg::Radius)));
@@ -233,6 +242,27 @@ pub fn build(
         for seg in highlight {
             painter.line_segment([to_point(seg[0], ppp), to_point(seg[1], ppp)], stroke);
         }
+    }
+
+    // In-app quit confirmation (replaces a native message box, which the
+    // XDG portal doesn't reliably show here).
+    if show_quit_confirm {
+        egui::Window::new(t(Msg::ConfirmQuitTitle))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(t(Msg::ConfirmQuitBody));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(t(Msg::QuitAnyway)).clicked() {
+                        actions.quit_confirm = true;
+                    }
+                    if ui.button(t(Msg::Cancel)).clicked() {
+                        actions.quit_cancel = true;
+                    }
+                });
+            });
     }
 }
 

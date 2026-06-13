@@ -17,7 +17,7 @@ use std::process::exit;
 use std::sync::Arc;
 
 use demiurg_core::{Document, VoxelModel, project};
-use demiurg_i18n::Lang;
+use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{ModelView, OrbitCamera, PickHit, RenderMode, pick_voxel, voxel_screen_edges};
 use roxlap_core::Camera;
 use roxlap_core::opticast::OpticastSettings;
@@ -179,6 +179,9 @@ fn main() {
 
     let view = ModelView::new(&model, DEFAULT_RENDER_MODE);
     let camera = view.framing_camera();
+    let doc_name = path
+        .as_deref()
+        .and_then(|p| stem_of(std::path::Path::new(p)));
     let mut app = App {
         window: None,
         renderer: None,
@@ -194,6 +197,9 @@ fn main() {
         last_paint: None,
         cursor: (0.0, 0.0),
         last_drag: None,
+        doc_name,
+        last_title: None,
+        confirm_quit: false,
     };
 
     let event_loop = EventLoop::new().expect("winit: create event loop");
@@ -289,6 +295,12 @@ struct App {
     last_paint: Option<[i32; 3]>,
     cursor: (f64, f64),
     last_drag: Option<(f64, f64)>,
+    /// File stem of the open document (for the title), or `None` if new.
+    doc_name: Option<String>,
+    /// Last window title set, to avoid redundant `set_title` calls.
+    last_title: Option<String>,
+    /// The unsaved-changes quit modal is showing.
+    confirm_quit: bool,
 }
 
 impl App {
@@ -339,6 +351,9 @@ impl App {
     /// Left-button press: start a drag-paint stroke (continuous tools) or
     /// apply a click-once tool.
     fn begin_paint(&mut self) {
+        if self.confirm_quit {
+            return; // don't edit behind the quit modal
+        }
         if self.editor.tool.is_continuous() {
             self.editor.document.begin_stroke();
             self.painting = true;
@@ -381,6 +396,38 @@ impl App {
         }
     }
 
+    /// Refresh the window title: `demiurg — <name>`, with a trailing `*`
+    /// while the document has unsaved changes. Only calls `set_title`
+    /// when the text actually changes.
+    fn update_title(&mut self) {
+        let name = self
+            .doc_name
+            .clone()
+            .unwrap_or_else(|| tr(self.editor.lang, Msg::Untitled).to_string());
+        let star = if self.editor.document.is_modified() {
+            " *"
+        } else {
+            ""
+        };
+        let title = format!("demiurg — {name}{star}");
+        if self.last_title.as_deref() != Some(title.as_str()) {
+            if let Some(window) = &self.window {
+                window.set_title(&title);
+            }
+            self.last_title = Some(title);
+        }
+    }
+
+    /// Quit, or — if there are unsaved changes — raise the in-app
+    /// confirmation modal (shown by the UI next frame).
+    fn request_exit(&mut self, event_loop: &ActiveEventLoop) {
+        if self.editor.document.is_modified() {
+            self.confirm_quit = true;
+        } else {
+            event_loop.exit();
+        }
+    }
+
     fn do_undo(&mut self) {
         if self.editor.document.undo() {
             self.editor.dirty = true;
@@ -411,9 +458,12 @@ impl App {
             .as_mut()
             .expect("egui state")
             .take_egui_input(window);
+        let show_quit = self.confirm_quit;
         let editor = &mut self.editor;
         let mut actions = UiActions::default();
-        let out = ctx.run(raw, |c| ui::build(c, editor, &mut actions, highlight));
+        let out = ctx.run(raw, |c| {
+            ui::build(c, editor, &mut actions, highlight, show_quit)
+        });
         self.egui_state
             .as_mut()
             .expect("egui state")
@@ -433,6 +483,7 @@ impl App {
         }
         if a.new_model {
             self.load_model(new_model());
+            self.doc_name = None;
         }
         if a.open_kv6 {
             if let Some(path) = rfd::FileDialog::new()
@@ -440,7 +491,10 @@ impl App {
                 .pick_file()
             {
                 match std::fs::read(&path).map(|b| VoxelModel::from_kv6_bytes(&b)) {
-                    Ok(Ok(m)) => self.load_model(m),
+                    Ok(Ok(m)) => {
+                        self.load_model(m);
+                        self.doc_name = stem_of(&path);
+                    }
                     Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
                     Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
                 }
@@ -452,7 +506,10 @@ impl App {
                 .pick_file()
             {
                 match std::fs::read(&path).map(|b| project::from_bytes(&b)) {
-                    Ok(Ok(m)) => self.load_model(m),
+                    Ok(Ok(m)) => {
+                        self.load_model(m);
+                        self.doc_name = stem_of(&path);
+                    }
                     Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
                     Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
                 }
@@ -465,7 +522,7 @@ impl App {
                 .save_file()
             {
                 let bytes = self.editor.document.model().to_kv6_bytes();
-                report_write(&path, std::fs::write(&path, bytes));
+                self.on_saved(&path, std::fs::write(&path, bytes));
             }
         }
         if a.save_project {
@@ -475,8 +532,21 @@ impl App {
                 .save_file()
             {
                 let bytes = project::to_bytes(self.editor.document.model());
-                report_write(&path, std::fs::write(&path, bytes));
+                self.on_saved(&path, std::fs::write(&path, bytes));
             }
+        }
+    }
+
+    /// React to a save attempt: on success, clear the modified flag and
+    /// adopt the file name; on failure, just log.
+    fn on_saved(&mut self, path: &std::path::Path, result: std::io::Result<()>) {
+        match result {
+            Ok(()) => {
+                eprintln!("demiurg: saved {}", path.display());
+                self.editor.document.mark_saved();
+                self.doc_name = stem_of(path);
+            }
+            Err(e) => eprintln!("demiurg: write {} failed: {e}", path.display()),
         }
     }
 
@@ -491,7 +561,7 @@ impl App {
         self.editor.dirty = false;
     }
 
-    fn redraw(&mut self) {
+    fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         let Some(window) = self.window.clone() else {
             return;
         };
@@ -510,12 +580,20 @@ impl App {
 
         let (jobs, textures, ppp, actions) = self.run_ui(&window, &edges);
         self.apply_actions(&actions);
+        if actions.quit_confirm {
+            event_loop.exit();
+            return;
+        }
+        if actions.quit_cancel {
+            self.confirm_quit = false;
+        }
         if self.editor.dirty {
             self.view
                 .set_model(self.editor.document.model(), self.editor.render_mode);
             self.editor.refresh_palette();
             self.editor.dirty = false;
         }
+        self.update_title();
 
         let settings = OpticastSettings::for_oracle_framebuffer(size.width, size.height);
         // Lit (lightmode 1) by default for directional shading; the View
@@ -577,18 +655,21 @@ impl App {
             KeyCode::ArrowDown => self.keys.down = pressed,
             KeyCode::KeyW => self.keys.zoom_in = pressed,
             KeyCode::KeyS => self.keys.zoom_out = pressed,
-            KeyCode::Escape if pressed => event_loop.exit(),
+            KeyCode::Escape if pressed => {
+                if self.confirm_quit {
+                    self.confirm_quit = false; // Esc dismisses the modal
+                } else {
+                    self.request_exit(event_loop);
+                }
+            }
             _ => {}
         }
     }
 }
 
-/// Log the result of a file write.
-fn report_write(path: &std::path::Path, result: std::io::Result<()>) {
-    match result {
-        Ok(()) => eprintln!("demiurg: saved {}", path.display()),
-        Err(e) => eprintln!("demiurg: write {} failed: {e}", path.display()),
-    }
+/// A file's stem as an owned `String`, for the window title.
+fn stem_of(path: &std::path::Path) -> Option<String> {
+    path.file_stem().map(|s| s.to_string_lossy().into_owned())
 }
 
 impl ApplicationHandler for App {
@@ -647,7 +728,7 @@ impl ApplicationHandler for App {
         };
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.request_exit(event_loop),
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.resize(size.width, size.height);
@@ -703,7 +784,7 @@ impl ApplicationHandler for App {
                 };
                 self.camera.orbit(0.0, 0.0, -lines * self.camera.dist * 0.1);
             }
-            WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::RedrawRequested => self.redraw(event_loop),
             _ => {}
         }
     }

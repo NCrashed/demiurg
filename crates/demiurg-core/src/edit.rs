@@ -21,10 +21,12 @@ struct Delta {
     new: u32,
 }
 
-/// One undoable step: every voxel a single edit changed.
+/// One undoable step: every voxel a single edit changed, plus a unique
+/// monotonic id used for the "modified since save" check.
 #[derive(Debug, Clone, Default)]
 struct Edit {
     deltas: Vec<Delta>,
+    id: u64,
 }
 
 /// A voxel model plus its edit history. Read the model with
@@ -38,6 +40,10 @@ pub struct Document {
     /// voxel's *original* pre-stroke value, until [`end_stroke`] folds
     /// them into a single undo step.
     stroke: Option<BTreeMap<[u32; 3], (u32, u32)>>,
+    /// Next edit id to hand out; ids are unique and monotonic.
+    next_id: u64,
+    /// Edit id of the state last saved (0 = the empty initial state).
+    saved_id: u64,
     /// Mirror planes about the model centre (x, y, z). An edit is
     /// duplicated across each enabled plane within the same undo step.
     pub mirror: [bool; 3],
@@ -52,8 +58,36 @@ impl Document {
             undo: Vec::new(),
             redo: Vec::new(),
             stroke: None,
+            next_id: 1,
+            saved_id: 0,
             mirror: [false; 3],
         }
+    }
+
+    fn alloc_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    /// Id of the current state — the top undo entry's, or `0` when the
+    /// history is empty.
+    fn current_state_id(&self) -> u64 {
+        self.undo.last().map_or(0, |e| e.id)
+    }
+
+    /// Mark the current state as saved (call after a successful save).
+    pub fn mark_saved(&mut self) {
+        self.saved_id = self.current_state_id();
+    }
+
+    /// Whether the document differs from the last saved state. Robust to
+    /// undo/redo: undoing back to the saved edit reads as unmodified,
+    /// and a different edit at the same depth reads as modified (ids are
+    /// unique, not positional).
+    #[must_use]
+    pub fn is_modified(&self) -> bool {
+        self.current_state_id() != self.saved_id
     }
 
     /// Begin a drag-paint stroke: subsequent edits coalesce into one undo
@@ -78,7 +112,8 @@ impl Document {
             .into_iter()
             .map(|(pos, (old, new))| Delta { pos, old, new })
             .collect();
-        self.undo.push(Edit { deltas });
+        let id = self.alloc_id();
+        self.undo.push(Edit { deltas, id });
         true
     }
 
@@ -89,10 +124,13 @@ impl Document {
     }
 
     /// Replace the model and clear history (e.g. after a load / resize).
+    /// The fresh state counts as saved (unmodified).
     pub fn replace_model(&mut self, model: VoxelModel) {
         self.model = model;
         self.undo.clear();
         self.redo.clear();
+        self.stroke = None;
+        self.saved_id = 0;
     }
 
     /// Model dimensions `(xsiz, ysiz, zsiz)`.
@@ -223,7 +261,8 @@ impl Document {
         if deltas.is_empty() {
             return false;
         }
-        self.undo.push(Edit { deltas });
+        let id = self.alloc_id();
+        self.undo.push(Edit { deltas, id });
         self.redo.clear();
         true
     }
@@ -464,6 +503,45 @@ mod tests {
         assert!(!d.set_voxel([0, 0, 0], 0)); // clearing empty: no change
         assert!(!d.end_stroke());
         assert!(!d.can_undo());
+    }
+
+    #[test]
+    fn modified_flag_tracks_the_save_point() {
+        let mut d = doc(4);
+        assert!(!d.is_modified(), "fresh document is unmodified");
+
+        d.set_voxel([0, 0, 0], RED);
+        assert!(d.is_modified(), "an edit modifies it");
+
+        d.mark_saved();
+        assert!(!d.is_modified(), "saving clears it");
+
+        d.undo();
+        assert!(d.is_modified(), "undoing past the saved state modifies it");
+        d.redo();
+        assert!(
+            !d.is_modified(),
+            "redoing back to saved is unmodified again"
+        );
+
+        // A different edit at the same depth must read as modified.
+        d.set_voxel([1, 0, 0], GREEN);
+        d.mark_saved();
+        d.undo();
+        d.set_voxel([2, 0, 0], BLUE); // new branch, same undo depth as saved
+        assert!(
+            d.is_modified(),
+            "a divergent edit at the saved depth is modified"
+        );
+    }
+
+    #[test]
+    fn replace_model_is_unmodified() {
+        let mut d = doc(4);
+        d.set_voxel([0, 0, 0], RED);
+        assert!(d.is_modified());
+        d.replace_model(VoxelModel::new(2, 2, 2));
+        assert!(!d.is_modified(), "a freshly loaded model is unmodified");
     }
 
     #[test]

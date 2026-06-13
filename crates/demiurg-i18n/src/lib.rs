@@ -101,11 +101,17 @@ pub enum Msg {
     // Help line
     HelpApply,
     HelpOrbit,
+    // Window title + quit confirmation
+    Untitled,
+    ConfirmQuitTitle,
+    ConfirmQuitBody,
+    QuitAnyway,
+    Cancel,
 }
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 32] = [
+    pub const ALL: [Msg; 37] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -138,6 +144,11 @@ impl Msg {
         Msg::Language,
         Msg::HelpApply,
         Msg::HelpOrbit,
+        Msg::Untitled,
+        Msg::ConfirmQuitTitle,
+        Msg::ConfirmQuitBody,
+        Msg::QuitAnyway,
+        Msg::Cancel,
     ];
 }
 
@@ -184,6 +195,11 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Language => "Language",
         Msg::HelpApply => "LMB: apply tool",
         Msg::HelpOrbit => "RMB drag: orbit · wheel: zoom",
+        Msg::Untitled => "untitled",
+        Msg::ConfirmQuitTitle => "Unsaved changes",
+        Msg::ConfirmQuitBody => "Quit without saving?",
+        Msg::QuitAnyway => "Quit",
+        Msg::Cancel => "Cancel",
     }
 }
 
@@ -221,6 +237,11 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Language => "Язык",
         Msg::HelpApply => "ЛКМ: применить инструмент",
         Msg::HelpOrbit => "ПКМ: вращение · колесо: зум",
+        Msg::Untitled => "без названия",
+        Msg::ConfirmQuitTitle => "Несохранённые изменения",
+        Msg::ConfirmQuitBody => "Выйти без сохранения?",
+        Msg::QuitAnyway => "Выйти",
+        Msg::Cancel => "Отмена",
     }
 }
 
