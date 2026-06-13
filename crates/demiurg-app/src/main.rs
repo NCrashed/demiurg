@@ -87,6 +87,8 @@ struct Editor {
     lang: Lang,
     /// Directional sprite lighting (lightmode 1) on; off renders flat.
     lighting: bool,
+    /// Draw the reference bounding box / floor grid / origin axes.
+    show_grid: bool,
     /// Sprite vs voxel-grid render.
     render_mode: RenderMode,
     /// The viewport scene needs a rebuild from the model.
@@ -109,6 +111,7 @@ impl Editor {
             model_palette,
             lang,
             lighting: true,
+            show_grid: true,
             render_mode: DEFAULT_RENDER_MODE,
             dirty: false,
         }
@@ -338,6 +341,72 @@ impl App {
         voxel_screen_edges(camera, width, height, self.editor.document.pivot(), cell)
     }
 
+    /// Assemble the viewport overlay (coloured line segments in
+    /// framebuffer pixels): the reference grid / box / origin axes (when
+    /// enabled) plus the hover wire box, last so it draws on top.
+    fn build_overlay(
+        &self,
+        camera: &Camera,
+        width: f64,
+        height: f64,
+    ) -> Vec<([(f64, f64); 2], egui::Color32)> {
+        // The quit modal owns the screen — no overlay behind/over it.
+        if self.confirm_quit {
+            return Vec::new();
+        }
+
+        let mut overlay = Vec::new();
+
+        if self.editor.show_grid {
+            let refs = demiurg_view::reference_lines(
+                camera,
+                width,
+                height,
+                self.editor.document.pivot(),
+                self.editor.document.dims(),
+            );
+            // We can't depth-test 2D overlay lines against the model, so
+            // approximate it: fade segments behind the model centre, so
+            // back grid/box lines don't visually sit on top of the model.
+            let cd = refs.center_depth;
+            let fade = |seg: demiurg_view::DepthSeg, near: egui::Color32, far: egui::Color32| {
+                (seg.0, if seg.1 > cd { far } else { near })
+            };
+            let grid_near = egui::Color32::from_rgba_unmultiplied(150, 155, 170, 70);
+            let grid_far = egui::Color32::from_rgba_unmultiplied(150, 155, 170, 18);
+            let box_near = egui::Color32::from_rgba_unmultiplied(210, 215, 230, 150);
+            let box_far = egui::Color32::from_rgba_unmultiplied(210, 215, 230, 40);
+            overlay.extend(
+                refs.floor_grid
+                    .into_iter()
+                    .map(|s| fade(s, grid_near, grid_far)),
+            );
+            overlay.extend(
+                refs.box_edges
+                    .into_iter()
+                    .map(|s| fade(s, box_near, box_far)),
+            );
+            let axis_cols = [
+                egui::Color32::from_rgb(235, 90, 90),   // X — red
+                egui::Color32::from_rgb(110, 205, 110), // Y — green
+                egui::Color32::from_rgb(110, 150, 235), // Z — blue
+            ];
+            for (axis, col) in refs.axes.into_iter().zip(axis_cols) {
+                if let Some(seg) = axis {
+                    overlay.push((seg.0, col));
+                }
+            }
+        }
+
+        let hover = egui::Color32::from_rgb(255, 230, 0);
+        overlay.extend(
+            self.hover_edges(camera, width, height)
+                .into_iter()
+                .map(|s| (s, hover)),
+        );
+        overlay
+    }
+
     /// The voxel under the cursor, if any.
     fn pointer_pick(&self) -> Option<PickHit> {
         let cam = self.camera.to_roxlap();
@@ -445,7 +514,7 @@ impl App {
     fn run_ui(
         &mut self,
         window: &Window,
-        highlight: &[[(f64, f64); 2]],
+        overlay: &[([(f64, f64); 2], egui::Color32)],
     ) -> (
         Vec<egui::ClippedPrimitive>,
         egui::TexturesDelta,
@@ -462,7 +531,7 @@ impl App {
         let editor = &mut self.editor;
         let mut actions = UiActions::default();
         let out = ctx.run(raw, |c| {
-            ui::build(c, editor, &mut actions, highlight, show_quit)
+            ui::build(c, editor, &mut actions, overlay, show_quit);
         });
         self.egui_state
             .as_mut()
@@ -576,9 +645,9 @@ impl App {
         // Hover wire box (uses last frame's projection — `is_pointer_over_area`
         // and the pick ray both read the previous frame, which is fine at
         // redraw cadence).
-        let edges = self.hover_edges(&camera, f64::from(size.width), f64::from(size.height));
+        let overlay = self.build_overlay(&camera, f64::from(size.width), f64::from(size.height));
 
-        let (jobs, textures, ppp, actions) = self.run_ui(&window, &edges);
+        let (jobs, textures, ppp, actions) = self.run_ui(&window, &overlay);
         self.apply_actions(&actions);
         if actions.quit_confirm {
             event_loop.exit();

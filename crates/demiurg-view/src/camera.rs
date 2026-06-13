@@ -26,8 +26,12 @@ pub struct OrbitCamera {
 }
 
 impl OrbitCamera {
-    const PITCH_MIN: f64 = 0.05;
-    const PITCH_MAX: f64 = 1.50;
+    // Pitch spans nearly straight-up to nearly straight-down so the
+    // camera can drop below the model to edit its underside. The basis
+    // in `to_roxlap` stays orthonormal across this range (no gimbal
+    // lock), so only the poles are excluded.
+    const PITCH_MIN: f64 = -1.5;
+    const PITCH_MAX: f64 = 1.5;
     const DIST_MIN: f64 = 8.0;
     const DIST_MAX: f64 = 4000.0;
 

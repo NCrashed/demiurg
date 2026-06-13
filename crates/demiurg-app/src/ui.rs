@@ -48,7 +48,7 @@ pub fn build(
     ctx: &egui::Context,
     editor: &mut Editor,
     actions: &mut UiActions,
-    highlight: &[[(f64, f64); 2]],
+    overlay: &[([(f64, f64); 2], egui::Color32)],
     show_quit_confirm: bool,
 ) {
     let lang = editor.lang;
@@ -98,6 +98,7 @@ pub fn build(
             });
             ui.menu_button(t(Msg::View), |ui| {
                 ui.checkbox(&mut editor.lighting, t(Msg::Lighting));
+                ui.checkbox(&mut editor.show_grid, t(Msg::Grid));
                 ui.separator();
                 ui.label(t(Msg::Render));
                 if ui
@@ -225,21 +226,21 @@ pub fn build(
             ui.small(t(Msg::HelpOrbit));
         });
 
-    // Paint the hover wire box over the 3D render. A bare layer painter
-    // (not a panel) is used on purpose: a CentralPanel would register an
-    // interactive area over the whole viewport and swallow clicks /
-    // scroll. Clip to the region the panels leave so it never draws over
-    // them.
-    if !highlight.is_empty() {
+    // Paint the overlay (reference grid/axes + hover wire box) over the
+    // 3D render. A bare layer painter (not a panel) is used on purpose: a
+    // CentralPanel would register an interactive area over the whole
+    // viewport and swallow clicks / scroll. Clip to the region the panels
+    // leave so it never draws over them.
+    if !overlay.is_empty() {
         let ppp = f64::from(ctx.pixels_per_point());
         let painter = ctx
             .layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
-                egui::Id::new("voxel-highlight"),
+                egui::Id::new("viewport-overlay"),
             ))
             .with_clip_rect(ctx.available_rect());
-        let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 230, 0));
-        for seg in highlight {
+        for (seg, color) in overlay {
+            let stroke = egui::Stroke::new(1.0, *color);
             painter.line_segment([to_point(seg[0], ppp), to_point(seg[1], ppp)], stroke);
         }
     }

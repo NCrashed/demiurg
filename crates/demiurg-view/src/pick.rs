@@ -209,6 +209,115 @@ pub fn voxel_screen_edges(
     out
 }
 
+/// Reference overlay geometry, in framebuffer pixels: the volume
+/// bounding box, a floor grid on the origin plane, and the X/Y/Z axes
+/// from the `(0,0,0)` corner. Segments with an endpoint behind the
+/// camera are dropped. Uses the same world↔voxel mapping as
+/// [`pick_voxel`], so it lines up with the model.
+/// A projected segment plus its view-space depth (distance along the
+/// camera forward axis), so callers can fade segments behind the model.
+pub type DepthSeg = ([(f64, f64); 2], f64);
+
+pub struct ReferenceLines {
+    /// The 12 edges of the `[0, dims]` volume box.
+    pub box_edges: Vec<DepthSeg>,
+    /// Per-voxel grid lines on the floor (max-z face; z is down).
+    pub floor_grid: Vec<DepthSeg>,
+    /// X, Y, Z axes from the origin corner (caller colours them).
+    pub axes: [Option<DepthSeg>; 3],
+    /// View-space depth of the model centre — segments deeper than this
+    /// are behind the model.
+    pub center_depth: f64,
+}
+
+/// Build the [`ReferenceLines`] for a model of `dims` with `pivot`.
+#[must_use]
+pub fn reference_lines(
+    camera: &Camera,
+    width: f64,
+    height: f64,
+    pivot: [f32; 3],
+    dims: (u32, u32, u32),
+) -> ReferenceLines {
+    const EDGES: [(usize, usize); 12] = [
+        (0, 1),
+        (2, 3),
+        (4, 5),
+        (6, 7),
+        (0, 2),
+        (1, 3),
+        (4, 6),
+        (5, 7),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    ];
+    let pv = [
+        f64::from(pivot[0]),
+        f64::from(pivot[1]),
+        f64::from(pivot[2]),
+    ];
+    let (dx, dy, dz) = (f64::from(dims.0), f64::from(dims.1), f64::from(dims.2));
+    // voxel-space point -> world (= voxel - pivot).
+    let world = |p: [f64; 3]| [p[0] - pv[0], p[1] - pv[1], p[2] - pv[2]];
+    let project = |p: [f64; 3]| project_to_screen(camera, width, height, world(p));
+    // View-space depth: distance of a voxel-space point along forward.
+    let depth = |p: [f64; 3]| {
+        let w = world(p);
+        (w[0] - camera.pos[0]) * camera.forward[0]
+            + (w[1] - camera.pos[1]) * camera.forward[1]
+            + (w[2] - camera.pos[2]) * camera.forward[2]
+    };
+    let seg = |a: [f64; 3], b: [f64; 3]| match (project(a), project(b)) {
+        (Some(pa), Some(pb)) => Some(([pa, pb], 0.5 * (depth(a) + depth(b)))),
+        _ => None,
+    };
+    let center_depth = depth([dx * 0.5, dy * 0.5, dz * 0.5]);
+
+    let corners = [
+        [0.0, 0.0, 0.0],
+        [dx, 0.0, 0.0],
+        [0.0, dy, 0.0],
+        [dx, dy, 0.0],
+        [0.0, 0.0, dz],
+        [dx, 0.0, dz],
+        [0.0, dy, dz],
+        [dx, dy, dz],
+    ];
+    let box_edges = EDGES
+        .iter()
+        .filter_map(|&(a, b)| seg(corners[a], corners[b]))
+        .collect();
+
+    // Floor: the max-z face (z is down in the voxlap world, so this is
+    // the bottom of the volume).
+    let mut floor_grid = Vec::new();
+    for x in 0..=dims.0 {
+        if let Some(s) = seg([f64::from(x), 0.0, dz], [f64::from(x), dy, dz]) {
+            floor_grid.push(s);
+        }
+    }
+    for y in 0..=dims.1 {
+        if let Some(s) = seg([0.0, f64::from(y), dz], [dx, f64::from(y), dz]) {
+            floor_grid.push(s);
+        }
+    }
+
+    let axes = [
+        seg([0.0, 0.0, 0.0], [dx, 0.0, 0.0]),
+        seg([0.0, 0.0, 0.0], [0.0, dy, 0.0]),
+        seg([0.0, 0.0, 0.0], [0.0, 0.0, dz]),
+    ];
+
+    ReferenceLines {
+        box_edges,
+        floor_grid,
+        axes,
+        center_depth,
+    }
+}
+
 /// Slab-method ray vs `[0, dims]` box. Returns `(t_enter, t_exit,
 /// enter_axis)` or `None` if the ray misses.
 fn ray_box(o: [f64; 3], d: [f64; 3], dims: [f64; 3]) -> Option<(f64, f64, usize)> {
