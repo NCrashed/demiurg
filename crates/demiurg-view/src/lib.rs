@@ -24,7 +24,7 @@ pub use pick::{PickHit, pick_voxel, project_to_screen, voxel_screen_edges};
 use demiurg_core::VoxelModel;
 use glam::{DVec3, IVec3};
 use roxlap_render::{Sprite, SpriteInstanceDesc, SpriteSet};
-use roxlap_scene::{GridTransform, Scene};
+use roxlap_scene::{GridId, GridTransform, Scene};
 
 /// Sprite pivot world position. Kept at the origin; the camera orbits
 /// here so the model's pivot is the turntable axis.
@@ -39,10 +39,20 @@ pub enum RenderMode {
     Voxel,
 }
 
-/// A previewable model: the roxlap scene + sprite set, plus framing
-/// metadata for the camera.
+/// A previewable model: a **persistent** roxlap scene (one grid, reused
+/// across edits) + sprite set, plus framing metadata for the camera.
+///
+/// The scene is kept across frames on purpose: `SceneRenderer` caches the
+/// uploaded ("resident") scene and only re-uploads chunks whose version
+/// changed. Building a fresh `Scene` each edit would be silently ignored
+/// (its new grid id isn't the one the renderer tracks), leaving the
+/// preview stale. So edits mutate the one grid's chunk in place and bump
+/// its version.
 pub struct ModelView {
     scene: Scene,
+    /// The single persistent grid (voxel mode populates its chunk;
+    /// sprite mode leaves it empty).
+    grid_id: GridId,
     sprites: SpriteSet,
     /// Largest model dimension in voxels — the camera frames to it.
     extent: f64,
@@ -52,8 +62,11 @@ impl ModelView {
     /// Build a viewport for `model` in `mode`.
     #[must_use]
     pub fn new(model: &VoxelModel, mode: RenderMode) -> Self {
+        let mut scene = Scene::new();
+        let grid_id = scene.add_grid(GridTransform::identity());
         let mut view = Self {
-            scene: Scene::new(),
+            scene,
+            grid_id,
             sprites: empty_sprite_set(),
             extent: 1.0,
         };
@@ -61,15 +74,26 @@ impl ModelView {
         view
     }
 
-    /// Rebuild the scene from `model` for `mode` (called after edits, a
-    /// load, or a mode switch).
+    /// Refresh the scene from `model` for `mode` (after edits, a load, or
+    /// a mode switch). Reuses the persistent grid — see the type docs.
     pub fn set_model(&mut self, model: &VoxelModel, mode: RenderMode) {
         let (xsiz, ysiz, zsiz) = model.dims();
         self.extent = f64::from(xsiz.max(ysiz).max(zsiz)).max(1.0);
 
+        // Keep the grid aligned to -pivot so a voxel (x, y, z) sits at
+        // world (x, y, z) - pivot, matching the picker, in both modes.
+        let p = model.pivot;
+        if let Some(grid) = self.scene.grid_mut(self.grid_id) {
+            grid.transform = GridTransform::at(DVec3::new(
+                -f64::from(p[0]),
+                -f64::from(p[1]),
+                -f64::from(p[2]),
+            ));
+        }
+
         match mode {
             RenderMode::Sprite => {
-                self.scene = Scene::new();
+                self.drop_grid_chunk();
                 let sprite = Sprite::axis_aligned(model.to_kv6(), ORIGIN);
                 self.sprites = SpriteSet {
                     models: vec![sprite],
@@ -82,9 +106,35 @@ impl ModelView {
             }
             RenderMode::Voxel => {
                 self.sprites = empty_sprite_set();
-                self.scene = build_voxel_scene(model);
+                self.rebuild_grid_chunk(model);
             }
         }
+    }
+
+    /// Drop the grid's voxel chunk (sprite mode); `refresh_dirty` evicts
+    /// it from the resident scene next frame.
+    fn drop_grid_chunk(&mut self) {
+        if let Some(grid) = self.scene.grid_mut(self.grid_id) {
+            grid.chunks.remove(&IVec3::ZERO);
+        }
+    }
+
+    /// Rebuild the grid's single chunk from `model` and bump its version
+    /// so the renderer re-uploads it. Models larger than one chunk
+    /// (`CHUNK_SIZE_XY` / `CHUNK_SIZE_Z`) are clipped to it.
+    #[allow(clippy::cast_possible_wrap)] // voxel coords are small, well within i32
+    fn rebuild_grid_chunk(&mut self, model: &VoxelModel) {
+        let Some(grid) = self.scene.grid_mut(self.grid_id) else {
+            return;
+        };
+        grid.chunks.remove(&IVec3::ZERO);
+        let chunk = grid.ensure_chunk(IVec3::ZERO);
+        for (x, y, z, col) in model.occupied() {
+            roxlap_formats::edit::set_cube(chunk, x as i32, y as i32, z as i32, Some(col));
+        }
+        // `chunk_versions` survives the remove above, so this strictly
+        // increases the version → `refresh_dirty` re-uploads the chunk.
+        grid.bump_chunk_version(IVec3::ZERO);
     }
 
     /// The sprite set to hand to `SceneRenderer::set_sprites`.
@@ -114,27 +164,6 @@ fn empty_sprite_set() -> SpriteSet {
     }
 }
 
-/// Pack `model` into a single-chunk voxel grid placed at `-pivot`, so a
-/// voxel `(x, y, z)` lands at world `(x, y, z) − pivot` (matching the
-/// sprite path and the picker). Models larger than one chunk
-/// (`CHUNK_SIZE_XY` / `CHUNK_SIZE_Z`) are clipped to it.
-#[allow(clippy::cast_possible_wrap)] // voxel coords are small, well within i32
-fn build_voxel_scene(model: &VoxelModel) -> Scene {
-    let p = model.pivot;
-    let mut scene = Scene::new();
-    let id = scene.add_grid(GridTransform::at(DVec3::new(
-        -f64::from(p[0]),
-        -f64::from(p[1]),
-        -f64::from(p[2]),
-    )));
-    let grid = scene.grid_mut(id).expect("grid just added");
-    let chunk = grid.ensure_chunk(IVec3::ZERO);
-    for (x, y, z, col) in model.occupied() {
-        roxlap_formats::edit::set_cube(chunk, x as i32, y as i32, z as i32, Some(col));
-    }
-    scene
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +187,28 @@ mod tests {
             "no sprites in voxel mode"
         );
         assert_eq!(view.scene_mut().grid_count(), 1, "one grid built");
+    }
+
+    #[test]
+    fn voxel_edits_reuse_the_grid_and_show_up() {
+        // The renderer caches by grid id, so an edit must reuse the same
+        // grid and land in its chunk — not spawn a throwaway scene.
+        let mut m = VoxelModel::new(8, 8, 8);
+        m.set(1, 1, 1, 0x80ff_0000);
+        let mut view = ModelView::new(&m, RenderMode::Voxel);
+        let gid0 = view.scene_mut().grids().next().expect("one grid").0;
+
+        m.set(5, 4, 3, 0x8000_ff00); // add a voxel
+        view.set_model(&m, RenderMode::Voxel);
+
+        let mut grids = view.scene_mut().grids();
+        let (gid1, grid) = grids.next().expect("still one grid");
+        assert!(grids.next().is_none(), "no extra grid spawned");
+        assert_eq!(gid0, gid1, "same persistent grid reused");
+        assert!(
+            grid.voxel_solid(IVec3::new(5, 4, 3)),
+            "the new voxel reached the grid chunk"
+        );
     }
 
     #[test]
