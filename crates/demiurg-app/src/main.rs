@@ -6,13 +6,16 @@
 //!   demiurg [path.kv6 | path.demiurg]   # no path -> a blank canvas
 //!
 //! Controls: left mouse applies the active tool (hold to drag-paint);
-//! right-mouse drag orbits; wheel and `W`/`S` zoom; arrow keys orbit.
-//! Hotkeys: `1`-`7` pick a tool, `Ctrl+Z` undo, `Ctrl+Y` / `Ctrl+Shift+Z`
-//! redo, `Esc` quits. `DEMIURG_LANG=ru` starts in Russian. The GPU
-//! backend is used by default; `ROXLAP_GPU=0` forces the CPU renderer.
+//! `Ctrl`+click eyedrops a colour; right-mouse drag orbits; wheel and
+//! `W`/`S` zoom; arrow keys orbit. Hotkeys: `1`-`8` pick a tool (`8` is
+//! Select), `Ctrl+Z` undo, `Ctrl+Y` / `Ctrl+Shift+Z` redo, `Ctrl+C` /
+//! `Ctrl+V` copy / paste the selection, `Delete` removes it, `Esc` quits.
+//! `DEMIURG_LANG=ru` starts in Russian. The GPU backend is used by
+//! default; `ROXLAP_GPU=0` forces the CPU renderer.
 
 mod ui;
 
+use std::collections::HashSet;
 use std::process::exit;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -59,6 +62,37 @@ enum Tool {
     Box,
     Sphere,
     Fill,
+    /// Pick voxels (click / marquee) into a selection for delete, copy,
+    /// paste. Doesn't edit geometry itself.
+    Select,
+}
+
+/// How a selection gesture combines with the existing selection: replace
+/// it, add to it (Shift), or remove from it (Alt).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelMode {
+    Replace,
+    Add,
+    Remove,
+}
+
+/// An in-progress marquee drag (Select tool): the screen-pixel anchor and
+/// how the dragged region combines with the current selection.
+struct Marquee {
+    start: (f64, f64),
+    mode: SelMode,
+}
+
+/// The selection mode implied by the held modifiers (Ctrl is reserved for
+/// the eyedropper, so it doesn't appear here).
+fn sel_mode(m: ModifiersState) -> SelMode {
+    if m.shift_key() {
+        SelMode::Add
+    } else if m.alt_key() {
+        SelMode::Remove
+    } else {
+        SelMode::Replace
+    }
 }
 
 impl Tool {
@@ -97,6 +131,12 @@ struct Editor {
     /// Target dimensions edited in the Size panel (the "Resize" button
     /// applies them); kept in sync with the model on structural changes.
     resize_dims: [u32; 3],
+    /// The currently selected voxel cells (Select tool). Operated on by
+    /// delete / copy / paste; pruned to bounds after structural edits.
+    selection: HashSet<[u32; 3]>,
+    /// Copied voxels, stored relative to the selection's min corner so a
+    /// paste can be re-anchored anywhere: `(offset, colour)`.
+    clipboard: Vec<([i32; 3], u32)>,
     /// The viewport scene needs a rebuild from the model.
     dirty: bool,
 }
@@ -121,6 +161,8 @@ impl Editor {
             show_grid: true,
             render_mode: DEFAULT_RENDER_MODE,
             resize_dims: [dx, dy, dz],
+            selection: HashSet::new(),
+            clipboard: Vec::new(),
             dirty: false,
         }
     }
@@ -165,6 +207,8 @@ impl Editor {
                 color,
             ),
             Tool::Fill => self.document.flood_fill(hit.voxel, color),
+            // Select is handled by the marquee path, never reaches apply.
+            Tool::Select => false,
             Tool::Box => match self.box_anchor.take() {
                 None => {
                     self.box_anchor = Some(hit.place);
@@ -218,6 +262,7 @@ fn main() {
         doc_name,
         last_title: None,
         confirm_quit: false,
+        marquee: None,
         next_frame: Instant::now(),
     };
 
@@ -320,6 +365,8 @@ struct App {
     last_title: Option<String>,
     /// The unsaved-changes quit modal is showing.
     confirm_quit: bool,
+    /// An in-progress selection marquee drag (Select tool), else `None`.
+    marquee: Option<Marquee>,
     /// When the next frame should render (drives the ~60 fps cap).
     next_frame: Instant,
 }
@@ -368,6 +415,10 @@ impl App {
                 self.editor.document.dims(),
             ));
         }
+        if !self.editor.selection.is_empty() {
+            let cells: Vec<[u32; 3]> = self.editor.selection.iter().copied().collect();
+            lines.extend(demiurg_view::selection_lines_3d(pivot, &cells));
+        }
         if let Some(cell) = self.hover_cell() {
             lines.extend(demiurg_view::voxel_box_lines_3d(pivot, cell));
         }
@@ -384,11 +435,25 @@ impl App {
         pick_voxel(self.editor.document.model(), ray.origin, ray.dir)
     }
 
-    /// Left-button press: start a drag-paint stroke (continuous tools) or
-    /// apply a click-once tool.
+    /// Left-button press: a quick eyedropper (Ctrl), a selection marquee
+    /// (Select tool), a drag-paint stroke (continuous tools), or a
+    /// click-once tool.
     fn begin_paint(&mut self) {
         if self.confirm_quit {
             return; // don't edit behind the quit modal
+        }
+        // Ctrl+click is a quick eyedropper, whatever the active tool.
+        if self.modifiers.control_key() {
+            self.pick_color_under_cursor();
+            return;
+        }
+        // The Select tool drags a marquee instead of editing voxels.
+        if self.editor.tool == Tool::Select {
+            self.marquee = Some(Marquee {
+                start: self.cursor,
+                mode: sel_mode(self.modifiers),
+            });
+            return;
         }
         if self.editor.tool.is_continuous() {
             self.editor.document.begin_stroke();
@@ -397,6 +462,21 @@ impl App {
             self.paint_step();
         } else if let Some(hit) = self.pointer_pick() {
             self.editor.apply(hit);
+        }
+    }
+
+    /// Ctrl+click eyedropper: adopt the colour of the voxel under the
+    /// cursor (ignores empty space).
+    fn pick_color_under_cursor(&mut self) {
+        if let Some(hit) = self.pointer_pick() {
+            let c = self
+                .editor
+                .document
+                .model()
+                .get(hit.voxel[0], hit.voxel[1], hit.voxel[2]);
+            if c != 0 {
+                self.editor.color = c;
+            }
         }
     }
 
@@ -423,13 +503,143 @@ impl App {
         self.editor.apply(hit);
     }
 
-    /// Left-button release: close the drag-paint stroke (one undo step).
+    /// Left-button release: resolve a marquee drag, or close the
+    /// drag-paint stroke (one undo step).
     fn end_paint(&mut self) {
+        if self.marquee.is_some() {
+            self.finalize_marquee();
+            return;
+        }
         if self.painting {
             self.editor.document.end_stroke();
             self.painting = false;
             self.last_paint = None;
         }
+    }
+
+    /// Resolve a finished marquee drag into a selection change. A
+    /// negligible drag is a single click (pick one voxel); a real drag
+    /// uses the screen rectangle (select-through, ignores occlusion).
+    fn finalize_marquee(&mut self) {
+        let Some(m) = self.marquee.take() else {
+            return;
+        };
+        let (sx, sy) = m.start;
+        let (cx, cy) = self.cursor;
+        let cells = if (cx - sx).abs() < 4.0 && (cy - sy).abs() < 4.0 {
+            self.pointer_pick()
+                .map(|h| vec![h.voxel])
+                .unwrap_or_default()
+        } else if let Some(window) = &self.window {
+            let size = window.inner_size();
+            let cam = self.camera.to_roxlap();
+            demiurg_view::marquee_voxels(
+                self.editor.document.model(),
+                &cam,
+                f64::from(size.width),
+                f64::from(size.height),
+                [m.start, self.cursor],
+            )
+        } else {
+            Vec::new()
+        };
+        let sel = &mut self.editor.selection;
+        match m.mode {
+            SelMode::Replace => {
+                sel.clear();
+                sel.extend(cells);
+            }
+            SelMode::Add => sel.extend(cells),
+            SelMode::Remove => {
+                for c in &cells {
+                    sel.remove(c);
+                }
+            }
+        }
+    }
+
+    /// Delete the selected voxels as one undo step, then clear the
+    /// selection (the cells are gone).
+    fn delete_selection(&mut self) {
+        if self.editor.selection.is_empty() {
+            return;
+        }
+        let cells: Vec<([u32; 3], u32)> = self.editor.selection.iter().map(|&c| (c, 0)).collect();
+        if self.editor.document.set_cells(cells) {
+            self.editor.dirty = true;
+        }
+        self.editor.selection.clear();
+    }
+
+    /// Copy the occupied selected voxels to the clipboard, stored relative
+    /// to the selection's min corner so paste can be re-anchored.
+    #[allow(clippy::cast_possible_wrap)] // voxel coords are far below i32::MAX
+    fn copy_selection(&mut self) {
+        let model = self.editor.document.model();
+        let occ: Vec<([u32; 3], u32)> = self
+            .editor
+            .selection
+            .iter()
+            .filter_map(|&c| {
+                let col = model.get(c[0], c[1], c[2]);
+                (col != 0).then_some((c, col))
+            })
+            .collect();
+        if occ.is_empty() {
+            return;
+        }
+        let min = occ.iter().fold([u32::MAX; 3], |m, (c, _)| {
+            [m[0].min(c[0]), m[1].min(c[1]), m[2].min(c[2])]
+        });
+        self.editor.clipboard = occ
+            .into_iter()
+            .map(|(c, col)| {
+                (
+                    [
+                        (c[0] - min[0]) as i32,
+                        (c[1] - min[1]) as i32,
+                        (c[2] - min[2]) as i32,
+                    ],
+                    col,
+                )
+            })
+            .collect();
+    }
+
+    /// Paste the clipboard with its min corner at the cell under the
+    /// cursor (or the origin), as one undo step; the pasted voxels become
+    /// the new selection.
+    fn paste_clipboard(&mut self) {
+        if self.editor.clipboard.is_empty() {
+            return;
+        }
+        let anchor = self.hover_cell().unwrap_or([0, 0, 0]);
+        let dims = self.editor.document.dims();
+        let mut cells = Vec::new();
+        let mut pasted = HashSet::new();
+        for (rel, col) in &self.editor.clipboard {
+            let p = [anchor[0] + rel[0], anchor[1] + rel[1], anchor[2] + rel[2]];
+            if let Some(v) = in_bounds(p, dims) {
+                cells.push((v, *col));
+                pasted.insert(v);
+            }
+        }
+        if cells.is_empty() {
+            return;
+        }
+        if self.editor.document.set_cells(cells) {
+            self.editor.dirty = true;
+        }
+        self.editor.selection = pasted;
+    }
+
+    /// Drop selection cells that fell out of bounds (e.g. after a resize
+    /// or an undo that shrank the model).
+    fn prune_selection(&mut self) {
+        let (dx, dy, dz) = self.editor.document.dims();
+        self.editor
+            .selection
+            .retain(|c| c[0] < dx && c[1] < dy && c[2] < dz);
     }
 
     /// Refresh the window title: `demiurg — <name>`, with a trailing `*`
@@ -481,6 +691,7 @@ impl App {
     fn run_ui(
         &mut self,
         window: &Window,
+        marquee: Option<[(f64, f64); 2]>,
     ) -> (
         Vec<egui::ClippedPrimitive>,
         egui::TexturesDelta,
@@ -497,7 +708,7 @@ impl App {
         let editor = &mut self.editor;
         let mut actions = UiActions::default();
         let out = ctx.run_ui(raw, |ui| {
-            ui::build(ui, editor, &mut actions, show_quit);
+            ui::build(ui, editor, &mut actions, show_quit, marquee);
         });
         self.egui_state
             .as_mut()
@@ -515,6 +726,15 @@ impl App {
         }
         if a.redo {
             self.do_redo();
+        }
+        if a.delete_sel {
+            self.delete_selection();
+        }
+        if a.copy_sel {
+            self.copy_selection();
+        }
+        if a.paste_sel {
+            self.paste_clipboard();
         }
         if a.new_model {
             self.load_model(new_model());
@@ -603,6 +823,7 @@ impl App {
             .set_model(self.editor.document.model(), self.editor.render_mode);
         self.editor.refresh_palette();
         self.editor.sync_resize_dims();
+        self.editor.selection.clear();
         self.camera = self.view.framing_camera();
         self.editor.dirty = false;
     }
@@ -620,7 +841,10 @@ impl App {
 
         let camera = self.camera.to_roxlap();
 
-        let (jobs, textures, ppp, actions) = self.run_ui(&window);
+        // While dragging a marquee, the live screen rectangle (anchor ->
+        // current cursor) is drawn by the UI as a 2D overlay.
+        let marquee = self.marquee.as_ref().map(|m| [m.start, self.cursor]);
+        let (jobs, textures, ppp, actions) = self.run_ui(&window, marquee);
         self.apply_actions(&actions);
         if actions.quit_confirm {
             event_loop.exit();
@@ -633,6 +857,7 @@ impl App {
             self.view
                 .set_model(self.editor.document.model(), self.editor.render_mode);
             self.editor.refresh_palette();
+            self.prune_selection();
             self.editor.dirty = false;
         }
         self.update_title();
@@ -695,9 +920,13 @@ impl App {
             KeyCode::Digit5 if pressed => self.editor.tool = Tool::Box,
             KeyCode::Digit6 if pressed => self.editor.tool = Tool::Sphere,
             KeyCode::Digit7 if pressed => self.editor.tool = Tool::Fill,
+            KeyCode::Digit8 if pressed => self.editor.tool = Tool::Select,
             KeyCode::KeyZ if pressed && ctrl && !shift => self.do_undo(),
             KeyCode::KeyZ if pressed && ctrl && shift => self.do_redo(),
             KeyCode::KeyY if pressed && ctrl => self.do_redo(),
+            KeyCode::KeyC if pressed && ctrl => self.copy_selection(),
+            KeyCode::KeyV if pressed && ctrl => self.paste_clipboard(),
+            KeyCode::Delete | KeyCode::Backspace if pressed => self.delete_selection(),
             KeyCode::ArrowLeft => self.keys.left = pressed,
             KeyCode::ArrowRight => self.keys.right = pressed,
             KeyCode::ArrowUp => self.keys.up = pressed,

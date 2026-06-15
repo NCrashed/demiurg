@@ -303,16 +303,37 @@ impl Document {
         true
     }
 
-    /// Apply a batch of `(position, colour)` cells as one undo step:
-    /// expand mirror planes, dedup (last write wins), keep only the
-    /// cells that actually change an in-bounds voxel. Returns `true` if
-    /// anything changed.
+    /// Apply a batch of `(position, colour)` cells as one undo step, with
+    /// the mirror planes expanded. See [`commit_inner`](Self::commit_inner).
     fn commit<I: IntoIterator<Item = ([u32; 3], u32)>>(&mut self, cells: I) -> bool {
+        self.commit_inner(cells, true)
+    }
+
+    /// Apply a batch of `(position, colour)` cells **verbatim** (no mirror)
+    /// as one undo step — for selection operations (delete, paste), which
+    /// act on exact cells the user picked, not tool strokes.
+    pub fn set_cells<I: IntoIterator<Item = ([u32; 3], u32)>>(&mut self, cells: I) -> bool {
+        self.commit_inner(cells, false)
+    }
+
+    /// Apply a batch of `(position, colour)` cells as one undo step:
+    /// optionally expand mirror planes, dedup (last write wins), keep only
+    /// the cells that actually change an in-bounds voxel. Returns `true` if
+    /// anything changed.
+    fn commit_inner<I: IntoIterator<Item = ([u32; 3], u32)>>(
+        &mut self,
+        cells: I,
+        mirror: bool,
+    ) -> bool {
         let dims = self.model.dims();
         let mut map: BTreeMap<[u32; 3], u32> = BTreeMap::new();
         for (pos, col) in cells {
-            for mirrored in mirror_positions(pos, dims, self.mirror) {
-                map.insert(mirrored, col);
+            if mirror {
+                for mirrored in mirror_positions(pos, dims, self.mirror) {
+                    map.insert(mirrored, col);
+                }
+            } else {
+                map.insert(pos, col);
             }
         }
 
@@ -652,6 +673,19 @@ mod tests {
         assert!(d.is_modified());
         d.replace_model(VoxelModel::new(2, 2, 2));
         assert!(!d.is_modified(), "a freshly loaded model is unmodified");
+    }
+
+    #[test]
+    fn set_cells_ignores_mirror_and_is_one_step() {
+        let mut d = doc(4);
+        d.mirror = [true, false, false]; // would mirror x -> 3-x for tools
+        // Selection delete/paste go through set_cells, which must NOT mirror.
+        assert!(d.set_cells([([0, 1, 1], RED), ([1, 1, 1], GREEN)]));
+        assert_eq!(d.model().get(0, 1, 1), RED);
+        assert_eq!(d.model().get(1, 1, 1), GREEN);
+        assert_eq!(d.model().get(3, 1, 1), 0, "no mirror copy from set_cells");
+        d.undo();
+        assert_eq!(d.model().occupied_count(), 0, "both cells in one undo step");
     }
 
     #[test]

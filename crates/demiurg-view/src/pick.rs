@@ -13,6 +13,7 @@
 
 use demiurg_core::VoxelModel;
 use glam::DVec3;
+use roxlap_core::Camera;
 use roxlap_render::Line3;
 
 /// A resolved voxel pick.
@@ -203,6 +204,91 @@ fn box_lines(
         .collect()
 }
 
+/// Wire boxes around each selected `cell` (always-on-top cyan), so the
+/// whole selection reads at a glance even when parts are occluded.
+#[must_use]
+pub fn selection_lines_3d(pivot: [f32; 3], cells: &[[u32; 3]]) -> Vec<Line3> {
+    let pv = [
+        f64::from(pivot[0]),
+        f64::from(pivot[1]),
+        f64::from(pivot[2]),
+    ];
+    let mut lines = Vec::with_capacity(cells.len() * 12);
+    for &c in cells {
+        let lo = [
+            f64::from(c[0]) - pv[0],
+            f64::from(c[1]) - pv[1],
+            f64::from(c[2]) - pv[2],
+        ];
+        let hi = [lo[0] + 1.0, lo[1] + 1.0, lo[2] + 1.0];
+        lines.extend(box_lines(lo, hi, 0xff19_e6e6, 1.5, false));
+    }
+    lines
+}
+
+/// Project a world point to framebuffer pixels under the renderer's ~90°
+/// horizontal FOV, or `None` if it's behind the camera. Used to hit-test
+/// voxels against the 2D selection marquee.
+#[must_use]
+pub fn project_to_screen(
+    camera: &Camera,
+    width: f64,
+    height: f64,
+    world: [f64; 3],
+) -> Option<(f64, f64)> {
+    let rel = [
+        world[0] - camera.pos[0],
+        world[1] - camera.pos[1],
+        world[2] - camera.pos[2],
+    ];
+    let dot = |a: [f64; 3]| a[0] * rel[0] + a[1] * rel[1] + a[2] * rel[2];
+    let f = dot(camera.forward);
+    if f <= 1e-6 {
+        return None;
+    }
+    // Square pixels: both axes use the width-based focal length so the
+    // ~90° horizontal FOV is preserved regardless of aspect.
+    let focal = width * 0.5;
+    Some((
+        width * 0.5 + focal * dot(camera.right) / f,
+        height * 0.5 + focal * dot(camera.down) / f,
+    ))
+}
+
+/// Occupied voxels whose projected centre falls inside the screen-space
+/// `rect` (two opposite corners, framebuffer pixels). A "select-through"
+/// marquee: occlusion is ignored, so voxels behind the model still count.
+#[must_use]
+pub fn marquee_voxels(
+    model: &VoxelModel,
+    camera: &Camera,
+    width: f64,
+    height: f64,
+    rect: [(f64, f64); 2],
+) -> Vec<[u32; 3]> {
+    let pv = [
+        f64::from(model.pivot[0]),
+        f64::from(model.pivot[1]),
+        f64::from(model.pivot[2]),
+    ];
+    let (x0, x1) = (rect[0].0.min(rect[1].0), rect[0].0.max(rect[1].0));
+    let (y0, y1) = (rect[0].1.min(rect[1].1), rect[0].1.max(rect[1].1));
+    let mut out = Vec::new();
+    for (x, y, z, _) in model.occupied() {
+        let centre = [
+            f64::from(x) + 0.5 - pv[0],
+            f64::from(y) + 0.5 - pv[1],
+            f64::from(z) + 0.5 - pv[2],
+        ];
+        if let Some((sx, sy)) = project_to_screen(camera, width, height, centre) {
+            if sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 {
+                out.push([x, y, z]);
+            }
+        }
+    }
+    out
+}
+
 /// Wire box around voxel `cell` (always-on-top yellow), so the targeted
 /// voxel is visible even when it would be occluded.
 #[must_use]
@@ -315,6 +401,50 @@ mod tests {
     fn empty_model_misses() {
         let m = VoxelModel::new(8, 8, 8);
         assert!(pick_voxel(&m, DVec3::new(0.0, 0.0, -10.0), DVec3::new(0.0, 0.0, 1.0)).is_none());
+    }
+
+    #[test]
+    fn marquee_selects_occupied_voxels_within_the_screen_rect() {
+        use crate::OrbitCamera;
+        let mut m = VoxelModel::new(8, 8, 8);
+        m.pivot = [4.0, 4.0, 4.0];
+        m.set(4, 4, 4, 0x80ff_0000);
+        m.set(2, 3, 5, 0x8000_ff00);
+        m.set(6, 1, 2, 0x8000_00ff);
+        let cam = OrbitCamera::framing(DVec3::new(0.0, 0.0, 0.0), 8.0 * 1.6).to_roxlap();
+        let (w, h) = (800.0, 600.0);
+
+        // The framing camera fits the whole model, so a full-screen rect
+        // catches every occupied voxel (select-through ignores occlusion).
+        let all = marquee_voxels(&m, &cam, w, h, [(0.0, 0.0), (w, h)]);
+        assert_eq!(all.len(), 3, "full-screen marquee selects all occupied");
+
+        // An off-screen rect selects nothing.
+        let none = marquee_voxels(&m, &cam, w, h, [(-100.0, -100.0), (-50.0, -50.0)]);
+        assert!(none.is_empty(), "rect off-screen selects nothing");
+    }
+
+    #[test]
+    fn project_drops_points_behind_the_camera() {
+        use crate::OrbitCamera;
+        let cam = OrbitCamera::framing(DVec3::new(0.0, 0.0, 0.0), 16.0).to_roxlap();
+        // A point far past the model, behind the eye, must not project.
+        let behind = [
+            cam.pos[0] - cam.forward[0],
+            cam.pos[1] - cam.forward[1],
+            cam.pos[2] - cam.forward[2],
+        ];
+        assert!(project_to_screen(&cam, 800.0, 600.0, behind).is_none());
+    }
+
+    #[test]
+    fn selection_lines_are_twelve_per_cell_and_on_top() {
+        let lines = selection_lines_3d([0.0; 3], &[[0, 0, 0], [1, 2, 3]]);
+        assert_eq!(lines.len(), 24, "12 edges per selected voxel");
+        assert!(
+            lines.iter().all(|l| !l.depth_test),
+            "selection outline is always-on-top"
+        );
     }
 
     #[test]

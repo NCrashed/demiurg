@@ -45,6 +45,9 @@ pub struct UiActions {
     pub save_project: bool,
     pub undo: bool,
     pub redo: bool,
+    pub delete_sel: bool,
+    pub copy_sel: bool,
+    pub paste_sel: bool,
     /// Quit-confirmation modal: the user chose to quit / to cancel.
     pub quit_confirm: bool,
     pub quit_cancel: bool,
@@ -59,6 +62,7 @@ pub fn build(
     editor: &mut Editor,
     actions: &mut UiActions,
     show_quit_confirm: bool,
+    marquee: Option<[(f64, f64); 2]>,
 ) {
     let lang = editor.lang;
     let t = |m: Msg| tr(lang, m);
@@ -147,7 +151,7 @@ pub fn build(
         .default_size(200.0)
         .show_inside(ui, |ui| {
             ui.heading(t(Msg::Tools));
-            // The 1-7 digits double as keyboard shortcuts (see on_key);
+            // The 1-8 digits double as keyboard shortcuts (see on_key);
             // show them on the buttons so they're discoverable.
             for (i, (tool, msg)) in [
                 (Tool::Place, Msg::Place),
@@ -157,6 +161,7 @@ pub fn build(
                 (Tool::Box, Msg::BoxTool),
                 (Tool::Sphere, Msg::Sphere),
                 (Tool::Fill, Msg::FloodFill),
+                (Tool::Select, Msg::Select),
             ]
             .into_iter()
             .enumerate()
@@ -233,11 +238,18 @@ pub fn build(
             }
 
             size_panel(ui, editor, &t);
+            selection_panel(ui, editor, actions, &t);
 
             ui.separator();
-            ui.small(t(Msg::HelpApply));
+            if editor.tool == Tool::Select {
+                ui.small(t(Msg::HelpSelect));
+            } else {
+                ui.small(t(Msg::HelpApply));
+            }
             ui.small(t(Msg::HelpOrbit));
         });
+
+    draw_marquee(ui, marquee);
 
     // In-app quit confirmation (replaces a native message box, which the
     // XDG portal doesn't reliably show here).
@@ -315,6 +327,69 @@ fn size_panel(ui: &mut egui::Ui, editor: &mut Editor, t: &impl Fn(Msg) -> &'stat
             }
         }
     });
+}
+
+/// The Selection section: the selected-voxel count and delete / copy /
+/// paste buttons. The buttons only record an intent in [`UiActions`]; the
+/// host applies them (it owns the selection + clipboard).
+fn selection_panel(
+    ui: &mut egui::Ui,
+    editor: &Editor,
+    actions: &mut UiActions,
+    t: &impl Fn(Msg) -> &'static str,
+) {
+    ui.separator();
+    ui.label(format!("{}  {}", t(Msg::Selected), editor.selection.len()));
+    let has_sel = !editor.selection.is_empty();
+    let has_clip = !editor.clipboard.is_empty();
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(has_sel, egui::Button::new(t(Msg::Delete)))
+            .clicked()
+        {
+            actions.delete_sel = true;
+        }
+        if ui
+            .add_enabled(has_sel, egui::Button::new(t(Msg::Copy)))
+            .clicked()
+        {
+            actions.copy_sel = true;
+        }
+        if ui
+            .add_enabled(has_clip, egui::Button::new(t(Msg::Paste)))
+            .clicked()
+        {
+            actions.paste_sel = true;
+        }
+    });
+}
+
+/// Draw the live marquee rectangle (Select-tool drag) as a 2D overlay.
+/// `marquee` corners are framebuffer pixels; egui works in points, so
+/// divide by the pixel ratio.
+#[allow(clippy::cast_possible_truncation)] // pixel coords are small, well within f32
+fn draw_marquee(ui: &egui::Ui, marquee: Option<[(f64, f64); 2]>) {
+    let Some([(ax, ay), (bx, by)]) = marquee else {
+        return;
+    };
+    let ppp = f64::from(ui.ctx().pixels_per_point());
+    let p = |x: f64, y: f64| egui::pos2((x / ppp) as f32, (y / ppp) as f32);
+    let rect = egui::Rect::from_two_pos(p(ax, ay), p(bx, by));
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("marquee"),
+    ));
+    painter.rect_filled(
+        rect,
+        egui::CornerRadius::ZERO,
+        egui::Color32::from_rgba_unmultiplied(60, 200, 200, 40),
+    );
+    painter.rect_stroke(
+        rect,
+        egui::CornerRadius::ZERO,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 220, 220)),
+        egui::StrokeKind::Middle,
+    );
 }
 
 /// A small square colour button for `0x80RRGGBB`.

@@ -19,7 +19,10 @@ mod camera;
 mod pick;
 
 pub use camera::OrbitCamera;
-pub use pick::{AXIS_COLORS, PickHit, pick_voxel, reference_lines_3d, voxel_box_lines_3d};
+pub use pick::{
+    AXIS_COLORS, PickHit, marquee_voxels, pick_voxel, project_to_screen, reference_lines_3d,
+    selection_lines_3d, voxel_box_lines_3d,
+};
 pub use roxlap_render::Line3;
 
 use demiurg_core::VoxelModel;
