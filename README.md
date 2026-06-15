@@ -59,6 +59,10 @@ demiurg [path.kv6 | path.demiurg]    # no path -> a blank canvas
   `W`/`S` zoom, `Home` recenters; the **Views** panel and numpad `1`/`3`/`7`
   snap to axis views (`Ctrl` for the opposite face).
 - **Edit**: `Ctrl+Z` undo, `Ctrl+Y` / `Ctrl+Shift+Z` redo.
+- **Reference image**: File ▸ Open reference image, or drag a PNG/BMP/JPG/GIF/
+  TGA/WEBP onto the window — pixel art becomes a flat 1-voxel-thick guide to
+  trace from (non-destructive; place/flip/hide it in the Reference panel).
+  Dropping a `.kv6`/`.vox`/`.demiurg` opens it as the model.
 - **Render**: CPU renderer by default (reliable everywhere); `--gpu` (or
   `ROXLAP_GPU=1`) opts into the faster GPU backend, whose device creation can
   hang on some Windows GPUs/drivers (white frozen window). Switch sprite/voxel

@@ -21,12 +21,17 @@
 //! else quits. `Ctrl+S` saves the project (overwriting its path once
 //! known); saves run on a background thread (with a spinner) so the UI
 //! never freezes, and a periodic autosave to the OS temp dir is recovered
-//! on the next launch after a crash. `DEMIURG_LANG=ru` starts in Russian.
+//! on the next launch after a crash. Dragging an image onto the window
+//! loads it as a non-destructive reference guide (a model file opens as the
+//! model). `DEMIURG_LANG=ru` starts in Russian.
 //! The CPU renderer is the default (reliable everywhere); `--gpu` (or
 //! `ROXLAP_GPU=1`) opts into the faster GPU backend, whose device creation
 //! can hang on some Windows GPUs/drivers.
 
+mod reference;
 mod ui;
+
+use reference::Reference;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -126,6 +131,7 @@ enum DialogKind {
     OpenKv6,
     OpenVox,
     OpenProject,
+    OpenReference,
     Save(SaveFormat),
 }
 
@@ -151,6 +157,12 @@ fn run_dialog(kind: DialogKind, dir: Option<PathBuf>, name: Option<&str>) -> Opt
             .pick_file(),
         DialogKind::OpenProject => rfd::FileDialog::new()
             .add_filter("demiurg", &["demiurg"])
+            .pick_file(),
+        DialogKind::OpenReference => rfd::FileDialog::new()
+            .add_filter(
+                "image",
+                &["png", "jpg", "jpeg", "bmp", "gif", "tga", "webp"],
+            )
             .pick_file(),
         DialogKind::Save(format) => {
             let (filter, ext, default) = format.dialog_spec();
@@ -373,6 +385,10 @@ struct Editor {
     /// The pasted voxels currently floating above the model, if any (see
     /// [`FloatLayer`]); committed into the model on deselect.
     float: Option<FloatLayer>,
+    /// A reference image rendered as a non-destructive guide layer, if any.
+    reference: Option<Reference>,
+    /// The reference grid needs re-uploading (loaded / moved / removed).
+    reference_dirty: bool,
     /// The viewport scene needs a rebuild from the model.
     dirty: bool,
 }
@@ -430,7 +446,21 @@ impl Editor {
             selection: HashSet::new(),
             clipboard: Vec::new(),
             float: None,
+            reference: None,
+            reference_dirty: false,
             dirty: false,
+        }
+    }
+
+    /// Load image `bytes` as the reference layer (replacing any current
+    /// one); the viewport refreshes next frame.
+    fn set_reference(&mut self, bytes: &[u8], name: String) {
+        match Reference::load(bytes, name) {
+            Ok(r) => {
+                self.reference = Some(r);
+                self.reference_dirty = true;
+            }
+            Err(e) => eprintln!("demiurg: reference image: {e}"),
         }
     }
 
@@ -1332,6 +1362,13 @@ impl App {
         if a.open_project {
             self.open_dialog(DialogKind::OpenProject);
         }
+        if a.open_reference {
+            self.open_dialog(DialogKind::OpenReference);
+        }
+        if a.remove_reference {
+            self.editor.reference = None;
+            self.editor.reference_dirty = true;
+        }
         if a.save {
             self.save_project();
         }
@@ -1441,6 +1478,7 @@ impl App {
                     Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
                 }
             }
+            DialogKind::OpenReference => self.load_reference(&path),
             DialogKind::Save(format) => self.start_save(path, format, true),
         }
     }
@@ -1535,6 +1573,57 @@ impl App {
         event_loop.exit();
     }
 
+    /// Read an image file and install it as the reference layer.
+    fn load_reference(&mut self, path: &Path) {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                let name = stem_of(path).unwrap_or_else(|| "reference".to_string());
+                self.editor.set_reference(&bytes, name);
+            }
+            Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
+        }
+    }
+
+    /// Route a dropped file: an image becomes the reference layer; a
+    /// `.kv6` / `.vox` / `.demiurg` opens as the model; anything else is
+    /// ignored.
+    fn on_dropped_file(&mut self, path: &Path) {
+        if reference::is_image(path) {
+            self.load_reference(path);
+            return;
+        }
+        let read = || std::fs::read(path).map_err(|e| e.to_string());
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        let parsed = match ext.as_deref() {
+            Some("demiurg") => {
+                read().and_then(|b| project::from_bytes(&b).map_err(|e| e.to_string()))
+            }
+            Some("vox") => {
+                read().and_then(|b| VoxelModel::from_vox_bytes(&b).map_err(|e| e.to_string()))
+            }
+            Some("kv6") => {
+                read().and_then(|b| VoxelModel::from_kv6_bytes(&b).map_err(|e| e.to_string()))
+            }
+            _ => {
+                eprintln!("demiurg: ignored dropped file {}", path.display());
+                return;
+            }
+        };
+        match parsed {
+            Ok(m) => {
+                self.load_model(m);
+                self.doc_name = stem_of(path);
+                if ext.as_deref() == Some("demiurg") {
+                    self.project_path = Some(path.to_path_buf());
+                }
+            }
+            Err(e) => eprintln!("demiurg: {}: {e}", path.display()),
+        }
+    }
+
     /// Replace the document model, rebuild the sprite, refresh the
     /// palette, and reframe.
     fn load_model(&mut self, model: VoxelModel) {
@@ -1545,6 +1634,8 @@ impl App {
         self.editor.sync_resize_dims();
         self.editor.selection.clear();
         self.editor.float = None; // a loaded model starts with no float
+        self.editor.reference = None; // a stale guide wouldn't align; drop it
+        self.editor.reference_dirty = true;
         self.drag = None;
         self.project_path = None; // callers re-set it for a `.demiurg` open
         self.camera = self.view.framing_camera();
@@ -1599,6 +1690,18 @@ impl App {
             self.editor.refresh_palette();
             self.prune_selection();
             self.editor.dirty = false;
+        }
+        // Refresh the reference grid (loaded / moved / toggled / removed).
+        if self.editor.reference_dirty {
+            let pivot = self.editor.document.pivot();
+            let cells = self
+                .editor
+                .reference
+                .as_ref()
+                .map(reference::Reference::cells)
+                .unwrap_or_default();
+            self.view.set_reference(&cells, pivot);
+            self.editor.reference_dirty = false;
         }
         self.update_title();
 
@@ -1785,6 +1888,9 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => self.request_exit(event_loop),
+            // Drag-and-drop: an image becomes the reference layer; a model
+            // file (.kv6/.vox/.demiurg) opens as the model.
+            WindowEvent::DroppedFile(path) => self.on_dropped_file(&path),
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.resize(size.width, size.height);

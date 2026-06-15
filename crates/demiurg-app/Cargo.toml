@@ -25,6 +25,16 @@ roxlap-core.workspace = true
 winit.workspace = true
 egui-winit.workspace = true
 rfd.workspace = true
+# Decode reference images (pixel-art guides). Only the pixel-art / game-art
+# codecs, to keep the dependency lean.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "bmp",
+    "gif",
+    "tga",
+    "webp",
+] }
 
 [lints]
 workspace = true

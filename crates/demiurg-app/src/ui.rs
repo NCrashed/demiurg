@@ -11,6 +11,7 @@ use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{AXIS_COLORS, RenderMode, ViewDir};
 use roxlap_render::egui;
 
+use crate::reference::RefAxis;
 use crate::{Editor, Tool};
 
 /// The viewport axis colour (X red, Y green, Z blue) as an egui colour,
@@ -41,6 +42,10 @@ pub struct UiActions {
     pub open_kv6: bool,
     pub open_vox: bool,
     pub open_project: bool,
+    /// Open a reference image (file dialog).
+    pub open_reference: bool,
+    /// Remove the current reference image.
+    pub remove_reference: bool,
     /// Save the project (Ctrl+S): overwrite the known path or prompt.
     pub save: bool,
     /// Save the project to a new path (dialog).
@@ -105,6 +110,10 @@ pub fn build(
                 }
                 if ui.button(t(Msg::OpenProject)).clicked() {
                     actions.open_project = true;
+                    ui.close();
+                }
+                if ui.button(t(Msg::OpenReference)).clicked() {
+                    actions.open_reference = true;
                     ui.close();
                 }
                 ui.separator();
@@ -184,104 +193,109 @@ pub fn build(
     egui::Panel::left("tools")
         .default_size(200.0)
         .show_inside(ui, |ui| {
-            ui.heading(t(Msg::Tools));
-            // The 1-8 digits double as keyboard shortcuts (see on_key);
-            // show them on the buttons so they're discoverable.
-            for (i, (tool, msg)) in [
-                (Tool::Place, Msg::Place),
-                (Tool::Erase, Msg::Erase),
-                (Tool::Paint, Msg::Paint),
-                (Tool::Eyedropper, Msg::Eyedropper),
-                (Tool::Box, Msg::BoxTool),
-                (Tool::Sphere, Msg::Sphere),
-                (Tool::Fill, Msg::FloodFill),
-                (Tool::Select, Msg::Select),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                ui.selectable_value(&mut editor.tool, tool, format!("{}.  {}", i + 1, t(msg)));
-            }
-            if editor.tool == Tool::Sphere {
-                ui.add(egui::Slider::new(&mut editor.radius, 0..=8).text(t(Msg::Radius)));
-            }
-
-            ui.separator();
-            ui.label(t(Msg::Colour));
-            let mut rgb = color_to_rgb(editor.color);
-            if ui.color_edit_button_srgb(&mut rgb).changed() {
-                editor.color = rgb_to_color(rgb);
-            }
-            ui.horizontal_wrapped(|ui| {
-                for &preset in &PRESETS {
-                    if swatch(ui, preset).clicked() {
-                        editor.color = preset;
-                    }
+            // Scroll the tool panel: with all sections it can exceed a
+            // short window's height.
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.heading(t(Msg::Tools));
+                // The 1-8 digits double as keyboard shortcuts (see on_key);
+                // show them on the buttons so they're discoverable.
+                for (i, (tool, msg)) in [
+                    (Tool::Place, Msg::Place),
+                    (Tool::Erase, Msg::Erase),
+                    (Tool::Paint, Msg::Paint),
+                    (Tool::Eyedropper, Msg::Eyedropper),
+                    (Tool::Box, Msg::BoxTool),
+                    (Tool::Sphere, Msg::Sphere),
+                    (Tool::Fill, Msg::FloodFill),
+                    (Tool::Select, Msg::Select),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    ui.selectable_value(&mut editor.tool, tool, format!("{}.  {}", i + 1, t(msg)));
                 }
-            });
+                if editor.tool == Tool::Sphere {
+                    ui.add(egui::Slider::new(&mut editor.radius, 0..=8).text(t(Msg::Radius)));
+                }
 
-            // Colours already used in the model, so artists can re-pick an
-            // exact existing shade. Cloned out first to avoid borrowing
-            // `editor` immutably while the closure writes `editor.color`.
-            if !editor.model_palette.is_empty() {
                 ui.separator();
-                ui.label(t(Msg::ModelColours));
-                let used = editor.model_palette.clone();
+                ui.label(t(Msg::Colour));
+                let mut rgb = color_to_rgb(editor.color);
+                if ui.color_edit_button_srgb(&mut rgb).changed() {
+                    editor.color = rgb_to_color(rgb);
+                }
                 ui.horizontal_wrapped(|ui| {
-                    for c in used {
-                        if swatch(ui, c).clicked() {
-                            editor.color = c;
+                    for &preset in &PRESETS {
+                        if swatch(ui, preset).clicked() {
+                            editor.color = preset;
                         }
                     }
                 });
-            }
 
-            ui.separator();
-            ui.label(t(Msg::Mirror));
-            ui.horizontal(|ui| {
-                for (axis, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
-                    ui.checkbox(
-                        &mut editor.document.mirror[axis],
-                        egui::RichText::new(name).color(axis_color(axis)),
-                    );
+                // Colours already used in the model, so artists can re-pick an
+                // exact existing shade. Cloned out first to avoid borrowing
+                // `editor` immutably while the closure writes `editor.color`.
+                if !editor.model_palette.is_empty() {
+                    ui.separator();
+                    ui.label(t(Msg::ModelColours));
+                    let used = editor.model_palette.clone();
+                    ui.horizontal_wrapped(|ui| {
+                        for c in used {
+                            if swatch(ui, c).clicked() {
+                                editor.color = c;
+                            }
+                        }
+                    });
                 }
-            });
 
-            ui.separator();
-            ui.label(t(Msg::Pivot));
-            let mut pivot = editor.document.pivot();
-            let mut changed = false;
-            ui.horizontal(|ui| {
-                for (axis, name) in [(0, "x"), (1, "y"), (2, "z")] {
-                    ui.colored_label(axis_color(axis), name);
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut pivot[axis]).speed(0.5))
-                        .changed();
+                ui.separator();
+                ui.label(t(Msg::Mirror));
+                ui.horizontal(|ui| {
+                    for (axis, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
+                        ui.checkbox(
+                            &mut editor.document.mirror[axis],
+                            egui::RichText::new(name).color(axis_color(axis)),
+                        );
+                    }
+                });
+
+                ui.separator();
+                ui.label(t(Msg::Pivot));
+                let mut pivot = editor.document.pivot();
+                let mut changed = false;
+                ui.horizontal(|ui| {
+                    for (axis, name) in [(0, "x"), (1, "y"), (2, "z")] {
+                        ui.colored_label(axis_color(axis), name);
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut pivot[axis]).speed(0.5))
+                            .changed();
+                    }
+                });
+                if changed {
+                    editor.document.set_pivot(pivot);
+                    editor.dirty = true;
                 }
+                if ui.button(t(Msg::CenterPivot)).clicked() {
+                    let (dx, dy, dz) = editor.document.dims();
+                    editor
+                        .document
+                        .set_pivot([dx as f32 * 0.5, dy as f32 * 0.5, dz as f32 * 0.5]);
+                    editor.dirty = true;
+                }
+
+                size_panel(ui, editor, &t);
+                selection_panel(ui, editor, actions, &t);
+                reference_panel(ui, editor, actions, &t);
+                views_panel(ui, actions, &t);
+
+                ui.separator();
+                if editor.tool == Tool::Select {
+                    ui.small(t(Msg::HelpSelect));
+                } else {
+                    ui.small(t(Msg::HelpApply));
+                }
+                ui.small(t(Msg::HelpOrbit));
             });
-            if changed {
-                editor.document.set_pivot(pivot);
-                editor.dirty = true;
-            }
-            if ui.button(t(Msg::CenterPivot)).clicked() {
-                let (dx, dy, dz) = editor.document.dims();
-                editor
-                    .document
-                    .set_pivot([dx as f32 * 0.5, dy as f32 * 0.5, dz as f32 * 0.5]);
-                editor.dirty = true;
-            }
-
-            size_panel(ui, editor, &t);
-            selection_panel(ui, editor, actions, &t);
-            views_panel(ui, actions, &t);
-
-            ui.separator();
-            if editor.tool == Tool::Select {
-                ui.small(t(Msg::HelpSelect));
-            } else {
-                ui.small(t(Msg::HelpApply));
-            }
-            ui.small(t(Msg::HelpOrbit));
         });
 
     draw_marquee(ui, marquee);
@@ -429,6 +443,53 @@ fn selection_panel(
             actions.paste_sel = true;
         }
     });
+}
+
+/// The Reference section: load a pixel-art guide and place it. When one is
+/// loaded, shows its name/size and controls for the plane (Front/Side/Top),
+/// depth offset, horizontal/vertical flips, visibility, and removal. Edits
+/// mutate the reference directly and flag it for a viewport refresh.
+fn reference_panel(
+    ui: &mut egui::Ui,
+    editor: &mut Editor,
+    actions: &mut UiActions,
+    t: &impl Fn(Msg) -> &'static str,
+) {
+    ui.separator();
+    ui.label(t(Msg::Reference));
+    let Some(r) = &mut editor.reference else {
+        if ui.button(t(Msg::OpenReference)).clicked() {
+            actions.open_reference = true;
+        }
+        return;
+    };
+
+    ui.small(format!("{}  {}×{}", r.name, r.width, r.height));
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        for (axis, msg) in [
+            (RefAxis::Front, Msg::Front),
+            (RefAxis::Side, Msg::Side),
+            (RefAxis::Top, Msg::Top),
+        ] {
+            changed |= ui.selectable_value(&mut r.axis, axis, t(msg)).clicked();
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(t(Msg::Depth));
+        changed |= ui.add(egui::DragValue::new(&mut r.depth)).changed();
+        changed |= ui.checkbox(&mut r.flip_h, "↔").changed();
+        changed |= ui.checkbox(&mut r.flip_v, "↕").changed();
+    });
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut r.visible, t(Msg::Show)).changed();
+        if ui.button(t(Msg::Remove)).clicked() {
+            actions.remove_reference = true;
+        }
+    });
+    if changed {
+        editor.reference_dirty = true;
+    }
 }
 
 /// The Views section: six buttons that snap the camera to an axis-aligned

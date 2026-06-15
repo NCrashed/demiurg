@@ -7,6 +7,16 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- Reference images: load pixel art (PNG / BMP / JPG / GIF / TGA / WEBP) as a
+  flat, 1-voxel-thick guide to trace voxels from — via File ▸ Open reference
+  image or by dragging an image onto the window. It's non-destructive (a
+  separate render layer, never saved/exported/edited): place it on the Front /
+  Side / Top plane, offset its depth, flip it, hide it, or remove it. Dropping a
+  `.kv6` / `.vox` / `.demiurg` file opens it as the model. The tool panel now
+  scrolls so every section stays reachable.
+
 ## [0.3.0] - 2026-06-15
 
 MagicaVoxel `.vox` interop, and the CPU renderer is now the default to dodge a
