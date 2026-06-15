@@ -59,8 +59,9 @@ demiurg [path.kv6 | path.demiurg]    # no path -> a blank canvas
   `W`/`S` zoom, `Home` recenters; the **Views** panel and numpad `1`/`3`/`7`
   snap to axis views (`Ctrl` for the opposite face).
 - **Edit**: `Ctrl+Z` undo, `Ctrl+Y` / `Ctrl+Shift+Z` redo.
-- **Render**: GPU by default; `ROXLAP_GPU=0` forces the CPU renderer. Switch
-  sprite/voxel preview in the View menu.
+- **Render**: GPU by default; `--cpu` (or `ROXLAP_GPU=0`) forces the CPU
+  renderer — use it if the window opens white and frozen (a GPU/driver that
+  hangs startup). Switch sprite/voxel preview in the View menu.
 - **Language**: `DEMIURG_LANG=ru`, or the Language menu (English / Русский).
 
 ## Layout

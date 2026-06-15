@@ -3,7 +3,7 @@
 //! provides the tools, palette, mirror, pivot, and file menu.
 //!
 //! Usage:
-//!   demiurg [path.kv6 | path.demiurg]   # no path -> a blank canvas
+//!   demiurg [--cpu] [path.kv6 | path.demiurg]   # no path -> a blank canvas
 //!
 //! Controls: left mouse applies the active tool (hold to drag-paint); the
 //! Place tool falls back to the floor (the volume's bottom face) when the
@@ -22,8 +22,8 @@
 //! known); saves run on a background thread (with a spinner) so the UI
 //! never freezes, and a periodic autosave to the OS temp dir is recovered
 //! on the next launch after a crash. `DEMIURG_LANG=ru` starts in Russian.
-//! The GPU backend is used by default; `ROXLAP_GPU=0` forces the CPU
-//! renderer.
+//! The GPU backend is used by default; `--cpu` (or `ROXLAP_GPU=0`) forces
+//! the CPU renderer — the escape hatch if a GPU/driver hangs startup.
 
 mod ui;
 
@@ -485,7 +485,11 @@ impl Editor {
 }
 
 fn main() {
-    let arg = std::env::args().nth(1);
+    // `--cpu` forces the CPU renderer (escape hatch for a GPU that hangs);
+    // the first non-flag argument is the file to open.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let force_cpu = args.iter().any(|a| a == "--cpu");
+    let arg = args.into_iter().find(|a| !a.starts_with('-'));
     let autosave = autosave_path();
 
     // A `.demiurg` argument is an editable project (its path drives Ctrl+S);
@@ -539,6 +543,7 @@ fn main() {
         marquee: None,
         drag: None,
         last_tool: Tool::Place,
+        force_cpu,
         next_frame: Instant::now(),
     };
 
@@ -664,6 +669,8 @@ struct App {
     /// The active tool last frame, to detect a tool switch (keyboard or
     /// UI) and settle a floating layer when the user leaves Select.
     last_tool: Tool,
+    /// Force the CPU renderer (`--cpu`); skips GPU device creation.
+    force_cpu: bool,
     /// When the next frame should render (drives the ~60 fps cap).
     next_frame: Instant,
 }
@@ -1679,9 +1686,10 @@ impl ApplicationHandler for App {
                 .expect("winit: create_window"),
         );
 
-        // GPU backend by default (roxlap falls back to CPU if init
-        // fails); set ROXLAP_GPU=0 to force the CPU renderer.
-        let want_gpu = std::env::var("ROXLAP_GPU").map_or(true, |v| v != "0");
+        // GPU backend by default (roxlap falls back to CPU if init fails);
+        // `--cpu` or `ROXLAP_GPU=0` forces the CPU renderer — an escape
+        // hatch when a GPU/driver hangs device creation.
+        let want_gpu = !self.force_cpu && std::env::var("ROXLAP_GPU").map_or(true, |v| v != "0");
         let mut opts = RenderOptions {
             want_gpu,
             // The empty (sprite-only) scene's background comes from the
@@ -1690,10 +1698,11 @@ impl ApplicationHandler for App {
             clear_sky: SKY_COLOR,
             ..RenderOptions::default()
         };
-        // vsync-cap the GPU present (Fifo) so it doesn't render the idle
-        // editor scene flat-out; the ~60 fps frame timer caps the CPU
-        // path the same way.
-        opts.gpu.uncapped_present = false;
+        // Present uncapped (no forced vsync). The ~60 fps `about_to_wait`
+        // frame timer already limits how often we render, so the GPU isn't
+        // overworked, and this avoids Fifo/vsync present stalls seen on some
+        // Windows GPUs / drivers / remote sessions (a white frozen window).
+        opts.gpu.uncapped_present = true;
         let size = window.inner_size();
         let renderer = SceneRenderer::new(window.clone(), (size.width, size.height), &opts);
         match renderer.adapter_info() {

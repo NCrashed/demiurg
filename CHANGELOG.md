@@ -27,6 +27,11 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ### Fixed
 
+- Startup could open a white, frozen window on some Windows GPUs/drivers/remote
+  sessions: the forced Fifo (vsync) present mode could stall `present()`
+  indefinitely. Present is now uncapped — the ~60 fps frame timer already caps
+  GPU load — and `--cpu` was added as an escape hatch (alongside `ROXLAP_GPU=0`)
+  when GPU device creation itself hangs.
 - Place tool: when the cursor ray hits no voxel it now falls back to the model's
   floor (the volume's bottom face), so you can seed voxels — and rebuild a model
   emptied of its last voxel — instead of having nothing to click.
