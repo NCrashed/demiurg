@@ -231,7 +231,9 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Language => "Language",
         Msg::HelpApply => "LMB: apply tool",
         Msg::HelpOrbit => "RMB drag: orbit · wheel: zoom",
-        Msg::HelpSelect => "drag: marquee · Shift add · Alt remove · Ctrl+click pick",
+        Msg::HelpSelect => {
+            "drag selected: move · drag empty: marquee · Shift/Alt +/- · Ctrl+click pick"
+        }
         Msg::Untitled => "untitled",
         Msg::ConfirmQuitTitle => "Unsaved changes",
         Msg::ConfirmQuitBody => "Quit without saving?",
@@ -285,7 +287,9 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Language => "Язык",
         Msg::HelpApply => "ЛКМ: применить инструмент",
         Msg::HelpOrbit => "ПКМ: вращение · колесо: зум",
-        Msg::HelpSelect => "тянуть: рамка · Shift добавить · Alt убрать · Ctrl+клик пипетка",
+        Msg::HelpSelect => {
+            "тянуть выделенный: двигать · тянуть пустоту: рамка · Shift/Alt +/- · Ctrl+клик пипетка"
+        }
         Msg::Untitled => "без названия",
         Msg::ConfirmQuitTitle => "Несохранённые изменения",
         Msg::ConfirmQuitBody => "Выйти без сохранения?",

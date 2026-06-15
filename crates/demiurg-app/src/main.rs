@@ -6,8 +6,10 @@
 //!   demiurg [path.kv6 | path.demiurg]   # no path -> a blank canvas
 //!
 //! Controls: left mouse applies the active tool (hold to drag-paint);
-//! `Ctrl`+click eyedrops a colour; right-mouse drag orbits; wheel and
-//! `W`/`S` zoom; arrow keys orbit. Hotkeys: `1`-`8` pick a tool (`8` is
+//! with the Select tool, dragging a selected voxel moves the selection in
+//! that face's plane (it floats until deselected); `Ctrl`+click eyedrops a
+//! colour; right-mouse drag orbits; wheel and `W`/`S` zoom; arrow keys
+//! orbit. Hotkeys: `1`-`8` pick a tool (`8` is
 //! Select), `Ctrl+Z` undo, `Ctrl+Y` / `Ctrl+Shift+Z` redo, `Ctrl+C`
 //! copies the selection and `Ctrl+V` pastes it as a floating layer at its
 //! original position (settled into the model on deselect), `Delete`
@@ -86,14 +88,37 @@ struct Marquee {
     mode: SelMode,
 }
 
-/// A floating layer: voxels lifted above the model (created by paste),
-/// rendered on top but **not** part of the document until committed — so
-/// they can sit on, or later be dragged over, other voxels without
-/// overwriting them. Cells are absolute voxel coordinates (`i32`, so a
-/// drag can carry them out of bounds and back) plus colour. Committing
-/// writes the in-bounds cells into the model as one undo step.
+/// A floating layer: voxels lifted above the model, rendered on top but
+/// **not** part of the document until committed — so they can sit on, or
+/// be dragged over, other voxels without overwriting them. Created by
+/// paste (copies, `lifted_from` empty) or by grabbing a selection to move
+/// it (`lifted_from` = the source cells, cleared on commit). `cells` are
+/// absolute voxel coordinates (`i32`, so a drag can carry them out of
+/// bounds and back) plus colour. Committing clears `lifted_from` and
+/// writes the in-bounds `cells`, both in one undo step.
 struct FloatLayer {
     cells: Vec<([i32; 3], u32)>,
+    lifted_from: Vec<[u32; 3]>,
+}
+
+/// An in-progress move drag (Select tool): grab a selected voxel's face
+/// and slide the floating layer in that face's plane, in whole voxels.
+struct DragMove {
+    /// Voxel axis of the grabbed face normal (0/1/2); motion is locked out
+    /// of this axis, so the layer slides in the perpendicular plane.
+    axis: usize,
+    /// World coordinate of the drag plane along `axis` (the grabbed face).
+    plane_coord: f64,
+    /// World point where the grab ray met the plane (the slide origin).
+    anchor: [f64; 3],
+    /// Float cells when the drag began; the live layer is this offset by
+    /// the current integer delta (so the move never drifts).
+    base: Vec<([i32; 3], u32)>,
+    /// Whether the selection has been lifted into a float yet — deferred
+    /// to the first real movement, so a plain click doesn't lift.
+    lifted: bool,
+    /// Last applied voxel delta, to skip redundant rebuilds.
+    last_delta: [i32; 3],
 }
 
 /// The in-bounds cells of a float layer as a selection set (for the
@@ -103,6 +128,35 @@ fn float_selection(cells: &[([i32; 3], u32)], dims: (u32, u32, u32)) -> HashSet<
         .iter()
         .filter_map(|(p, _)| in_bounds(*p, dims))
         .collect()
+}
+
+/// Snap a cursor ray to a whole-voxel offset within a drag plane: meet the
+/// ray `(o, d)` with the plane perpendicular to `axis` at `plane_coord`,
+/// then round the in-plane displacement from `anchor` to whole voxels
+/// (the `axis` component stays 0). `None` if the ray is parallel to the
+/// plane or meets it behind the camera.
+#[allow(clippy::cast_possible_truncation)] // the delta is a small voxel count
+fn plane_drag_delta(
+    o: [f64; 3],
+    d: [f64; 3],
+    axis: usize,
+    plane_coord: f64,
+    anchor: [f64; 3],
+) -> Option<[i32; 3]> {
+    if d[axis].abs() < 1e-9 {
+        return None;
+    }
+    let t = (plane_coord - o[axis]) / d[axis];
+    if t <= 0.0 {
+        return None;
+    }
+    let mut delta = [0i32; 3];
+    for j in 0..3 {
+        if j != axis {
+            delta[j] = (o[j] + d[j] * t - anchor[j]).round() as i32;
+        }
+    }
+    Some(delta)
 }
 
 /// The selection mode implied by the held modifiers (Ctrl is reserved for
@@ -177,6 +231,11 @@ impl Editor {
             return Cow::Borrowed(self.document.model());
         };
         let mut composite = self.document.model().clone();
+        // Clear the cells the layer was lifted from, so a moved selection
+        // leaves a hole instead of a ghost copy.
+        for &p in &layer.lifted_from {
+            composite.set(p[0], p[1], p[2], 0);
+        }
         let (dx, dy, dz) = composite.dims();
         for &(pos, col) in &layer.cells {
             if pos[0] >= 0 && pos[1] >= 0 && pos[2] >= 0 {
@@ -313,6 +372,7 @@ fn main() {
         last_title: None,
         confirm_quit: false,
         marquee: None,
+        drag: None,
         last_tool: Tool::Place,
         next_frame: Instant::now(),
     };
@@ -418,6 +478,8 @@ struct App {
     confirm_quit: bool,
     /// An in-progress selection marquee drag (Select tool), else `None`.
     marquee: Option<Marquee>,
+    /// An in-progress move drag of the floating layer, else `None`.
+    drag: Option<DragMove>,
     /// The active tool last frame, to detect a tool switch (keyboard or
     /// UI) and settle a floating layer when the user leaves Select.
     last_tool: Tool,
@@ -473,8 +535,12 @@ impl App {
             let cells: Vec<[u32; 3]> = self.editor.selection.iter().copied().collect();
             lines.extend(demiurg_view::selection_lines_3d(pivot, &cells));
         }
-        if let Some(cell) = self.hover_cell() {
-            lines.extend(demiurg_view::voxel_box_lines_3d(pivot, cell));
+        // No hover box mid-drag: the selection outline already tracks the
+        // moving layer, and the hover would pick the model under it.
+        if self.drag.is_none() {
+            if let Some(cell) = self.hover_cell() {
+                lines.extend(demiurg_view::voxel_box_lines_3d(pivot, cell));
+            }
         }
         lines
     }
@@ -489,6 +555,167 @@ impl App {
         pick_voxel(self.editor.document.model(), ray.origin, ray.dir)
     }
 
+    /// The cursor ray as world `(origin, dir)` component arrays.
+    fn pointer_ray(&self) -> Option<([f64; 3], [f64; 3])> {
+        let cam = self.camera.to_roxlap();
+        let r = self
+            .renderer
+            .as_ref()?
+            .view_ray(&cam, self.cursor.0, self.cursor.1)?;
+        Some((
+            [r.origin.x, r.origin.y, r.origin.z],
+            [r.dir.x, r.dir.y, r.dir.z],
+        ))
+    }
+
+    /// Pick against the **composite** (model + floating layer), so a
+    /// floating voxel can be grabbed even though it isn't in the document.
+    fn grab_pick(&self) -> Option<PickHit> {
+        let cam = self.camera.to_roxlap();
+        let ray = self
+            .renderer
+            .as_ref()?
+            .view_ray(&cam, self.cursor.0, self.cursor.1)?;
+        pick_voxel(&self.editor.display_model(), ray.origin, ray.dir)
+    }
+
+    /// If the cursor grabbed a *selected* voxel's face (plain click, no
+    /// Shift/Alt), arm a move drag in that face's plane and return `true`.
+    /// The selection isn't lifted yet — that waits for the first move.
+    #[allow(clippy::cast_precision_loss)] // voxel coords are tiny; f64 is exact
+    fn try_begin_drag(&mut self) -> bool {
+        if self.editor.selection.is_empty()
+            || self.modifiers.shift_key()
+            || self.modifiers.alt_key()
+        {
+            return false;
+        }
+        let Some(hit) = self.grab_pick() else {
+            return false;
+        };
+        if !self.editor.selection.contains(&hit.voxel) {
+            return false; // grabbing an unselected voxel starts a new selection
+        }
+        // The grabbed face: its normal picks the locked axis, and the face
+        // boundary in world space is the drag plane.
+        let axis = (0..3).find(|&a| hit.normal[a] != 0).unwrap_or(0);
+        let pivot = self.editor.document.pivot();
+        let face = f64::from(hit.voxel[axis]) + f64::from(i32::from(hit.normal[axis] > 0));
+        let plane_coord = face - f64::from(pivot[axis]);
+        let Some((o, d)) = self.pointer_ray() else {
+            return false;
+        };
+        if d[axis].abs() < 1e-9 {
+            return false; // looking edge-on: no stable plane intersection
+        }
+        let t = (plane_coord - o[axis]) / d[axis];
+        if t <= 0.0 {
+            return false;
+        }
+        let anchor = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
+        // Drag an existing float directly; a model selection lifts lazily.
+        let (base, lifted) = match &self.editor.float {
+            Some(f) => (f.cells.clone(), true),
+            None => (Vec::new(), false),
+        };
+        self.drag = Some(DragMove {
+            axis,
+            plane_coord,
+            anchor,
+            base,
+            lifted,
+            last_delta: [0; 3],
+        });
+        true
+    }
+
+    /// Lift the selected model voxels into a floating layer (recording
+    /// where they came from, to clear on commit) and return them. No-op
+    /// returning empty if nothing occupied is selected.
+    #[allow(clippy::cast_possible_wrap)] // selection coords are far below i32::MAX
+    fn lift_selection_to_float(&mut self) -> Vec<([i32; 3], u32)> {
+        let model = self.editor.document.model();
+        let cells: Vec<([i32; 3], u32)> = self
+            .editor
+            .selection
+            .iter()
+            .filter_map(|&c| {
+                let col = model.get(c[0], c[1], c[2]);
+                (col != 0).then_some(([c[0] as i32, c[1] as i32, c[2] as i32], col))
+            })
+            .collect();
+        if cells.is_empty() {
+            return Vec::new();
+        }
+        let lifted_from = self.editor.selection.iter().copied().collect();
+        self.editor.float = Some(FloatLayer {
+            cells: cells.clone(),
+            lifted_from,
+        });
+        self.editor.dirty = true;
+        cells
+    }
+
+    /// Update the move drag from the current cursor: snap the cursor ray
+    /// to a whole-voxel offset in the drag plane and offset the floating
+    /// layer (lifting the selection on the first real move).
+    fn update_drag(&mut self) {
+        let Some(drag) = &self.drag else {
+            return;
+        };
+        let (axis, plane_coord, anchor, last_delta, lifted) = (
+            drag.axis,
+            drag.plane_coord,
+            drag.anchor,
+            drag.last_delta,
+            drag.lifted,
+        );
+        let Some((o, d)) = self.pointer_ray() else {
+            return;
+        };
+        let Some(delta) = plane_drag_delta(o, d, axis, plane_coord, anchor) else {
+            return;
+        };
+        if delta == last_delta {
+            return;
+        }
+
+        // Lift the model selection into a float on the first real move.
+        if !lifted {
+            if delta == [0, 0, 0] {
+                return;
+            }
+            let base = self.lift_selection_to_float();
+            if base.is_empty() {
+                return;
+            }
+            if let Some(drag) = self.drag.as_mut() {
+                drag.base = base;
+                drag.lifted = true;
+            }
+        }
+
+        let Some(drag) = &self.drag else {
+            return;
+        };
+        let moved: Vec<([i32; 3], u32)> = drag
+            .base
+            .iter()
+            .map(|&(p, col)| ([p[0] + delta[0], p[1] + delta[1], p[2] + delta[2]], col))
+            .collect();
+        let dims = self.editor.document.dims();
+        if let Some(f) = self.editor.float.as_mut() {
+            f.cells = moved;
+        }
+        if let Some(f) = &self.editor.float {
+            self.editor.selection = float_selection(&f.cells, dims);
+        }
+        if let Some(drag) = self.drag.as_mut() {
+            drag.last_delta = delta;
+        }
+        self.editor.dirty = true;
+    }
+
     /// Left-button press: a quick eyedropper (Ctrl), a selection marquee
     /// (Select tool), a drag-paint stroke (continuous tools), or a
     /// click-once tool.
@@ -501,9 +728,12 @@ impl App {
             self.pick_color_under_cursor();
             return;
         }
-        // The Select tool drags a marquee instead of editing voxels. A
-        // new gesture first settles any floating (pasted) layer.
+        // The Select tool: grabbing a selected voxel starts a move drag;
+        // anything else settles any floating layer and starts a marquee.
         if self.editor.tool == Tool::Select {
+            if self.try_begin_drag() {
+                return;
+            }
             self.commit_float();
             self.marquee = Some(Marquee {
                 start: self.cursor,
@@ -559,9 +789,13 @@ impl App {
         self.editor.apply(hit);
     }
 
-    /// Left-button release: resolve a marquee drag, or close the
-    /// drag-paint stroke (one undo step).
+    /// Left-button release: end a move drag (the layer keeps floating
+    /// until deselected), resolve a marquee, or close the drag-paint
+    /// stroke (one undo step).
     fn end_paint(&mut self) {
+        if self.drag.take().is_some() {
+            return; // the moved layer stays floating until deselect
+        }
         if self.marquee.is_some() {
             self.finalize_marquee();
             return;
@@ -665,12 +899,18 @@ impl App {
         self.commit_float();
         let cells = self.editor.clipboard.clone();
         self.editor.selection = float_selection(&cells, self.editor.document.dims());
-        self.editor.float = Some(FloatLayer { cells });
+        // A paste only adds voxels — nothing to clear on commit.
+        self.editor.float = Some(FloatLayer {
+            cells,
+            lifted_from: Vec::new(),
+        });
         self.editor.dirty = true; // rebuild the composite with the layer
     }
 
-    /// Bake the floating layer into the model (its in-bounds cells, one
-    /// undo step) and drop it. No-op when nothing floats.
+    /// Bake the floating layer into the model and drop it: clear the cells
+    /// it was lifted from and write its in-bounds cells, all as one undo
+    /// step (so a move is a single, reversible edit). No-op when nothing
+    /// floats.
     fn commit_float(&mut self) {
         let Some(f) = self.editor.float.take() else {
             return;
@@ -679,19 +919,23 @@ impl App {
         // fully out of bounds, simply removed), so a rebuild is due.
         self.editor.dirty = true;
         let dims = self.editor.document.dims();
-        let cells: Vec<([u32; 3], u32)> = f
-            .cells
-            .iter()
-            .filter_map(|(p, col)| in_bounds(*p, dims).map(|v| (v, *col)))
-            .collect();
+        // Clears first, then writes — set_cells keeps the last value per
+        // cell, so a moved voxel overwrites its own cleared source.
+        let mut cells: Vec<([u32; 3], u32)> = f.lifted_from.iter().map(|&p| (p, 0)).collect();
+        cells.extend(
+            f.cells
+                .iter()
+                .filter_map(|(p, col)| in_bounds(*p, dims).map(|v| (v, *col))),
+        );
         if !cells.is_empty() {
             self.editor.document.set_cells(cells);
         }
     }
 
     /// Deselect: settle any floating layer into the model and clear the
-    /// selection highlight.
+    /// selection highlight and any in-progress drag.
     fn deselect(&mut self) {
+        self.drag = None;
         self.commit_float();
         self.editor.selection.clear();
     }
@@ -895,6 +1139,7 @@ impl App {
         self.editor.sync_resize_dims();
         self.editor.selection.clear();
         self.editor.float = None; // a loaded model starts with no float
+        self.drag = None;
         self.camera = self.view.framing_camera();
         self.editor.dirty = false;
     }
@@ -1132,6 +1377,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
+                if self.drag.is_some() {
+                    self.update_drag();
+                }
                 if self.painting {
                     self.paint_step();
                 }
@@ -1190,6 +1438,7 @@ mod tests {
         let mut ed = Editor::new(VoxelModel::new(4, 4, 4));
         ed.float = Some(FloatLayer {
             cells: vec![([1, 1, 1], 0x80ff_0000), ([9, 9, 9], 0x8000_ff00)],
+            lifted_from: Vec::new(),
         });
         let disp = ed.display_model();
         assert_eq!(disp.get(1, 1, 1), 0x80ff_0000, "in-bounds float shows");
@@ -1198,6 +1447,50 @@ mod tests {
             ed.document.model().get(1, 1, 1),
             0,
             "the document model is not mutated by display"
+        );
+    }
+
+    #[test]
+    fn plane_drag_delta_snaps_in_plane_and_locks_the_axis() {
+        // Plane perpendicular to z (axis 2) at z=0; a ray straight down +z
+        // from (3.4, -1.6, -5) meets it at (3.4, -1.6, 0).
+        let delta = plane_drag_delta([3.4, -1.6, -5.0], [0.0, 0.0, 1.0], 2, 0.0, [0.0; 3]);
+        assert_eq!(delta, Some([3, -2, 0]), "x/y round, z is locked to 0");
+
+        // A ray parallel to the plane never meets it.
+        assert_eq!(
+            plane_drag_delta([0.0; 3], [1.0, 0.0, 0.0], 2, 5.0, [0.0; 3]),
+            None
+        );
+        // A plane behind the camera (negative t) is rejected.
+        assert_eq!(
+            plane_drag_delta([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 2, -3.0, [0.0; 3]),
+            None
+        );
+    }
+
+    #[test]
+    fn display_model_leaves_a_hole_where_a_moved_layer_was_lifted() {
+        let mut m = VoxelModel::new(4, 4, 4);
+        m.set(0, 0, 0, 0x80ff_0000);
+        let mut ed = Editor::new(m);
+        // Simulate a move of (0,0,0) -> (2,2,2): the layer carries the
+        // voxel and remembers its source cell to clear.
+        ed.float = Some(FloatLayer {
+            cells: vec![([2, 2, 2], 0x80ff_0000)],
+            lifted_from: vec![[0, 0, 0]],
+        });
+        let disp = ed.display_model();
+        assert_eq!(
+            disp.get(2, 2, 2),
+            0x80ff_0000,
+            "voxel shows at the new spot"
+        );
+        assert_eq!(disp.get(0, 0, 0), 0, "and the source cell reads empty");
+        assert_eq!(
+            ed.document.model().get(0, 0, 0),
+            0x80ff_0000,
+            "the document still holds the original until commit"
         );
     }
 }
