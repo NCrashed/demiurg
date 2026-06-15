@@ -11,6 +11,8 @@
 //! depth-tests them against the rendered frame — so the model occludes
 //! lines behind it. No screen projection here anymore.
 
+use std::collections::HashSet;
+
 use demiurg_core::VoxelModel;
 use glam::DVec3;
 use roxlap_core::Camera;
@@ -202,6 +204,78 @@ fn box_lines(
             depth_test,
         })
         .collect()
+}
+
+/// The four corner offsets of each voxel face, with the neighbour
+/// direction that hides it. Corners wind around the face so consecutive
+/// pairs are its edges.
+const VOXEL_FACES: [([i32; 3], [[i32; 3]; 4]); 6] = [
+    ([-1, 0, 0], [[0, 0, 0], [0, 1, 0], [0, 1, 1], [0, 0, 1]]),
+    ([1, 0, 0], [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]]),
+    ([0, -1, 0], [[0, 0, 0], [0, 0, 1], [1, 0, 1], [1, 0, 0]]),
+    ([0, 1, 0], [[0, 1, 0], [0, 1, 1], [1, 1, 1], [1, 1, 0]]),
+    ([0, 0, -1], [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]]),
+    ([0, 0, 1], [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]]),
+];
+
+/// Wireframe of every **exposed** voxel face's edges (deduplicated), so
+/// voxel boundaries read even where flat shading blends coplanar faces
+/// into one dark patch (no ambient occlusion / light baking). Depth-tested
+/// so the model occludes the back of the wireframe; hidden interior faces
+/// are skipped, so only the surface grid is drawn.
+#[must_use]
+#[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)] // voxel coords are small and guarded
+pub fn voxel_edge_lines_3d(
+    model: &VoxelModel,
+    pivot: [f32; 3],
+    color: u32,
+    width_px: f32,
+) -> Vec<Line3> {
+    let pv = [
+        f64::from(pivot[0]),
+        f64::from(pivot[1]),
+        f64::from(pivot[2]),
+    ];
+    let w = |c: [i32; 3]| {
+        [
+            f64::from(c[0]) - pv[0],
+            f64::from(c[1]) - pv[1],
+            f64::from(c[2]) - pv[2],
+        ]
+    };
+    let mut seen: HashSet<([i32; 3], [i32; 3])> = HashSet::new();
+    let mut lines = Vec::new();
+    for (x, y, z, _) in model.occupied() {
+        let base = [x as i32, y as i32, z as i32];
+        for (n, corners) in VOXEL_FACES {
+            let nb = [base[0] + n[0], base[1] + n[1], base[2] + n[2]];
+            let hidden = nb[0] >= 0
+                && nb[1] >= 0
+                && nb[2] >= 0
+                && model.get(nb[0] as u32, nb[1] as u32, nb[2] as u32) != 0;
+            if hidden {
+                continue;
+            }
+            for i in 0..4 {
+                let p = |k: usize| {
+                    let c = corners[k];
+                    [base[0] + c[0], base[1] + c[1], base[2] + c[2]]
+                };
+                let (a, b) = (p(i), p((i + 1) % 4));
+                let key = if a <= b { (a, b) } else { (b, a) };
+                if seen.insert(key) {
+                    lines.push(Line3 {
+                        a: w(a),
+                        b: w(b),
+                        color,
+                        width_px,
+                        depth_test: true,
+                    });
+                }
+            }
+        }
+    }
+    lines
 }
 
 /// Wire boxes around each selected `cell` (always-on-top cyan), so the
@@ -435,6 +509,26 @@ mod tests {
             cam.pos[2] - cam.forward[2],
         ];
         assert!(project_to_screen(&cam, 800.0, 600.0, behind).is_none());
+    }
+
+    #[test]
+    fn voxel_edges_outline_exposed_faces_only() {
+        // A lone voxel exposes all six faces -> a full cube wireframe of
+        // 12 unique edges (shared face edges deduplicated).
+        let mut m = VoxelModel::new(4, 4, 4);
+        m.set(1, 1, 1, 0x80ff_0000);
+        let edges = voxel_edge_lines_3d(&m, [0.0; 3], 0xffff_ffff, 1.0);
+        assert_eq!(edges.len(), 12, "one voxel = 12 cube edges");
+        assert!(edges.iter().all(|l| l.depth_test), "edges are depth-tested");
+
+        // Two adjacent voxels: the shared face is hidden, but the boundary
+        // ring between them stays (so the seam is visible). The 2x1x1 box
+        // surface has 20 unique unit edges.
+        let mut pair = VoxelModel::new(4, 4, 4);
+        pair.set(1, 1, 1, 0x80ff_0000);
+        pair.set(2, 1, 1, 0x8000_ff00);
+        let edges = voxel_edge_lines_3d(&pair, [0.0; 3], 0xffff_ffff, 1.0);
+        assert_eq!(edges.len(), 20, "shared face hidden, seam ring kept");
     }
 
     #[test]

@@ -114,6 +114,7 @@ pub enum Msg {
     View,
     Lighting,
     Grid,
+    VoxelEdges,
     Render,
     RenderSprite,
     RenderVoxel,
@@ -132,7 +133,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 56] = [
+    pub const ALL: [Msg; 57] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -177,6 +178,7 @@ impl Msg {
         Msg::View,
         Msg::Lighting,
         Msg::Grid,
+        Msg::VoxelEdges,
         Msg::Render,
         Msg::RenderSprite,
         Msg::RenderVoxel,
@@ -247,6 +249,7 @@ const fn en(msg: Msg) -> &'static str {
         Msg::View => "View",
         Msg::Lighting => "Lighting",
         Msg::Grid => "Reference grid",
+        Msg::VoxelEdges => "Voxel edges",
         Msg::Render => "Render",
         Msg::RenderSprite => "Sprite",
         Msg::RenderVoxel => "Voxel grid",
@@ -310,6 +313,7 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::View => "Вид",
         Msg::Lighting => "Освещение",
         Msg::Grid => "Опорная сетка",
+        Msg::VoxelEdges => "Грани вокселей",
         Msg::Render => "Рендер",
         Msg::RenderSprite => "Спрайт",
         Msg::RenderVoxel => "Воксельная сетка",

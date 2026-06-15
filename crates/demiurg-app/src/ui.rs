@@ -118,6 +118,7 @@ pub fn build(
             ui.menu_button(t(Msg::View), |ui| {
                 ui.checkbox(&mut editor.lighting, t(Msg::Lighting));
                 ui.checkbox(&mut editor.show_grid, t(Msg::Grid));
+                ui.checkbox(&mut editor.show_edges, t(Msg::VoxelEdges));
                 ui.separator();
                 ui.label(t(Msg::Render));
                 if ui

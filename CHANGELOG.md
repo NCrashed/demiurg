@@ -7,6 +7,19 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- Voxel-edge overlay (View ▸ Voxel edges, on by default): a light wireframe on
+  exposed voxel faces so boundaries read even on flat-shaded faces in shadow,
+  where coplanar voxels would otherwise blend into one patch (there is no
+  ambient occlusion / light baking).
+
+### Fixed
+
+- Place tool: when the cursor ray hits no voxel it now falls back to the model's
+  floor (the volume's bottom face), so you can seed voxels — and rebuild a model
+  emptied of its last voxel — instead of having nothing to click.
+
 ## [0.1.0] - 2026-06-15
 
 First release for artists — a working native voxel **model** editor (DESIGN.md

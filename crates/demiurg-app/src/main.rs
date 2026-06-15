@@ -60,6 +60,11 @@ const VOXEL_SIDE_SHADES: [i8; 6] = [0, 28, 16, 16, 16, 28];
 /// Redraw cadence — ~60 fps, so the editor doesn't peg the GPU/CPU
 /// rendering an idle scene as fast as it can. Pairs with GPU vsync.
 const FRAME_DT: Duration = Duration::from_micros(16_667);
+/// Voxel-edge wireframe colour (`0xAARRGGBB`): a faint, semi-transparent
+/// **light** grey. Light (not dark) so edges lift out of dark shadowed
+/// faces — where boundaries otherwise vanish — while staying subtle on
+/// already-readable lit faces.
+const VOXEL_EDGE_COLOR: u32 = 0x66d4_d8e0;
 
 /// The active editing tool.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -222,6 +227,7 @@ impl Tool {
 }
 
 /// The mutable editor document + tool state the UI drives.
+#[allow(clippy::struct_excessive_bools)] // independent view/edit toggles, not a state enum
 struct Editor {
     document: Document,
     tool: Tool,
@@ -240,6 +246,9 @@ struct Editor {
     lighting: bool,
     /// Draw the reference bounding box / floor grid / origin axes.
     show_grid: bool,
+    /// Overlay a wireframe on exposed voxel faces, so boundaries read even
+    /// in flat-shaded shadow (there is no ambient occlusion / light bake).
+    show_edges: bool,
     /// Sprite vs voxel-grid render.
     render_mode: RenderMode,
     /// Target dimensions edited in the Size panel (the "Resize" button
@@ -305,6 +314,7 @@ impl Editor {
             lang,
             lighting: true,
             show_grid: true,
+            show_edges: true,
             render_mode: DEFAULT_RENDER_MODE,
             resize_dims: [dx, dy, dz],
             selection: HashSet::new(),
@@ -584,6 +594,14 @@ impl App {
             lines.extend(demiurg_view::reference_lines_3d(
                 pivot,
                 self.editor.document.dims(),
+            ));
+        }
+        if self.editor.show_edges {
+            lines.extend(demiurg_view::voxel_edge_lines_3d(
+                self.editor.document.model(),
+                pivot,
+                VOXEL_EDGE_COLOR,
+                1.0,
             ));
         }
         if !self.editor.selection.is_empty() {
