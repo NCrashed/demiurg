@@ -3,7 +3,7 @@
 //! provides the tools, palette, mirror, pivot, and file menu.
 //!
 //! Usage:
-//!   demiurg [--cpu] [path.kv6 | path.demiurg]   # no path -> a blank canvas
+//!   demiurg [--gpu|--cpu] [path.kv6|.vox|.demiurg]   # no path -> blank
 //!
 //! Controls: left mouse applies the active tool (hold to drag-paint); the
 //! Place tool falls back to the floor (the volume's bottom face) when the
@@ -22,8 +22,9 @@
 //! known); saves run on a background thread (with a spinner) so the UI
 //! never freezes, and a periodic autosave to the OS temp dir is recovered
 //! on the next launch after a crash. `DEMIURG_LANG=ru` starts in Russian.
-//! The GPU backend is used by default; `--cpu` (or `ROXLAP_GPU=0`) forces
-//! the CPU renderer — the escape hatch if a GPU/driver hangs startup.
+//! The CPU renderer is the default (reliable everywhere); `--gpu` (or
+//! `ROXLAP_GPU=1`) opts into the faster GPU backend, whose device creation
+//! can hang on some Windows GPUs/drivers.
 
 mod ui;
 
@@ -81,6 +82,7 @@ enum SaveFormat {
     Project,
     Kv6,
     Vxl,
+    Vox,
 }
 
 impl SaveFormat {
@@ -90,6 +92,17 @@ impl SaveFormat {
             SaveFormat::Project => project::to_bytes(model),
             SaveFormat::Kv6 => model.to_kv6_bytes(),
             SaveFormat::Vxl => model.to_vxl_bytes(),
+            SaveFormat::Vox => model.to_vox_bytes(),
+        }
+    }
+
+    /// `(filter label, extension, default file name)` for a save dialog.
+    fn dialog_spec(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            SaveFormat::Project => ("demiurg", "demiurg", "model.demiurg"),
+            SaveFormat::Kv6 => ("kv6", "kv6", "model.kv6"),
+            SaveFormat::Vxl => ("vxl", "vxl", "model.vxl"),
+            SaveFormat::Vox => ("vox", "vox", "model.vox"),
         }
     }
 }
@@ -111,6 +124,7 @@ struct PendingSave {
 #[derive(Clone, Copy)]
 enum DialogKind {
     OpenKv6,
+    OpenVox,
     OpenProject,
     Save(SaveFormat),
 }
@@ -132,15 +146,14 @@ fn run_dialog(kind: DialogKind, dir: Option<PathBuf>, name: Option<&str>) -> Opt
         DialogKind::OpenKv6 => rfd::FileDialog::new()
             .add_filter("kv6", &["kv6"])
             .pick_file(),
+        DialogKind::OpenVox => rfd::FileDialog::new()
+            .add_filter("vox", &["vox"])
+            .pick_file(),
         DialogKind::OpenProject => rfd::FileDialog::new()
             .add_filter("demiurg", &["demiurg"])
             .pick_file(),
         DialogKind::Save(format) => {
-            let (filter, ext, default) = match format {
-                SaveFormat::Project => ("demiurg", "demiurg", "model.demiurg"),
-                SaveFormat::Kv6 => ("kv6", "kv6", "model.kv6"),
-                SaveFormat::Vxl => ("vxl", "vxl", "model.vxl"),
-            };
+            let (filter, ext, default) = format.dialog_spec();
             let mut dialog = rfd::FileDialog::new()
                 .add_filter(filter, &[ext])
                 .set_file_name(name.unwrap_or(default));
@@ -484,11 +497,14 @@ impl Editor {
     }
 }
 
+#[allow(clippy::similar_names)] // force_cpu / force_gpu are a deliberate pair
 fn main() {
-    // `--cpu` forces the CPU renderer (escape hatch for a GPU that hangs);
-    // the first non-flag argument is the file to open.
+    // The CPU renderer is the default (it's reliable everywhere); `--gpu`
+    // opts into the GPU backend, `--cpu` forces CPU. The first non-flag
+    // argument is the file to open.
     let args: Vec<String> = std::env::args().skip(1).collect();
     let force_cpu = args.iter().any(|a| a == "--cpu");
+    let force_gpu = args.iter().any(|a| a == "--gpu");
     let arg = args.into_iter().find(|a| !a.starts_with('-'));
     let autosave = autosave_path();
 
@@ -544,6 +560,7 @@ fn main() {
         drag: None,
         last_tool: Tool::Place,
         force_cpu,
+        force_gpu,
         next_frame: Instant::now(),
     };
 
@@ -552,14 +569,20 @@ fn main() {
     event_loop.run_app(&mut app).expect("winit: run_app");
 }
 
-/// Load a `.kv6` or `.demiurg` by extension, or exit with a message.
+/// Load a `.kv6`, `.vox`, or `.demiurg` by extension, or exit with a
+/// message.
 fn load_any(path: &str) -> VoxelModel {
     let bytes = std::fs::read(path).unwrap_or_else(|e| {
         eprintln!("demiurg: cannot read {path}: {e}");
         exit(2);
     });
+    let is_vox = Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("vox"));
     let model = if path.ends_with(".demiurg") {
         project::from_bytes(&bytes).map_err(|e| e.to_string())
+    } else if is_vox {
+        VoxelModel::from_vox_bytes(&bytes).map_err(|e| e.to_string())
     } else {
         VoxelModel::from_kv6_bytes(&bytes).map_err(|e| e.to_string())
     };
@@ -671,6 +694,8 @@ struct App {
     last_tool: Tool,
     /// Force the CPU renderer (`--cpu`); skips GPU device creation.
     force_cpu: bool,
+    /// Opt into the GPU renderer (`--gpu`); CPU is the default.
+    force_gpu: bool,
     /// When the next frame should render (drives the ~60 fps cap).
     next_frame: Instant,
 }
@@ -1301,6 +1326,9 @@ impl App {
         if a.open_kv6 {
             self.open_dialog(DialogKind::OpenKv6);
         }
+        if a.open_vox {
+            self.open_dialog(DialogKind::OpenVox);
+        }
         if a.open_project {
             self.open_dialog(DialogKind::OpenProject);
         }
@@ -1315,6 +1343,9 @@ impl App {
         }
         if a.export_vxl {
             self.save_to(SaveFormat::Vxl, true);
+        }
+        if a.export_vox {
+            self.save_to(SaveFormat::Vox, true);
         }
     }
 
@@ -1383,6 +1414,16 @@ impl App {
                 match std::fs::read(&path).map(|b| VoxelModel::from_kv6_bytes(&b)) {
                     Ok(Ok(m)) => {
                         self.load_model(m); // a .kv6 has no project path
+                        self.doc_name = stem_of(&path);
+                    }
+                    Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
+                    Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
+                }
+            }
+            DialogKind::OpenVox => {
+                match std::fs::read(&path).map(|b| VoxelModel::from_vox_bytes(&b)) {
+                    Ok(Ok(m)) => {
+                        self.load_model(m); // imported .vox has no project path
                         self.doc_name = stem_of(&path);
                     }
                     Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
@@ -1686,10 +1727,18 @@ impl ApplicationHandler for App {
                 .expect("winit: create_window"),
         );
 
-        // GPU backend by default (roxlap falls back to CPU if init fails);
-        // `--cpu` or `ROXLAP_GPU=0` forces the CPU renderer — an escape
-        // hatch when a GPU/driver hangs device creation.
-        let want_gpu = !self.force_cpu && std::env::var("ROXLAP_GPU").map_or(true, |v| v != "0");
+        // CPU renderer by default — it's reliable everywhere. The GPU
+        // backend is opt-in (`--gpu` or `ROXLAP_GPU=1`): it's faster, but
+        // its device creation can *hang* on some Windows GPUs/drivers (a
+        // white frozen window, the OS offering to kill the app), and a
+        // synchronous hang can't be timed out, so it isn't the default.
+        let want_gpu = if self.force_cpu {
+            false
+        } else if self.force_gpu {
+            true
+        } else {
+            std::env::var("ROXLAP_GPU").is_ok_and(|v| v == "1")
+        };
         let mut opts = RenderOptions {
             want_gpu,
             // The empty (sprite-only) scene's background comes from the
@@ -1700,10 +1749,12 @@ impl ApplicationHandler for App {
         };
         // Present uncapped (no forced vsync). The ~60 fps `about_to_wait`
         // frame timer already limits how often we render, so the GPU isn't
-        // overworked, and this avoids Fifo/vsync present stalls seen on some
-        // Windows GPUs / drivers / remote sessions (a white frozen window).
+        // overworked, and this avoids Fifo/vsync present stalls.
         opts.gpu.uncapped_present = true;
         let size = window.inner_size();
+        // Logged before creation so a hang here is visible in the console
+        // (it pins the freeze to GPU device init).
+        eprintln!("demiurg: creating renderer (gpu={want_gpu})...");
         let renderer = SceneRenderer::new(window.clone(), (size.width, size.height), &opts);
         match renderer.adapter_info() {
             Some(info) => eprintln!("demiurg: GPU backend - {info}"),

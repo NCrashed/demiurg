@@ -27,6 +27,7 @@ use roxlap_formats::vxl::{self, Vxl};
 
 pub mod edit;
 pub mod project;
+pub mod vox;
 
 pub use edit::Document;
 
@@ -204,6 +205,22 @@ impl VoxelModel {
             (col != 0).then_some(col)
         });
         vxl::serialize(&vxl)
+    }
+
+    /// Serialize the model to `MagicaVoxel` `.vox` bytes (a single model;
+    /// z-up, palette-based). See [`vox`] for the conversion details.
+    #[must_use]
+    pub fn to_vox_bytes(&self) -> Vec<u8> {
+        vox::serialize(self)
+    }
+
+    /// Parse `MagicaVoxel` `.vox` bytes into a dense model (the first model
+    /// in the file, flipped to z-down).
+    ///
+    /// # Errors
+    /// Returns [`vox::VoxError`] if the bytes are not a valid `.vox`.
+    pub fn from_vox_bytes(bytes: &[u8]) -> Result<Self, vox::VoxError> {
+        vox::parse(bytes)
     }
 
     /// The raw dense voxel buffer (`0` = empty), indexed

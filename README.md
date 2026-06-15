@@ -59,9 +59,10 @@ demiurg [path.kv6 | path.demiurg]    # no path -> a blank canvas
   `W`/`S` zoom, `Home` recenters; the **Views** panel and numpad `1`/`3`/`7`
   snap to axis views (`Ctrl` for the opposite face).
 - **Edit**: `Ctrl+Z` undo, `Ctrl+Y` / `Ctrl+Shift+Z` redo.
-- **Render**: GPU by default; `--cpu` (or `ROXLAP_GPU=0`) forces the CPU
-  renderer — use it if the window opens white and frozen (a GPU/driver that
-  hangs startup). Switch sprite/voxel preview in the View menu.
+- **Render**: CPU renderer by default (reliable everywhere); `--gpu` (or
+  `ROXLAP_GPU=1`) opts into the faster GPU backend, whose device creation can
+  hang on some Windows GPUs/drivers (white frozen window). Switch sprite/voxel
+  preview in the View menu.
 - **Language**: `DEMIURG_LANG=ru`, or the Language menu (English / Русский).
 
 ## Layout
@@ -78,6 +79,8 @@ demiurg-app     native binary (winit + egui over the roxlap framebuffer)
 - `.demiurg` — lossless editor project (the source of truth).
 - `.kv6` — engine sprite export (surface voxels; how monada draws pieces).
 - `.vxl` — voxlap world export.
+- `.vox` — MagicaVoxel import/export (single model; no pivot, so import
+  centres it).
 
 ## Dependencies
 

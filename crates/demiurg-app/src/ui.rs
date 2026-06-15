@@ -39,6 +39,7 @@ const PRESETS: [u32; 8] = [
 pub struct UiActions {
     pub new_model: bool,
     pub open_kv6: bool,
+    pub open_vox: bool,
     pub open_project: bool,
     /// Save the project (Ctrl+S): overwrite the known path or prompt.
     pub save: bool,
@@ -46,6 +47,7 @@ pub struct UiActions {
     pub save_as: bool,
     pub export_kv6: bool,
     pub export_vxl: bool,
+    pub export_vox: bool,
     pub undo: bool,
     pub redo: bool,
     pub delete_sel: bool,
@@ -97,6 +99,10 @@ pub fn build(
                     actions.open_kv6 = true;
                     ui.close();
                 }
+                if ui.button(t(Msg::OpenVox)).clicked() {
+                    actions.open_vox = true;
+                    ui.close();
+                }
                 if ui.button(t(Msg::OpenProject)).clicked() {
                     actions.open_project = true;
                     ui.close();
@@ -117,6 +123,10 @@ pub fn build(
                 }
                 if ui.button(t(Msg::ExportVxl)).clicked() {
                     actions.export_vxl = true;
+                    ui.close();
+                }
+                if ui.button(t(Msg::ExportVox)).clicked() {
+                    actions.export_vox = true;
                     ui.close();
                 }
             });

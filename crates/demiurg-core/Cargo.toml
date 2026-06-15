@@ -15,6 +15,9 @@ description = "Editor document model and engine-format conversion for the demiur
 roxlap-formats.workspace = true
 serde.workspace = true
 postcard.workspace = true
+# MagicaVoxel `.vox` import (handles real-world chunk variants + the
+# default palette). Export is hand-rolled in `vox.rs`.
+dot_vox = "5"
 
 [lints]
 workspace = true

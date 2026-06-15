@@ -7,6 +7,28 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-15
+
+MagicaVoxel `.vox` interop, and the CPU renderer is now the default to dodge a
+Windows GPU-init hang.
+
+### Added
+
+- MagicaVoxel `.vox` import and export (File ▸ Open .vox / Export .vox, and a
+  `.vox` path argument). Import uses the `dot_vox` parser (handles real-world
+  files) and takes the first model; export writes a single model. The height
+  axis is flipped between MagicaVoxel's z-up and demiurg's z-down so models stay
+  upright, and colours map through a 256-entry palette. `.vox` has no pivot, so
+  import centres it.
+
+### Fixed
+
+- The 0.2.0 white-window fix wasn't enough: on some Windows GPUs/drivers wgpu
+  *device creation itself* hangs (before the first frame), which a synchronous
+  call can't be timed out of. The CPU renderer is now the **default** (reliable
+  everywhere); the GPU backend is opt-in via `--gpu` or `ROXLAP_GPU=1` (`--cpu` /
+  `ROXLAP_GPU=0` force CPU).
+
 ## [0.2.0] - 2026-06-15
 
 Editing and save quality-of-life: voxel-edge readability, a proper Save / Save
@@ -79,6 +101,7 @@ paint is what the game shows.
 - The browser/WASM build (M3), `.kfa` animation (M4), and voxel-video (M5) are
   designed but not yet implemented — see DESIGN.md §9.
 
-[Unreleased]: https://github.com/NCrashed/demiurg/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/NCrashed/demiurg/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/NCrashed/demiurg/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/NCrashed/demiurg/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/NCrashed/demiurg/releases/tag/v0.1.0
