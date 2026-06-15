@@ -7,6 +7,11 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-15
+
+Editing and save quality-of-life: voxel-edge readability, a proper Save / Save
+As flow, non-blocking file I/O, and crash-recovery autosave.
+
 ### Added
 
 - Voxel-edge overlay (View ▸ Voxel edges, on by default): a light wireframe on
@@ -74,5 +79,6 @@ paint is what the game shows.
 - The browser/WASM build (M3), `.kfa` animation (M4), and voxel-video (M5) are
   designed but not yet implemented — see DESIGN.md §9.
 
-[Unreleased]: https://github.com/NCrashed/demiurg/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/NCrashed/demiurg/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/NCrashed/demiurg/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/NCrashed/demiurg/releases/tag/v0.1.0
