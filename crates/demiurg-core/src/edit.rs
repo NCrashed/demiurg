@@ -21,12 +21,24 @@ struct Delta {
     new: u32,
 }
 
-/// One undoable step: every voxel a single edit changed, plus a unique
-/// monotonic id used for the "modified since save" check.
-#[derive(Debug, Clone, Default)]
-struct Edit {
-    deltas: Vec<Delta>,
-    id: u64,
+/// One undoable step, plus a unique monotonic id used for the "modified
+/// since save" check. Voxel edits store per-voxel deltas; structural ones
+/// (resize / crop / grow, which change dimensions) store the whole model
+/// from before the edit.
+#[derive(Debug, Clone)]
+enum Edit {
+    Voxels { deltas: Vec<Delta>, id: u64 },
+    // Boxed: a `VoxelModel` (with its 256-entry palette) is much larger
+    // than the `Voxels` variant.
+    Replace { before: Box<VoxelModel>, id: u64 },
+}
+
+impl Edit {
+    fn id(&self) -> u64 {
+        match self {
+            Edit::Voxels { id, .. } | Edit::Replace { id, .. } => *id,
+        }
+    }
 }
 
 /// A voxel model plus its edit history. Read the model with
@@ -73,7 +85,55 @@ impl Document {
     /// Id of the current state — the top undo entry's, or `0` when the
     /// history is empty.
     fn current_state_id(&self) -> u64 {
-        self.undo.last().map_or(0, |e| e.id)
+        self.undo.last().map_or(0, Edit::id)
+    }
+
+    /// Replace the model as one undoable step (resize / crop / grow). The
+    /// pre-edit model is stored so undo restores it.
+    fn apply_structural(&mut self, new_model: VoxelModel) {
+        self.stroke = None;
+        let before = std::mem::replace(&mut self.model, new_model);
+        let id = self.alloc_id();
+        self.undo.push(Edit::Replace {
+            before: Box::new(before),
+            id,
+        });
+        self.redo.clear();
+    }
+
+    /// Crop the model to its occupied bounding box. Returns `false` if it
+    /// is empty or already tight.
+    pub fn crop_to_content(&mut self) -> bool {
+        let Some(cropped) = self.model.cropped() else {
+            return false;
+        };
+        if cropped.dims() == self.model.dims() {
+            return false;
+        }
+        self.apply_structural(cropped);
+        true
+    }
+
+    /// Resize the model to `dims` (origin-anchored). Returns `false` for a
+    /// zero/unchanged size.
+    pub fn resize(&mut self, dims: [u32; 3]) -> bool {
+        if dims.contains(&0) || (dims[0], dims[1], dims[2]) == self.model.dims() {
+            return false;
+        }
+        let resized = self.model.resized(dims);
+        self.apply_structural(resized);
+        true
+    }
+
+    /// Grow the model by one voxel along `axis` (0=x, 1=y, 2=z), at the
+    /// far end (`positive`) or near end. Returns `false` for a bad axis.
+    pub fn grow(&mut self, axis: usize, positive: bool) -> bool {
+        if axis > 2 {
+            return false;
+        }
+        let grown = self.model.grown(axis, positive);
+        self.apply_structural(grown);
+        true
     }
 
     /// Mark the current state as saved (call after a successful save).
@@ -113,7 +173,7 @@ impl Document {
             .map(|(pos, (old, new))| Delta { pos, old, new })
             .collect();
         let id = self.alloc_id();
-        self.undo.push(Edit { deltas, id });
+        self.undo.push(Edit::Voxels { deltas, id });
         true
     }
 
@@ -201,10 +261,21 @@ impl Document {
         let Some(edit) = self.undo.pop() else {
             return false;
         };
-        for d in &edit.deltas {
-            self.model.set(d.pos[0], d.pos[1], d.pos[2], d.old);
+        match edit {
+            Edit::Voxels { deltas, id } => {
+                for d in &deltas {
+                    self.model.set(d.pos[0], d.pos[1], d.pos[2], d.old);
+                }
+                self.redo.push(Edit::Voxels { deltas, id });
+            }
+            Edit::Replace { before, id } => {
+                let cur = std::mem::replace(&mut self.model, *before);
+                self.redo.push(Edit::Replace {
+                    before: Box::new(cur),
+                    id,
+                });
+            }
         }
-        self.redo.push(edit);
         true
     }
 
@@ -214,10 +285,21 @@ impl Document {
         let Some(edit) = self.redo.pop() else {
             return false;
         };
-        for d in &edit.deltas {
-            self.model.set(d.pos[0], d.pos[1], d.pos[2], d.new);
+        match edit {
+            Edit::Voxels { deltas, id } => {
+                for d in &deltas {
+                    self.model.set(d.pos[0], d.pos[1], d.pos[2], d.new);
+                }
+                self.undo.push(Edit::Voxels { deltas, id });
+            }
+            Edit::Replace { before, id } => {
+                let cur = std::mem::replace(&mut self.model, *before);
+                self.undo.push(Edit::Replace {
+                    before: Box::new(cur),
+                    id,
+                });
+            }
         }
-        self.undo.push(edit);
         true
     }
 
@@ -262,7 +344,7 @@ impl Document {
             return false;
         }
         let id = self.alloc_id();
-        self.undo.push(Edit { deltas, id });
+        self.undo.push(Edit::Voxels { deltas, id });
         self.redo.clear();
         true
     }
@@ -533,6 +615,34 @@ mod tests {
             d.is_modified(),
             "a divergent edit at the saved depth is modified"
         );
+    }
+
+    #[test]
+    fn structural_resize_is_undoable() {
+        let mut d = doc(8);
+        d.set_voxel([2, 3, 4], RED);
+        assert!(d.crop_to_content());
+        assert_eq!(d.model().dims(), (1, 1, 1), "cropped to the single voxel");
+        assert!(d.is_modified());
+
+        assert!(d.undo());
+        assert_eq!(d.model().dims(), (8, 8, 8), "undo restores pre-crop dims");
+        assert_eq!(d.model().get(2, 3, 4), RED, "and the voxel");
+
+        assert!(d.redo());
+        assert_eq!(d.model().dims(), (1, 1, 1), "redo re-crops");
+    }
+
+    #[test]
+    fn grow_then_undo_round_trips() {
+        let mut d = doc(2);
+        d.set_voxel([0, 0, 0], RED);
+        assert!(d.grow(0, false)); // near-end x: shifts content +1
+        assert_eq!(d.model().dims(), (3, 2, 2));
+        assert_eq!(d.model().get(1, 0, 0), RED);
+        d.undo();
+        assert_eq!(d.model().dims(), (2, 2, 2));
+        assert_eq!(d.model().get(0, 0, 0), RED);
     }
 
     #[test]

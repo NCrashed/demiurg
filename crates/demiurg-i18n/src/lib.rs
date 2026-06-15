@@ -80,7 +80,11 @@ pub enum Msg {
     ModelColours,
     Mirror,
     Pivot,
+    CenterPivot,
     Size,
+    Crop,
+    Resize,
+    Grow,
     Voxels,
     // Menus
     File,
@@ -113,7 +117,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 39] = [
+    pub const ALL: [Msg; 43] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -127,7 +131,11 @@ impl Msg {
         Msg::ModelColours,
         Msg::Mirror,
         Msg::Pivot,
+        Msg::CenterPivot,
         Msg::Size,
+        Msg::Crop,
+        Msg::Resize,
+        Msg::Grow,
         Msg::Voxels,
         Msg::File,
         Msg::New,
@@ -180,7 +188,11 @@ const fn en(msg: Msg) -> &'static str {
         Msg::ModelColours => "Colours in model",
         Msg::Mirror => "Mirror",
         Msg::Pivot => "Pivot",
+        Msg::CenterPivot => "Center",
         Msg::Size => "Size",
+        Msg::Crop => "Crop to content",
+        Msg::Resize => "Resize",
+        Msg::Grow => "Grow",
         Msg::Voxels => "Voxels",
         Msg::File => "File",
         Msg::New => "New",
@@ -224,7 +236,11 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::ModelColours => "Цвета модели",
         Msg::Mirror => "Зеркало",
         Msg::Pivot => "Опорная точка",
+        Msg::CenterPivot => "По центру",
         Msg::Size => "Размер",
+        Msg::Crop => "Обрезать по содержимому",
+        Msg::Resize => "Изменить размер",
+        Msg::Grow => "Расширить",
         Msg::Voxels => "Воксели",
         Msg::File => "Файл",
         Msg::New => "Создать",

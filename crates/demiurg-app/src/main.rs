@@ -90,6 +90,9 @@ struct Editor {
     show_grid: bool,
     /// Sprite vs voxel-grid render.
     render_mode: RenderMode,
+    /// Target dimensions edited in the Size panel (the "Resize" button
+    /// applies them); kept in sync with the model on structural changes.
+    resize_dims: [u32; 3],
     /// The viewport scene needs a rebuild from the model.
     dirty: bool,
 }
@@ -101,6 +104,7 @@ impl Editor {
             .and_then(|c| Lang::from_code(&c))
             .unwrap_or_default();
         let model_palette = model.used_colors();
+        let (dx, dy, dz) = model.dims();
         Self {
             document: Document::new(model),
             tool: Tool::Place,
@@ -112,6 +116,7 @@ impl Editor {
             lighting: true,
             show_grid: true,
             render_mode: DEFAULT_RENDER_MODE,
+            resize_dims: [dx, dy, dz],
             dirty: false,
         }
     }
@@ -119,6 +124,13 @@ impl Editor {
     /// Recompute the model-colour palette (after any edit / load).
     fn refresh_palette(&mut self) {
         self.model_palette = self.document.model().used_colors();
+    }
+
+    /// Mirror the model dimensions into the Size-panel target fields
+    /// (after a load / crop / grow).
+    fn sync_resize_dims(&mut self) {
+        let (x, y, z) = self.document.dims();
+        self.resize_dims = [x, y, z];
     }
 
     /// Apply the active tool at a resolved pick.
@@ -341,9 +353,6 @@ impl App {
     /// axes (when enabled) and the hover wire box. The engine depth-tests
     /// them against the rendered frame, so the model occludes them.
     fn scene_lines(&self) -> Vec<Line3> {
-        if self.confirm_quit {
-            return Vec::new();
-        }
         let pivot = self.editor.document.pivot();
         let mut lines = Vec::new();
         if self.editor.show_grid {
@@ -586,6 +595,7 @@ impl App {
         self.view
             .set_model(self.editor.document.model(), self.editor.render_mode);
         self.editor.refresh_palette();
+        self.editor.sync_resize_dims();
         self.camera = self.view.framing_camera();
         self.editor.dirty = false;
     }

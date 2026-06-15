@@ -45,7 +45,7 @@ pub struct UiActions {
 /// Draw the editor chrome for one frame (menus, tool panel, quit modal).
 /// The 3D reference lines / hover box are drawn by the host via
 /// `SceneRenderer::draw_lines`, not here.
-#[allow(clippy::too_many_lines)] // a flat panel layout reads better unsplit
+#[allow(clippy::too_many_lines, clippy::cast_precision_loss)] // flat panel; dims are tiny
 pub fn build(
     ui: &mut egui::Ui,
     editor: &mut Editor,
@@ -216,15 +216,15 @@ pub fn build(
                 editor.document.set_pivot(pivot);
                 editor.dirty = true;
             }
+            if ui.button(t(Msg::CenterPivot)).clicked() {
+                let (dx, dy, dz) = editor.document.dims();
+                editor
+                    .document
+                    .set_pivot([dx as f32 * 0.5, dy as f32 * 0.5, dz as f32 * 0.5]);
+                editor.dirty = true;
+            }
 
-            ui.separator();
-            let (dx, dy, dz) = editor.document.dims();
-            ui.label(format!("{}  {dx} × {dy} × {dz}", t(Msg::Size)));
-            ui.label(format!(
-                "{}  {}",
-                t(Msg::Voxels),
-                editor.document.model().occupied_count()
-            ));
+            size_panel(ui, editor, &t);
 
             ui.separator();
             ui.small(t(Msg::HelpApply));
@@ -251,6 +251,54 @@ pub fn build(
                 });
             });
     }
+}
+
+fn dims_arr(d: (u32, u32, u32)) -> [u32; 3] {
+    [d.0, d.1, d.2]
+}
+
+/// The Size section: model dims + voxel count, crop-to-content, an exact
+/// resize, and per-direction grow buttons. The ops mutate the document
+/// directly (undoable structural edits) and resync the size fields.
+fn size_panel(ui: &mut egui::Ui, editor: &mut Editor, t: &impl Fn(Msg) -> &'static str) {
+    ui.separator();
+    let (dx, dy, dz) = editor.document.dims();
+    ui.label(format!("{}  {dx} × {dy} × {dz}", t(Msg::Size)));
+    ui.label(format!(
+        "{}  {}",
+        t(Msg::Voxels),
+        editor.document.model().occupied_count()
+    ));
+
+    if ui.button(t(Msg::Crop)).clicked() && editor.document.crop_to_content() {
+        editor.resize_dims = dims_arr(editor.document.dims());
+        editor.dirty = true;
+    }
+
+    ui.horizontal(|ui| {
+        for d in &mut editor.resize_dims {
+            ui.add(egui::DragValue::new(d).range(1..=256));
+        }
+        if ui.button(t(Msg::Resize)).clicked() && editor.document.resize(editor.resize_dims) {
+            editor.dirty = true;
+        }
+    });
+
+    ui.label(t(Msg::Grow));
+    ui.horizontal(|ui| {
+        for (axis, name) in [(0usize, "X"), (1, "Y"), (2, "Z")] {
+            if ui.small_button(format!("−{name}")).clicked() {
+                editor.document.grow(axis, false);
+                editor.resize_dims = dims_arr(editor.document.dims());
+                editor.dirty = true;
+            }
+            if ui.small_button(format!("+{name}")).clicked() {
+                editor.document.grow(axis, true);
+                editor.resize_dims = dims_arr(editor.document.dims());
+                editor.dirty = true;
+            }
+        }
+    });
 }
 
 /// A small square colour button for `0x80RRGGBB`.

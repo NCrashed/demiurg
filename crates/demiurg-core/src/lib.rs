@@ -52,6 +52,22 @@ pub struct VoxelModel {
     voxels: Vec<u32>,
 }
 
+/// Clamp a pivot to `[0, dim]` per axis.
+#[allow(clippy::cast_precision_loss)] // dims are tiny; f32 is exact
+fn clamp_pivot(p: [f32; 3], dims: [u32; 3]) -> [f32; 3] {
+    [
+        p[0].clamp(0.0, dims[0] as f32),
+        p[1].clamp(0.0, dims[1] as f32),
+        p[2].clamp(0.0, dims[2] as f32),
+    ]
+}
+
+/// A voxel coordinate as `f32` (exact for editor-sized models).
+#[allow(clippy::cast_precision_loss)]
+fn voxel_f32(v: u32) -> f32 {
+    v as f32
+}
+
 impl VoxelModel {
     /// An empty model of the given dimensions, pivot at the geometric
     /// centre.
@@ -197,6 +213,84 @@ impl VoxelModel {
         &self.voxels
     }
 
+    /// Bounding box `(min, max)` (inclusive) of occupied voxels, or
+    /// `None` if the model is empty.
+    #[must_use]
+    pub fn content_bounds(&self) -> Option<([u32; 3], [u32; 3])> {
+        let mut min = [u32::MAX; 3];
+        let mut max = [0u32; 3];
+        let mut any = false;
+        for (x, y, z, _) in self.occupied() {
+            any = true;
+            for (i, v) in [x, y, z].into_iter().enumerate() {
+                min[i] = min[i].min(v);
+                max[i] = max[i].max(v);
+            }
+        }
+        any.then_some((min, max))
+    }
+
+    /// A copy cropped to the occupied bounding box, with the pivot shifted
+    /// to track the same voxels. `None` if the model is empty.
+    #[must_use]
+    pub fn cropped(&self) -> Option<VoxelModel> {
+        let (min, max) = self.content_bounds()?;
+        let dims = [
+            max[0] - min[0] + 1,
+            max[1] - min[1] + 1,
+            max[2] - min[2] + 1,
+        ];
+        let mut out = VoxelModel::new(dims[0], dims[1], dims[2]);
+        out.palette = self.palette;
+        out.pivot = clamp_pivot(
+            [
+                self.pivot[0] - voxel_f32(min[0]),
+                self.pivot[1] - voxel_f32(min[1]),
+                self.pivot[2] - voxel_f32(min[2]),
+            ],
+            dims,
+        );
+        for (x, y, z, col) in self.occupied() {
+            out.set(x - min[0], y - min[1], z - min[2], col);
+        }
+        Some(out)
+    }
+
+    /// A copy resized to `dims`, anchored at the origin: voxels keep their
+    /// coordinates, out-of-range ones are dropped, new space is empty.
+    #[must_use]
+    pub fn resized(&self, dims: [u32; 3]) -> VoxelModel {
+        let mut out = VoxelModel::new(dims[0], dims[1], dims[2]);
+        out.palette = self.palette;
+        out.pivot = clamp_pivot(self.pivot, dims);
+        for (x, y, z, col) in self.occupied() {
+            out.set(x, y, z, col); // set ignores out-of-range coords
+        }
+        out
+    }
+
+    /// A copy grown by one voxel along `axis` (0=x, 1=y, 2=z). `positive`
+    /// adds the layer at the far end (coordinates unchanged); otherwise at
+    /// the near end (coordinates +1 on that axis, pivot tracks).
+    #[must_use]
+    pub fn grown(&self, axis: usize, positive: bool) -> VoxelModel {
+        let mut dims = [self.xsiz, self.ysiz, self.zsiz];
+        dims[axis] += 1;
+        let mut shift = [0u32; 3];
+        let mut pivot = self.pivot;
+        if !positive {
+            shift[axis] = 1;
+            pivot[axis] += 1.0;
+        }
+        let mut out = VoxelModel::new(dims[0], dims[1], dims[2]);
+        out.palette = self.palette;
+        out.pivot = clamp_pivot(pivot, dims);
+        for (x, y, z, col) in self.occupied() {
+            out.set(x + shift[0], y + shift[1], z + shift[2], col);
+        }
+        out
+    }
+
     /// The distinct non-empty voxel colours in the model, ascending.
     /// Drives the editor's "colours used in this model" palette.
     #[must_use]
@@ -323,6 +417,45 @@ mod tests {
         m.set(2, 0, 0, 0x80ff_0000); // duplicate colour
         assert_eq!(m.used_colors(), vec![0x8000_00ff, 0x80ff_0000]);
         assert!(VoxelModel::new(2, 2, 2).used_colors().is_empty());
+    }
+
+    #[test]
+    fn cropped_tightens_to_content() {
+        let mut m = VoxelModel::new(8, 8, 8);
+        m.set(3, 4, 5, 0x80ff_0000);
+        m.set(4, 4, 5, 0x8000_ff00);
+        let c = m.cropped().expect("has content");
+        assert_eq!(c.dims(), (2, 1, 1));
+        assert_eq!(c.get(0, 0, 0), 0x80ff_0000);
+        assert_eq!(c.get(1, 0, 0), 0x8000_ff00);
+        assert!(
+            VoxelModel::new(4, 4, 4).cropped().is_none(),
+            "empty has no content"
+        );
+    }
+
+    #[test]
+    fn resized_keeps_overlap_and_drops_rest() {
+        let mut m = VoxelModel::new(4, 4, 4);
+        m.set(3, 3, 3, 0x80ff_0000); // outside the new box
+        m.set(0, 0, 0, 0x8000_ff00);
+        let r = m.resized([2, 2, 2]);
+        assert_eq!(r.dims(), (2, 2, 2));
+        assert_eq!(r.get(0, 0, 0), 0x8000_ff00, "kept");
+        assert_eq!(r.occupied_count(), 1, "(3,3,3) dropped");
+    }
+
+    #[test]
+    fn grown_adds_a_layer_each_way() {
+        let mut m = VoxelModel::new(2, 2, 2);
+        m.set(0, 0, 0, 0x80ff_0000);
+        let pos = m.grown(0, true); // far end: coords unchanged
+        assert_eq!(pos.dims(), (3, 2, 2));
+        assert_eq!(pos.get(0, 0, 0), 0x80ff_0000);
+        let neg = m.grown(0, false); // near end: shifted +1
+        assert_eq!(neg.dims(), (3, 2, 2));
+        assert_eq!(neg.get(1, 0, 0), 0x80ff_0000, "shifted to make room");
+        assert_eq!(neg.get(0, 0, 0), 0, "new empty layer at x=0");
     }
 
     #[test]
