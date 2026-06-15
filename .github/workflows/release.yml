@@ -1,0 +1,58 @@
+name: Release
+
+# Tagging `vX.Y.Z` cuts a release: build the Windows binary and publish a
+# GitHub release whose notes are the matching CHANGELOG.md section.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write # create the release and upload the binary
+
+jobs:
+  windows:
+    name: Windows binary + release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup honours rust-toolchain.toml and installs the pinned nightly
+      # on first use; no Nix on Windows.
+      - name: Show toolchain
+        shell: bash
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release -p demiurg-app
+
+      - name: Package binary
+        id: package
+        shell: bash
+        run: |
+          asset="demiurg-${GITHUB_REF_NAME}-windows-x64.exe"
+          cp target/release/demiurg.exe "$asset"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes from CHANGELOG
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { grab = 1; next }
+            grab && /^## \[/         { exit }
+            grab && /^\[[^][]+\]:/   { exit }   # stop at the link-ref block
+            grab                     { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "Release ${GITHUB_REF_NAME}." > release-notes.md
+          fi
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-notes.md
+          files: ${{ steps.package.outputs.asset }}
+          fail_on_unmatched_files: true

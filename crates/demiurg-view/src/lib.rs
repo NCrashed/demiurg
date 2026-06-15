@@ -12,8 +12,9 @@
 //!   sides) — easier to read while editing.
 //!
 //! Both place the model so a voxel `(x, y, z)` sits at world
-//! `(x, y, z) − pivot`, matching [`pick_voxel`] / [`voxel_screen_edges`],
-//! so picking and the hover box line up in either mode.
+//! `(x, y, z) − pivot`, matching [`pick_voxel`] and the world-space
+//! gizmo lines ([`voxel_box_lines_3d`]), so picking and the hover box
+//! line up in either mode.
 
 mod camera;
 mod pick;

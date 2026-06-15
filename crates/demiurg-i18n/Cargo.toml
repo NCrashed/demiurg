@@ -7,6 +7,8 @@ repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "UI message catalogue and translations for the demiurg editor (native + web)."
 
 [dependencies]

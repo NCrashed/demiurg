@@ -1,13 +1,15 @@
 //! The editable document: a [`VoxelModel`] wrapped in an undo/redo
 //! history.
 //!
-//! Every mutation goes through [`Document::commit`], which diffs the
+//! Every mutation goes through a private `commit`, which diffs the
 //! requested cells against the current model, applies only the changes,
 //! and records the before/after of each touched voxel as one undo step.
 //! Tools are thin: they generate a list of `(position, colour)` cells
 //! ([`rect_cells`], [`sphere_cells`], [`flood_fill_cells`], or a single
 //! voxel) and hand it to the document. Mirror planes are applied inside
-//! `commit`, so a mirrored edit is still one undo step.
+//! `commit`, so a mirrored edit is still one undo step;
+//! [`Document::set_cells`] is the verbatim (no-mirror) path used by
+//! selection operations.
 
 use std::collections::{BTreeMap, HashSet};
 

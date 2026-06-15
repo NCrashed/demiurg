@@ -7,6 +7,8 @@ repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Viewport bridge: builds a roxlap scene + sprite set from a demiurg document and orbits a camera."
 
 [dependencies]

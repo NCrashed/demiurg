@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Newer pushes to the same ref supersede in-flight runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build in the project's Nix devshell — the same toolchain
+      # (rust-toolchain.toml nightly) and Linux render libs used locally,
+      # so CI matches developer machines exactly. (Add a Nix store cache
+      # later if run times warrant it.)
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Format
+        run: nix develop --command cargo fmt --all -- --check
+
+      - name: Clippy
+        run: nix develop --command cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: nix develop --command cargo test --workspace

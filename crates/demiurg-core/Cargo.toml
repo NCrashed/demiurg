@@ -7,6 +7,8 @@ repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Editor document model and engine-format conversion for the demiurg voxel asset editor."
 
 [dependencies]
