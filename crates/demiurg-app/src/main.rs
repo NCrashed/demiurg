@@ -10,7 +10,8 @@
 //! that face's plane (it floats until deselected); `Ctrl`+click eyedrops a
 //! colour; right-mouse drag orbits; middle-mouse (or Shift+right) drag
 //! pans the view, `Home` recenters it; wheel and `W`/`S` zoom; arrow keys
-//! orbit. Hotkeys: `1`-`8` pick a tool (`8` is
+//! orbit; the Views panel (or numpad `1`/`3`/`7`, `Ctrl` for the opposite
+//! face) snaps to an axis-aligned view. Hotkeys: `1`-`8` pick a tool (`8` is
 //! Select), `Ctrl+Z` undo, `Ctrl+Y` / `Ctrl+Shift+Z` redo, `Ctrl+C`
 //! copies the selection and `Ctrl+V` pastes it as a floating layer at its
 //! original position (settled into the model on deselect), `Delete`
@@ -28,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use demiurg_core::{Document, VoxelModel, project};
 use demiurg_i18n::{Lang, Msg, tr};
-use demiurg_view::{Line3, ModelView, OrbitCamera, PickHit, RenderMode, pick_voxel};
+use demiurg_view::{Line3, ModelView, OrbitCamera, PickHit, RenderMode, ViewDir, pick_voxel};
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::sprite::SpriteLighting;
 use roxlap_render::{FrameParams, RenderOptions, SceneRenderer, egui};
@@ -1063,6 +1064,9 @@ impl App {
         if a.paste_sel {
             self.paste_clipboard();
         }
+        if let Some(dir) = a.set_view {
+            self.camera.set_view(dir);
+        }
         // Saving serializes the document model, so bake a floating layer
         // in first or it would be silently left out of the file.
         if a.save_kv6 || a.save_vxl || a.save_project {
@@ -1279,6 +1283,20 @@ impl App {
             KeyCode::KeyW => self.keys.zoom_in = pressed,
             KeyCode::KeyS => self.keys.zoom_out = pressed,
             KeyCode::Home if pressed => self.camera.recenter(), // undo a pan
+            // Axis views on the numpad (Blender-style); Ctrl flips to the
+            // opposite face.
+            KeyCode::Numpad1 if pressed => {
+                self.camera
+                    .set_view(if ctrl { ViewDir::Back } else { ViewDir::Front });
+            }
+            KeyCode::Numpad3 if pressed => {
+                self.camera
+                    .set_view(if ctrl { ViewDir::Left } else { ViewDir::Right });
+            }
+            KeyCode::Numpad7 if pressed => {
+                self.camera
+                    .set_view(if ctrl { ViewDir::Bottom } else { ViewDir::Top });
+            }
             KeyCode::Escape if pressed => {
                 if self.confirm_quit {
                     self.confirm_quit = false; // Esc dismisses the modal

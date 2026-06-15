@@ -14,6 +14,17 @@
 use glam::DVec3;
 use roxlap_core::Camera;
 
+/// A canonical axis-aligned camera view (the six face-on directions).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ViewDir {
+    Front,
+    Back,
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
 /// Orbit camera: looks at `center` from `dist` away, at `yaw`/`pitch`.
 #[derive(Clone, Copy, Debug)]
 pub struct OrbitCamera {
@@ -70,6 +81,25 @@ impl OrbitCamera {
         self.center = DVec3::ZERO;
     }
 
+    /// Snap the orientation to an axis-aligned view, keeping the current
+    /// pan and zoom. The voxlap world is z-down, so `Top` looks straight
+    /// down (+z) and `Bottom` straight up. Set directly (not clamped like
+    /// [`orbit`](Self::orbit)) so the pole views are exact; a later orbit
+    /// re-clamps the pitch.
+    pub fn set_view(&mut self, dir: ViewDir) {
+        use core::f64::consts::{FRAC_PI_2, PI};
+        let (yaw, pitch) = match dir {
+            ViewDir::Front => (0.0, 0.0),         // look toward +x
+            ViewDir::Back => (PI, 0.0),           // toward -x
+            ViewDir::Right => (FRAC_PI_2, 0.0),   // toward +y
+            ViewDir::Left => (-FRAC_PI_2, 0.0),   // toward -y
+            ViewDir::Top => (0.0, FRAC_PI_2),     // toward +z (down)
+            ViewDir::Bottom => (0.0, -FRAC_PI_2), // toward -z (up)
+        };
+        self.yaw = yaw;
+        self.pitch = pitch;
+    }
+
     /// Convert to roxlap's `pos` + `right/down/forward` basis.
     ///
     /// `forward` is the view direction; the eye sits `dist` *behind* the
@@ -111,6 +141,40 @@ mod tests {
         c.pitch = 0.0; // right = +y, down = +z at this pose
         c.pan(2.0, 3.0);
         assert!((c.center - DVec3::new(0.0, 2.0, 3.0)).length() < 1e-9);
+    }
+
+    #[test]
+    fn axis_views_face_along_each_axis() {
+        let mut c = OrbitCamera::framing(DVec3::ZERO, 50.0);
+        let close = |a: [f64; 3], b: [f64; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-9);
+        for (dir, fwd) in [
+            (ViewDir::Front, [1.0, 0.0, 0.0]),
+            (ViewDir::Back, [-1.0, 0.0, 0.0]),
+            (ViewDir::Right, [0.0, 1.0, 0.0]),
+            (ViewDir::Left, [0.0, -1.0, 0.0]),
+            (ViewDir::Top, [0.0, 0.0, 1.0]),
+            (ViewDir::Bottom, [0.0, 0.0, -1.0]),
+        ] {
+            c.set_view(dir);
+            let cam = c.to_roxlap();
+            assert!(close(cam.forward, fwd), "{dir:?} forward {:?}", cam.forward);
+            // The basis stays orthonormal even at the poles.
+            let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+            assert!(
+                dot(cam.right, cam.down).abs() < 1e-9,
+                "{dir:?} right _|_ down"
+            );
+        }
+    }
+
+    #[test]
+    fn axis_view_keeps_pan_and_zoom() {
+        let mut c = OrbitCamera::framing(DVec3::ZERO, 50.0);
+        c.pan(7.0, -2.0);
+        let (center, dist) = (c.center, c.dist);
+        c.set_view(ViewDir::Right);
+        assert!((c.center - center).length() < 1e-9, "pan preserved");
+        assert!((c.dist - dist).abs() < 1e-9, "zoom preserved");
     }
 
     #[test]

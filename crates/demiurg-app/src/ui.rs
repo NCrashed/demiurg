@@ -8,7 +8,7 @@
 //! `editor.lang`, switchable live from the Language menu.
 
 use demiurg_i18n::{Lang, Msg, tr};
-use demiurg_view::{AXIS_COLORS, RenderMode};
+use demiurg_view::{AXIS_COLORS, RenderMode, ViewDir};
 use roxlap_render::egui;
 
 use crate::{Editor, Tool};
@@ -48,6 +48,8 @@ pub struct UiActions {
     pub delete_sel: bool,
     pub copy_sel: bool,
     pub paste_sel: bool,
+    /// A camera view-preset button was clicked this frame.
+    pub set_view: Option<ViewDir>,
     /// Quit-confirmation modal: the user chose to quit / to cancel.
     pub quit_confirm: bool,
     pub quit_cancel: bool,
@@ -239,6 +241,7 @@ pub fn build(
 
             size_panel(ui, editor, &t);
             selection_panel(ui, editor, actions, &t);
+            views_panel(ui, actions, &t);
 
             ui.separator();
             if editor.tool == Tool::Select {
@@ -362,6 +365,49 @@ fn selection_panel(
             actions.paste_sel = true;
         }
     });
+}
+
+/// The Views section: six buttons that snap the camera to an axis-aligned
+/// view, grouped and coloured by axis (X red, Y green, Z blue) to match
+/// the viewport gizmo. The click records the choice in [`UiActions`]; the
+/// host applies it (it owns the camera).
+fn views_panel(ui: &mut egui::Ui, actions: &mut UiActions, t: &impl Fn(Msg) -> &'static str) {
+    ui.separator();
+    ui.label(t(Msg::Views));
+    // One row per axis: (negative dir, positive dir, axis colour index).
+    for (a, b, axis) in [
+        (Msg::Front, Msg::Back, 0usize),
+        (Msg::Left, Msg::Right, 1),
+        (Msg::Top, Msg::Bottom, 2),
+    ] {
+        let col = axis_color(axis);
+        ui.horizontal(|ui| {
+            if ui
+                .small_button(egui::RichText::new(t(a)).color(col))
+                .clicked()
+            {
+                actions.set_view = Some(view_dir(a));
+            }
+            if ui
+                .small_button(egui::RichText::new(t(b)).color(col))
+                .clicked()
+            {
+                actions.set_view = Some(view_dir(b));
+            }
+        });
+    }
+}
+
+/// Map a view-label message to its camera direction.
+fn view_dir(m: Msg) -> ViewDir {
+    match m {
+        Msg::Back => ViewDir::Back,
+        Msg::Left => ViewDir::Left,
+        Msg::Right => ViewDir::Right,
+        Msg::Top => ViewDir::Top,
+        Msg::Bottom => ViewDir::Bottom,
+        _ => ViewDir::Front,
+    }
 }
 
 /// Draw the live marquee rectangle (Select-tool drag) as a 2D overlay.
