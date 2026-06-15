@@ -15,6 +15,7 @@ mod ui;
 
 use std::process::exit;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use demiurg_core::{Document, VoxelModel, project};
 use demiurg_i18n::{Lang, Msg, tr};
@@ -44,6 +45,9 @@ const DEFAULT_RENDER_MODE: RenderMode = RenderMode::Voxel;
 /// voxlap `setsideshades(top, bot, left, right, up, down)` for the voxel
 /// render: leave the top bright and darken the others so top faces pop.
 const VOXEL_SIDE_SHADES: [i8; 6] = [0, 28, 16, 16, 16, 28];
+/// Redraw cadence — ~60 fps, so the editor doesn't peg the GPU/CPU
+/// rendering an idle scene as fast as it can. Pairs with GPU vsync.
+const FRAME_DT: Duration = Duration::from_micros(16_667);
 
 /// The active editing tool.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -214,6 +218,7 @@ fn main() {
         doc_name,
         last_title: None,
         confirm_quit: false,
+        next_frame: Instant::now(),
     };
 
     let event_loop = EventLoop::new().expect("winit: create event loop");
@@ -315,6 +320,8 @@ struct App {
     last_title: Option<String>,
     /// The unsaved-changes quit modal is showing.
     confirm_quit: bool,
+    /// When the next frame should render (drives the ~60 fps cap).
+    next_frame: Instant,
 }
 
 impl App {
@@ -673,8 +680,7 @@ impl App {
         // then draws the panels on top.
         renderer.draw_lines(&camera, &lines);
         renderer.paint_egui(&jobs, &textures, ppp);
-
-        window.request_redraw();
+        // Next redraw is scheduled by `about_to_wait` at the frame cap.
     }
 
     /// Dispatch a key press/release (camera holds, tool hotkeys, undo).
@@ -733,7 +739,7 @@ impl ApplicationHandler for App {
         // GPU backend by default (roxlap falls back to CPU if init
         // fails); set ROXLAP_GPU=0 to force the CPU renderer.
         let want_gpu = std::env::var("ROXLAP_GPU").map_or(true, |v| v != "0");
-        let opts = RenderOptions {
+        let mut opts = RenderOptions {
             want_gpu,
             // The empty (sprite-only) scene's background comes from the
             // construction-time clear colour, so set it here too — not
@@ -741,6 +747,10 @@ impl ApplicationHandler for App {
             clear_sky: SKY_COLOR,
             ..RenderOptions::default()
         };
+        // vsync-cap the GPU present (Fifo) so it doesn't render the idle
+        // editor scene flat-out; the ~60 fps frame timer caps the CPU
+        // path the same way.
+        opts.gpu.uncapped_present = false;
         let size = window.inner_size();
         let renderer = SceneRenderer::new(window.clone(), (size.width, size.height), &opts);
         match renderer.adapter_info() {
@@ -830,5 +840,18 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             _ => {}
         }
+    }
+
+    /// Drive the redraw loop at ~60 fps: request a frame when due, then
+    /// sleep until the next one (or until an input event wakes us).
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if now >= self.next_frame {
+            self.next_frame = now + FRAME_DT;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
     }
 }

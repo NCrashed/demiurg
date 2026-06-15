@@ -8,10 +8,18 @@
 //! `editor.lang`, switchable live from the Language menu.
 
 use demiurg_i18n::{Lang, Msg, tr};
-use demiurg_view::RenderMode;
+use demiurg_view::{AXIS_COLORS, RenderMode};
 use roxlap_render::egui;
 
 use crate::{Editor, Tool};
+
+/// The viewport axis colour (X red, Y green, Z blue) as an egui colour,
+/// so panel axis labels match the gizmo.
+#[allow(clippy::cast_possible_truncation)] // channels masked to 0..=255
+fn axis_color(axis: usize) -> egui::Color32 {
+    let c = AXIS_COLORS[axis];
+    egui::Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
+}
 
 /// Voxlap-packed `0x80RRGGBB` swatches for the preset row.
 const PRESETS: [u32; 8] = [
@@ -192,9 +200,12 @@ pub fn build(
             ui.separator();
             ui.label(t(Msg::Mirror));
             ui.horizontal(|ui| {
-                ui.checkbox(&mut editor.document.mirror[0], "X");
-                ui.checkbox(&mut editor.document.mirror[1], "Y");
-                ui.checkbox(&mut editor.document.mirror[2], "Z");
+                for (axis, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
+                    ui.checkbox(
+                        &mut editor.document.mirror[axis],
+                        egui::RichText::new(name).color(axis_color(axis)),
+                    );
+                }
             });
 
             ui.separator();
@@ -202,15 +213,12 @@ pub fn build(
             let mut pivot = editor.document.pivot();
             let mut changed = false;
             ui.horizontal(|ui| {
-                changed |= ui
-                    .add(egui::DragValue::new(&mut pivot[0]).speed(0.5).prefix("x "))
-                    .changed();
-                changed |= ui
-                    .add(egui::DragValue::new(&mut pivot[1]).speed(0.5).prefix("y "))
-                    .changed();
-                changed |= ui
-                    .add(egui::DragValue::new(&mut pivot[2]).speed(0.5).prefix("z "))
-                    .changed();
+                for (axis, name) in [(0, "x"), (1, "y"), (2, "z")] {
+                    ui.colored_label(axis_color(axis), name);
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut pivot[axis]).speed(0.5))
+                        .changed();
+                }
             });
             if changed {
                 editor.document.set_pivot(pivot);
@@ -276,23 +284,31 @@ fn size_panel(ui: &mut egui::Ui, editor: &mut Editor, t: &impl Fn(Msg) -> &'stat
     }
 
     ui.horizontal(|ui| {
-        for d in &mut editor.resize_dims {
-            ui.add(egui::DragValue::new(d).range(1..=256));
-        }
-        if ui.button(t(Msg::Resize)).clicked() && editor.document.resize(editor.resize_dims) {
-            editor.dirty = true;
+        for (axis, name) in [(0, "x"), (1, "y"), (2, "z")] {
+            ui.colored_label(axis_color(axis), name);
+            ui.add(egui::DragValue::new(&mut editor.resize_dims[axis]).range(1..=256));
         }
     });
+    if ui.button(t(Msg::Resize)).clicked() && editor.document.resize(editor.resize_dims) {
+        editor.dirty = true;
+    }
 
     ui.label(t(Msg::Grow));
     ui.horizontal(|ui| {
         for (axis, name) in [(0usize, "X"), (1, "Y"), (2, "Z")] {
-            if ui.small_button(format!("−{name}")).clicked() {
+            let col = axis_color(axis);
+            if ui
+                .small_button(egui::RichText::new(format!("−{name}")).color(col))
+                .clicked()
+            {
                 editor.document.grow(axis, false);
                 editor.resize_dims = dims_arr(editor.document.dims());
                 editor.dirty = true;
             }
-            if ui.small_button(format!("+{name}")).clicked() {
+            if ui
+                .small_button(egui::RichText::new(format!("+{name}")).color(col))
+                .clicked()
+            {
                 editor.document.grow(axis, true);
                 editor.resize_dims = dims_arr(editor.document.dims());
                 editor.dirty = true;

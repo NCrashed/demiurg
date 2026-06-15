@@ -156,6 +156,10 @@ fn ray_box(o: [f64; 3], d: [f64; 3], dims: [f64; 3]) -> Option<(f64, f64, usize)
 
 // ---- Reference / hover line geometry (world space, for draw_lines) ----
 
+/// Axis gizmo colours (`0xAARRGGBB`): X red, Y green, Z blue. Shared with
+/// the editor's tool panel so an artist maps panel axes to the viewport.
+pub const AXIS_COLORS: [u32; 3] = [0xffe0_5a5a, 0xff6e_c86e, 0xff6e_96eb];
+
 /// Corner indices of a unit/box wireframe: index `i = x | y<<1 | z<<2`.
 const BOX_EDGES: [(usize, usize); 12] = [
     (0, 1),
@@ -258,10 +262,10 @@ pub fn reference_lines_3d(pivot: [f32; 3], dims: (u32, u32, u32)) -> Vec<Line3> 
         ));
     }
 
-    // Origin axes (R / G / B).
-    lines.push(line([0.0; 3], [dx, 0.0, 0.0], 0xffe0_5a5a, 1.5));
-    lines.push(line([0.0; 3], [0.0, dy, 0.0], 0xff6e_c86e, 1.5));
-    lines.push(line([0.0; 3], [0.0, 0.0, dz], 0xff6e_96eb, 1.5));
+    // Origin axes (X red / Y green / Z blue), matching `AXIS_COLORS`.
+    lines.push(line([0.0; 3], [dx, 0.0, 0.0], AXIS_COLORS[0], 1.5));
+    lines.push(line([0.0; 3], [0.0, dy, 0.0], AXIS_COLORS[1], 1.5));
+    lines.push(line([0.0; 3], [0.0, 0.0, dz], AXIS_COLORS[2], 1.5));
 
     lines
 }
