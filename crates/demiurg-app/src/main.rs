@@ -5,8 +5,10 @@
 //! Usage:
 //!   demiurg [path.kv6 | path.demiurg]   # no path -> a blank canvas
 //!
-//! Controls: left mouse applies the active tool (hold to drag-paint);
-//! with the Select tool, dragging a selected voxel moves the selection in
+//! Controls: left mouse applies the active tool (hold to drag-paint); the
+//! Place tool falls back to the floor (the volume's bottom face) when the
+//! ray hits no voxel, so you can build up from an empty model. With the
+//! Select tool, dragging a selected voxel moves the selection in
 //! that face's plane (it floats until deselected); `Ctrl`+click eyedrops a
 //! colour; right-mouse drag orbits; middle-mouse (or Shift+right) drag
 //! pans the view, `Home` recenters it; wheel and `W`/`S` zoom; arrow keys
@@ -159,6 +161,40 @@ fn plane_drag_delta(
         }
     }
     Some(delta)
+}
+
+/// The bottom-layer cell a cursor ray meets on the model's floor plane
+/// (voxel `z = dz`, the volume's bottom face in voxlap's z-down world), or
+/// `None` if the ray is parallel to the floor, meets it behind the camera,
+/// or lands outside the `dx`×`dy` footprint. Used to seed Place-tool
+/// voxels when nothing solid is under the cursor.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // cell guarded into [0, dim)
+fn floor_cell(
+    o: [f64; 3],
+    d: [f64; 3],
+    pivot: [f32; 3],
+    dims: (u32, u32, u32),
+) -> Option<[u32; 3]> {
+    let (dx, dy, dz) = dims;
+    if dz == 0 || d[2].abs() < 1e-9 {
+        return None;
+    }
+    let plane = f64::from(dz) - f64::from(pivot[2]); // world z of voxel-z = dz
+    let t = (plane - o[2]) / d[2];
+    if t <= 0.0 {
+        return None;
+    }
+    // World hit -> voxel space (add the pivot back).
+    let vx = o[0] + d[0] * t + f64::from(pivot[0]);
+    let vy = o[1] + d[1] * t + f64::from(pivot[1]);
+    if vx < 0.0 || vy < 0.0 {
+        return None;
+    }
+    let (cx, cy) = (vx as u32, vy as u32);
+    if cx >= dx || cy >= dy {
+        return None;
+    }
+    Some([cx, cy, dz - 1]) // the bottom layer sits on the floor
 }
 
 /// The selection mode implied by the held modifiers (Ctrl is reserved for
@@ -526,7 +562,7 @@ impl App {
         if self.egui_ctx.is_pointer_over_egui() {
             return None;
         }
-        let hit = self.pointer_pick()?;
+        let hit = self.tool_pick()?;
         Some(if matches!(self.editor.tool, Tool::Place) {
             hit.place
         } else {
@@ -585,6 +621,36 @@ impl App {
             [r.origin.x, r.origin.y, r.origin.z],
             [r.dir.x, r.dir.y, r.dir.z],
         ))
+    }
+
+    /// A synthetic hit on the model's floor under the cursor (see
+    /// [`floor_cell`]): its `place` is the bottom-layer cell, so the Place
+    /// tool can seed voxels on the floor when there's nothing solid to
+    /// click (e.g. a model emptied of its last voxel).
+    #[allow(clippy::cast_possible_wrap)] // voxel coords are far below i32::MAX
+    fn floor_pick(&self) -> Option<PickHit> {
+        let (o, d) = self.pointer_ray()?;
+        let cell = floor_cell(
+            o,
+            d,
+            self.editor.document.pivot(),
+            self.editor.document.dims(),
+        )?;
+        Some(PickHit {
+            voxel: cell,
+            normal: [0, 0, -1],
+            place: [cell[0] as i32, cell[1] as i32, cell[2] as i32],
+        })
+    }
+
+    /// The pick a tool acts on: a real voxel hit, or — for the Place tool
+    /// only — the floor cell under the cursor, so a model can be built
+    /// from nothing.
+    fn tool_pick(&self) -> Option<PickHit> {
+        match self.pointer_pick() {
+            None if self.editor.tool == Tool::Place => self.floor_pick(),
+            other => other,
+        }
     }
 
     /// Pick against the **composite** (model + floating layer), so a
@@ -765,7 +831,7 @@ impl App {
             self.painting = true;
             self.last_paint = None;
             self.paint_step();
-        } else if let Some(hit) = self.pointer_pick() {
+        } else if let Some(hit) = self.tool_pick() {
             self.editor.apply(hit);
         }
     }
@@ -1526,6 +1592,28 @@ mod tests {
         // A plane behind the camera (negative t) is rejected.
         assert_eq!(
             plane_drag_delta([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 2, -3.0, [0.0; 3]),
+            None
+        );
+    }
+
+    #[test]
+    fn floor_cell_maps_a_down_ray_to_the_bottom_layer() {
+        // 8^3 model, pivot at the centre: the floor plane is voxel z = 8,
+        // i.e. world z = 8 - 4 = 4. A ray straight down (+z) through world
+        // (-0.5, 1.5) lands in voxel column (3, 5) -> cell (3, 5, 7).
+        let dims = (8, 8, 8);
+        let pivot = [4.0, 4.0, 4.0];
+        let cell = floor_cell([-0.5, 1.5, -10.0], [0.0, 0.0, 1.0], pivot, dims);
+        assert_eq!(cell, Some([3, 5, 7]), "bottom layer is z = dz - 1");
+
+        // Parallel to the floor -> no hit.
+        assert_eq!(
+            floor_cell([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], pivot, dims),
+            None
+        );
+        // Outside the footprint -> no hit.
+        assert_eq!(
+            floor_cell([20.0, 0.0, -10.0], [0.0, 0.0, 1.0], pivot, dims),
             None
         );
     }
