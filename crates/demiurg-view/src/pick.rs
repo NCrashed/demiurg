@@ -1,17 +1,19 @@
-//! Voxel picking: turn a world-space ray (from
-//! `SceneRenderer::view_ray`) into the voxel under the cursor.
+//! Voxel picking and the editor's reference/hover line geometry.
 //!
-//! The engine's own `pick` reads the scene-grid z-buffer and is
-//! transparent to sprites, so a model viewer needs its own ray-march.
-//! The model is drawn as one sprite at the world origin with an identity
-//! basis, so world↔voxel is a pure translation by the pivot
-//! (`voxel = world + pivot`); we confirm this matches the renderer by
-//! the model sitting centred on the orbit point. From there it is a
-//! standard Amanatides–Woo DDA over the dense grid.
+//! Picking ([`pick_voxel`]) ray-marches the dense model directly (the
+//! engine's own pick reads the scene-grid z-buffer and is transparent to
+//! sprites). The model is placed so a voxel `(x, y, z)` sits at world
+//! `(x, y, z) − pivot`, matching the renderer.
+//!
+//! The reference grid / box / axes ([`reference_lines_3d`]) and the hover
+//! wire box ([`voxel_box_lines_3d`]) are returned as **world-space**
+//! [`Line3`]s for `SceneRenderer::draw_lines`, which projects and
+//! depth-tests them against the rendered frame — so the model occludes
+//! lines behind it. No screen projection here anymore.
 
 use demiurg_core::VoxelModel;
 use glam::DVec3;
-use roxlap_core::Camera;
+use roxlap_render::Line3;
 
 /// A resolved voxel pick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,206 +120,6 @@ pub fn pick_voxel(model: &VoxelModel, origin: DVec3, dir: DVec3) -> Option<PickH
     }
 }
 
-/// Project a world point to framebuffer pixels (physical), or `None` if
-/// it is at/behind the camera plane.
-///
-/// Exact inverse of roxlap's `setcamera` pixel ray
-/// (`dir = (x-hx)·right + (y-hy)·down + hz·forward`, with
-/// `hx = hy = w/2`, `hz = w/2` from `OpticastSettings::for_oracle_
-/// framebuffer`): for a point at relative offset `rel = P − cam.pos`,
-/// `x = hx + hz·(rel·right)/(rel·forward)` and likewise for `y`. The
-/// basis is orthonormal so the dot products read off the components.
-#[must_use]
-pub fn project_to_screen(
-    camera: &Camera,
-    width: f64,
-    height: f64,
-    world: [f64; 3],
-) -> Option<(f64, f64)> {
-    let rel = [
-        world[0] - camera.pos[0],
-        world[1] - camera.pos[1],
-        world[2] - camera.pos[2],
-    ];
-    let dot = |a: [f64; 3]| a[0] * rel[0] + a[1] * rel[1] + a[2] * rel[2];
-    let f = dot(camera.forward);
-    if f <= 1e-6 {
-        return None;
-    }
-    let (hx, hy, hz) = (width * 0.5, height * 0.5, width * 0.5);
-    Some((
-        hx + hz * dot(camera.right) / f,
-        hy + hz * dot(camera.down) / f,
-    ))
-}
-
-/// The 12 edges of voxel `cell` projected to framebuffer pixels, as
-/// `[start, end]` segments. Edges with an endpoint behind the camera are
-/// dropped. Uses the same world↔voxel mapping as [`pick_voxel`]
-/// (`world = voxel − pivot`, sprite at the origin), so the wire box lines
-/// up exactly with the rendered voxel.
-#[must_use]
-#[allow(clippy::cast_sign_loss)] // i,j,k are 0/1 so the corner index is non-negative
-pub fn voxel_screen_edges(
-    camera: &Camera,
-    width: f64,
-    height: f64,
-    pivot: [f32; 3],
-    cell: [i32; 3],
-) -> Vec<[(f64, f64); 2]> {
-    const EDGES: [(usize, usize); 12] = [
-        (0, 1),
-        (2, 3),
-        (4, 5),
-        (6, 7), // along x
-        (0, 2),
-        (1, 3),
-        (4, 6),
-        (5, 7), // along y
-        (0, 4),
-        (1, 5),
-        (2, 6),
-        (3, 7), // along z
-    ];
-
-    let pv = [
-        f64::from(pivot[0]),
-        f64::from(pivot[1]),
-        f64::from(pivot[2]),
-    ];
-    // Corner c = (i, j, k) with index i + 2j + 4k; world = (cell + c) - pivot.
-    let mut pts: [Option<(f64, f64)>; 8] = [None; 8];
-    for k in 0..2i32 {
-        for j in 0..2i32 {
-            for i in 0..2i32 {
-                let world = [
-                    f64::from(cell[0] + i) - pv[0],
-                    f64::from(cell[1] + j) - pv[1],
-                    f64::from(cell[2] + k) - pv[2],
-                ];
-                pts[(i + 2 * j + 4 * k) as usize] = project_to_screen(camera, width, height, world);
-            }
-        }
-    }
-
-    let mut out = Vec::with_capacity(12);
-    for (a, b) in EDGES {
-        if let (Some(pa), Some(pb)) = (pts[a], pts[b]) {
-            out.push([pa, pb]);
-        }
-    }
-    out
-}
-
-/// Reference overlay geometry, in framebuffer pixels: the volume
-/// bounding box, a floor grid on the origin plane, and the X/Y/Z axes
-/// from the `(0,0,0)` corner. Segments with an endpoint behind the
-/// camera are dropped. Uses the same world↔voxel mapping as
-/// [`pick_voxel`], so it lines up with the model.
-/// A projected segment plus its view-space depth (distance along the
-/// camera forward axis), so callers can fade segments behind the model.
-pub type DepthSeg = ([(f64, f64); 2], f64);
-
-pub struct ReferenceLines {
-    /// The 12 edges of the `[0, dims]` volume box.
-    pub box_edges: Vec<DepthSeg>,
-    /// Per-voxel grid lines on the floor (max-z face; z is down).
-    pub floor_grid: Vec<DepthSeg>,
-    /// X, Y, Z axes from the origin corner (caller colours them).
-    pub axes: [Option<DepthSeg>; 3],
-    /// View-space depth of the model centre — segments deeper than this
-    /// are behind the model.
-    pub center_depth: f64,
-}
-
-/// Build the [`ReferenceLines`] for a model of `dims` with `pivot`.
-#[must_use]
-pub fn reference_lines(
-    camera: &Camera,
-    width: f64,
-    height: f64,
-    pivot: [f32; 3],
-    dims: (u32, u32, u32),
-) -> ReferenceLines {
-    const EDGES: [(usize, usize); 12] = [
-        (0, 1),
-        (2, 3),
-        (4, 5),
-        (6, 7),
-        (0, 2),
-        (1, 3),
-        (4, 6),
-        (5, 7),
-        (0, 4),
-        (1, 5),
-        (2, 6),
-        (3, 7),
-    ];
-    let pv = [
-        f64::from(pivot[0]),
-        f64::from(pivot[1]),
-        f64::from(pivot[2]),
-    ];
-    let (dx, dy, dz) = (f64::from(dims.0), f64::from(dims.1), f64::from(dims.2));
-    // voxel-space point -> world (= voxel - pivot).
-    let world = |p: [f64; 3]| [p[0] - pv[0], p[1] - pv[1], p[2] - pv[2]];
-    let project = |p: [f64; 3]| project_to_screen(camera, width, height, world(p));
-    // View-space depth: distance of a voxel-space point along forward.
-    let depth = |p: [f64; 3]| {
-        let w = world(p);
-        (w[0] - camera.pos[0]) * camera.forward[0]
-            + (w[1] - camera.pos[1]) * camera.forward[1]
-            + (w[2] - camera.pos[2]) * camera.forward[2]
-    };
-    let seg = |a: [f64; 3], b: [f64; 3]| match (project(a), project(b)) {
-        (Some(pa), Some(pb)) => Some(([pa, pb], 0.5 * (depth(a) + depth(b)))),
-        _ => None,
-    };
-    let center_depth = depth([dx * 0.5, dy * 0.5, dz * 0.5]);
-
-    let corners = [
-        [0.0, 0.0, 0.0],
-        [dx, 0.0, 0.0],
-        [0.0, dy, 0.0],
-        [dx, dy, 0.0],
-        [0.0, 0.0, dz],
-        [dx, 0.0, dz],
-        [0.0, dy, dz],
-        [dx, dy, dz],
-    ];
-    let box_edges = EDGES
-        .iter()
-        .filter_map(|&(a, b)| seg(corners[a], corners[b]))
-        .collect();
-
-    // Floor: the max-z face (z is down in the voxlap world, so this is
-    // the bottom of the volume).
-    let mut floor_grid = Vec::new();
-    for x in 0..=dims.0 {
-        if let Some(s) = seg([f64::from(x), 0.0, dz], [f64::from(x), dy, dz]) {
-            floor_grid.push(s);
-        }
-    }
-    for y in 0..=dims.1 {
-        if let Some(s) = seg([0.0, f64::from(y), dz], [dx, f64::from(y), dz]) {
-            floor_grid.push(s);
-        }
-    }
-
-    let axes = [
-        seg([0.0, 0.0, 0.0], [dx, 0.0, 0.0]),
-        seg([0.0, 0.0, 0.0], [0.0, dy, 0.0]),
-        seg([0.0, 0.0, 0.0], [0.0, 0.0, dz]),
-    ];
-
-    ReferenceLines {
-        box_edges,
-        floor_grid,
-        axes,
-        center_depth,
-    }
-}
-
 /// Slab-method ray vs `[0, dims]` box. Returns `(t_enter, t_exit,
 /// enter_axis)` or `None` if the ray misses.
 fn ray_box(o: [f64; 3], d: [f64; 3], dims: [f64; 3]) -> Option<(f64, f64, usize)> {
@@ -350,6 +152,118 @@ fn ray_box(o: [f64; 3], d: [f64; 3], dims: [f64; 3]) -> Option<(f64, f64, usize)
         }
     }
     Some((t_enter, t_exit, enter_axis))
+}
+
+// ---- Reference / hover line geometry (world space, for draw_lines) ----
+
+/// Corner indices of a unit/box wireframe: index `i = x | y<<1 | z<<2`.
+const BOX_EDGES: [(usize, usize); 12] = [
+    (0, 1),
+    (2, 3),
+    (4, 5),
+    (6, 7), // along x
+    (0, 2),
+    (1, 3),
+    (4, 6),
+    (5, 7), // along y
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7), // along z
+];
+
+/// The 12 edges of the world-space box `[lo, hi]` as `Line3`s.
+fn box_lines(
+    lo: [f64; 3],
+    hi: [f64; 3],
+    color: u32,
+    width_px: f32,
+    depth_test: bool,
+) -> Vec<Line3> {
+    let corner = |i: usize| {
+        [
+            if i & 1 == 0 { lo[0] } else { hi[0] },
+            if i & 2 == 0 { lo[1] } else { hi[1] },
+            if i & 4 == 0 { lo[2] } else { hi[2] },
+        ]
+    };
+    BOX_EDGES
+        .iter()
+        .map(|&(a, b)| Line3 {
+            a: corner(a),
+            b: corner(b),
+            color,
+            width_px,
+            depth_test,
+        })
+        .collect()
+}
+
+/// Wire box around voxel `cell` (always-on-top yellow), so the targeted
+/// voxel is visible even when it would be occluded.
+#[must_use]
+pub fn voxel_box_lines_3d(pivot: [f32; 3], cell: [i32; 3]) -> Vec<Line3> {
+    let pv = [
+        f64::from(pivot[0]),
+        f64::from(pivot[1]),
+        f64::from(pivot[2]),
+    ];
+    let lo = [
+        f64::from(cell[0]) - pv[0],
+        f64::from(cell[1]) - pv[1],
+        f64::from(cell[2]) - pv[2],
+    ];
+    let hi = [lo[0] + 1.0, lo[1] + 1.0, lo[2] + 1.0];
+    box_lines(lo, hi, 0xffff_e600, 1.5, false)
+}
+
+/// The reference overlay as world-space `Line3`s: the volume bounding box,
+/// a per-voxel floor grid (max-z face), and X/Y/Z origin axes. All
+/// depth-tested, so the model occludes the parts behind it.
+#[must_use]
+pub fn reference_lines_3d(pivot: [f32; 3], dims: (u32, u32, u32)) -> Vec<Line3> {
+    let pv = [
+        f64::from(pivot[0]),
+        f64::from(pivot[1]),
+        f64::from(pivot[2]),
+    ];
+    let (dx, dy, dz) = (f64::from(dims.0), f64::from(dims.1), f64::from(dims.2));
+    // voxel-space -> world.
+    let w = |p: [f64; 3]| [p[0] - pv[0], p[1] - pv[1], p[2] - pv[2]];
+    let line = |a: [f64; 3], b: [f64; 3], color: u32, width: f32| Line3 {
+        a: w(a),
+        b: w(b),
+        color,
+        width_px: width,
+        depth_test: true,
+    };
+
+    let mut lines = box_lines(w([0.0, 0.0, 0.0]), w([dx, dy, dz]), 0xc0c8_cdde, 1.0, true);
+
+    // Floor grid on the max-z face (z is down → this is the bottom).
+    for x in 0..=dims.0 {
+        lines.push(line(
+            [f64::from(x), 0.0, dz],
+            [f64::from(x), dy, dz],
+            0x70a0_a8b8,
+            1.0,
+        ));
+    }
+    for y in 0..=dims.1 {
+        lines.push(line(
+            [0.0, f64::from(y), dz],
+            [dx, f64::from(y), dz],
+            0x70a0_a8b8,
+            1.0,
+        ));
+    }
+
+    // Origin axes (R / G / B).
+    lines.push(line([0.0; 3], [dx, 0.0, 0.0], 0xffe0_5a5a, 1.5));
+    lines.push(line([0.0; 3], [0.0, dy, 0.0], 0xff6e_c86e, 1.5));
+    lines.push(line([0.0; 3], [0.0, 0.0, dz], 0xff6e_96eb, 1.5));
+
+    lines
 }
 
 #[cfg(test)]
@@ -400,37 +314,16 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::float_cmp)] // exact-centre projection is an exact value
-    fn projection_centres_a_forward_point_and_drops_behind() {
-        // Camera at origin looking +y; right=+x, down=+z.
-        let cam = Camera {
-            pos: [0.0, 0.0, 0.0],
-            right: [1.0, 0.0, 0.0],
-            down: [0.0, 0.0, 1.0],
-            forward: [0.0, 1.0, 0.0],
-        };
-        let (x, y) = project_to_screen(&cam, 100.0, 80.0, [0.0, 10.0, 0.0]).unwrap();
-        assert!((x - 50.0).abs() < 1e-9, "hx centre"); // width/2
-        assert!((y - 40.0).abs() < 1e-9, "hy centre"); // height/2
-
-        let (xr, _) = project_to_screen(&cam, 100.0, 80.0, [2.0, 10.0, 0.0]).unwrap();
-        assert!(xr > 50.0, "a +x point lands right of centre");
-
+    fn reference_and_hover_line_counts() {
+        // box (12) + floor grid (dx+1 + dy+1) + 3 axes.
+        let refs = reference_lines_3d([4.0, 4.0, 4.0], (8, 8, 8));
+        assert_eq!(refs.len(), 12 + (9 + 9) + 3);
+        assert_eq!(voxel_box_lines_3d([4.0, 4.0, 4.0], [1, 2, 3]).len(), 12);
         assert!(
-            project_to_screen(&cam, 100.0, 80.0, [0.0, -10.0, 0.0]).is_none(),
-            "behind the camera projects to None"
+            voxel_box_lines_3d([0.0; 3], [0, 0, 0])
+                .iter()
+                .all(|l| !l.depth_test),
+            "hover box is always-on-top"
         );
-    }
-
-    #[test]
-    fn voxel_edges_visible_when_in_front() {
-        let cam = Camera {
-            pos: [0.0, -20.0, 0.0],
-            right: [1.0, 0.0, 0.0],
-            down: [0.0, 0.0, 1.0],
-            forward: [0.0, 1.0, 0.0],
-        };
-        let edges = voxel_screen_edges(&cam, 100.0, 100.0, [4.0, 4.0, 4.0], [4, 4, 4]);
-        assert_eq!(edges.len(), 12, "all 12 edges in front of the camera");
     }
 }

@@ -18,8 +18,7 @@ use std::sync::Arc;
 
 use demiurg_core::{Document, VoxelModel, project};
 use demiurg_i18n::{Lang, Msg, tr};
-use demiurg_view::{ModelView, OrbitCamera, PickHit, RenderMode, pick_voxel, voxel_screen_edges};
-use roxlap_core::Camera;
+use demiurg_view::{Line3, ModelView, OrbitCamera, PickHit, RenderMode, pick_voxel};
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::sprite::SpriteLighting;
 use roxlap_render::{FrameParams, RenderOptions, SceneRenderer, egui};
@@ -318,18 +317,16 @@ impl App {
         }
     }
 
-    /// Wire-box edges (framebuffer pixels) for the voxel the active tool
-    /// would affect under the cursor. Empty when the pointer is over a
-    /// panel or misses the model.
+    /// The cell the active tool would affect under the cursor (place
+    /// target for Place, hit voxel otherwise), or `None` over a panel /
+    /// on a miss.
     #[allow(clippy::cast_possible_wrap)] // voxel coords are far below i32::MAX
-    fn hover_edges(&self, camera: &Camera, width: f64, height: f64) -> Vec<[(f64, f64); 2]> {
-        if self.egui_ctx.is_pointer_over_area() {
-            return Vec::new();
+    fn hover_cell(&self) -> Option<[i32; 3]> {
+        if self.egui_ctx.is_pointer_over_egui() {
+            return None;
         }
-        let Some(hit) = self.pointer_pick() else {
-            return Vec::new();
-        };
-        let cell = if matches!(self.editor.tool, Tool::Place) {
+        let hit = self.pointer_pick()?;
+        Some(if matches!(self.editor.tool, Tool::Place) {
             hit.place
         } else {
             [
@@ -337,74 +334,28 @@ impl App {
                 hit.voxel[1] as i32,
                 hit.voxel[2] as i32,
             ]
-        };
-        voxel_screen_edges(camera, width, height, self.editor.document.pivot(), cell)
+        })
     }
 
-    /// Assemble the viewport overlay (coloured line segments in
-    /// framebuffer pixels): the reference grid / box / origin axes (when
-    /// enabled) plus the hover wire box, last so it draws on top.
-    fn build_overlay(
-        &self,
-        camera: &Camera,
-        width: f64,
-        height: f64,
-    ) -> Vec<([(f64, f64); 2], egui::Color32)> {
-        // The quit modal owns the screen — no overlay behind/over it.
+    /// World-space lines for `draw_lines`: the reference grid / box /
+    /// axes (when enabled) and the hover wire box. The engine depth-tests
+    /// them against the rendered frame, so the model occludes them.
+    fn scene_lines(&self) -> Vec<Line3> {
         if self.confirm_quit {
             return Vec::new();
         }
-
-        let mut overlay = Vec::new();
-
+        let pivot = self.editor.document.pivot();
+        let mut lines = Vec::new();
         if self.editor.show_grid {
-            let refs = demiurg_view::reference_lines(
-                camera,
-                width,
-                height,
-                self.editor.document.pivot(),
+            lines.extend(demiurg_view::reference_lines_3d(
+                pivot,
                 self.editor.document.dims(),
-            );
-            // We can't depth-test 2D overlay lines against the model, so
-            // approximate it: fade segments behind the model centre, so
-            // back grid/box lines don't visually sit on top of the model.
-            let cd = refs.center_depth;
-            let fade = |seg: demiurg_view::DepthSeg, near: egui::Color32, far: egui::Color32| {
-                (seg.0, if seg.1 > cd { far } else { near })
-            };
-            let grid_near = egui::Color32::from_rgba_unmultiplied(150, 155, 170, 70);
-            let grid_far = egui::Color32::from_rgba_unmultiplied(150, 155, 170, 18);
-            let box_near = egui::Color32::from_rgba_unmultiplied(210, 215, 230, 150);
-            let box_far = egui::Color32::from_rgba_unmultiplied(210, 215, 230, 40);
-            overlay.extend(
-                refs.floor_grid
-                    .into_iter()
-                    .map(|s| fade(s, grid_near, grid_far)),
-            );
-            overlay.extend(
-                refs.box_edges
-                    .into_iter()
-                    .map(|s| fade(s, box_near, box_far)),
-            );
-            let axis_cols = [
-                egui::Color32::from_rgb(235, 90, 90),   // X — red
-                egui::Color32::from_rgb(110, 205, 110), // Y — green
-                egui::Color32::from_rgb(110, 150, 235), // Z — blue
-            ];
-            for (axis, col) in refs.axes.into_iter().zip(axis_cols) {
-                if let Some(seg) = axis {
-                    overlay.push((seg.0, col));
-                }
-            }
+            ));
         }
-
-        let hover = egui::Color32::from_rgb(255, 230, 0);
-        overlay.extend(
-            self.hover_edges(camera, width, height)
-                .into_iter()
-                .map(|s| (s, hover)),
-        );
-        overlay
+        if let Some(cell) = self.hover_cell() {
+            lines.extend(demiurg_view::voxel_box_lines_3d(pivot, cell));
+        }
+        lines
     }
 
     /// The voxel under the cursor, if any.
@@ -514,7 +465,6 @@ impl App {
     fn run_ui(
         &mut self,
         window: &Window,
-        overlay: &[([(f64, f64); 2], egui::Color32)],
     ) -> (
         Vec<egui::ClippedPrimitive>,
         egui::TexturesDelta,
@@ -530,8 +480,8 @@ impl App {
         let show_quit = self.confirm_quit;
         let editor = &mut self.editor;
         let mut actions = UiActions::default();
-        let out = ctx.run(raw, |c| {
-            ui::build(c, editor, &mut actions, overlay, show_quit);
+        let out = ctx.run_ui(raw, |ui| {
+            ui::build(ui, editor, &mut actions, show_quit);
         });
         self.egui_state
             .as_mut()
@@ -594,6 +544,16 @@ impl App {
                 self.on_saved(&path, std::fs::write(&path, bytes));
             }
         }
+        if a.save_vxl {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("vxl", &["vxl"])
+                .set_file_name("model.vxl")
+                .save_file()
+            {
+                let bytes = self.editor.document.model().to_vxl_bytes();
+                self.on_saved(&path, std::fs::write(&path, bytes));
+            }
+        }
         if a.save_project {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("demiurg", &["demiurg"])
@@ -642,12 +602,8 @@ impl App {
         }
 
         let camera = self.camera.to_roxlap();
-        // Hover wire box (uses last frame's projection — `is_pointer_over_area`
-        // and the pick ray both read the previous frame, which is fine at
-        // redraw cadence).
-        let overlay = self.build_overlay(&camera, f64::from(size.width), f64::from(size.height));
 
-        let (jobs, textures, ppp, actions) = self.run_ui(&window, &overlay);
+        let (jobs, textures, ppp, actions) = self.run_ui(&window);
         self.apply_actions(&actions);
         if actions.quit_confirm {
             event_loop.exit();
@@ -693,11 +649,19 @@ impl App {
             side_shades,
         };
 
+        // Editor lines (uses the pick ray from the last frame's
+        // projection — fine at redraw cadence). Built before the mutable
+        // renderer borrow.
+        let lines = self.scene_lines();
+
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
         renderer.set_sprites(self.view.sprites());
         renderer.render(self.view.scene_mut(), &camera, &frame);
+        // Depth-tested editor gizmos land in the framebuffer; paint_egui
+        // then draws the panels on top.
+        renderer.draw_lines(&camera, &lines);
         renderer.paint_egui(&jobs, &textures, ppp);
 
         window.request_redraw();

@@ -23,6 +23,7 @@
 
 use roxlap_formats::Rgb6;
 use roxlap_formats::kv6::{self, Kv6};
+use roxlap_formats::vxl::{self, Vxl};
 
 pub mod edit;
 pub mod project;
@@ -144,11 +145,13 @@ impl VoxelModel {
     }
 
     /// Compile the model into a `.kv6`, reusing roxlap's surface
-    /// extraction and face-bit computation. Pivot and palette are
-    /// carried over from the document.
+    /// extraction. Uses `from_fn_shaded`, so each surface voxel gets a
+    /// real `dir` (surface normal) + `vis` (exposed faces) — the sprite
+    /// render shades the model's form instead of flat. Pivot and palette
+    /// are carried over from the document.
     #[must_use]
     pub fn to_kv6(&self) -> Kv6 {
-        let mut kv6 = Kv6::from_fn(self.xsiz, self.ysiz, self.zsiz, |x, y, z| {
+        let mut kv6 = Kv6::from_fn_shaded(self.xsiz, self.ysiz, self.zsiz, |x, y, z| {
             let col = self.get(x, y, z);
             (col != 0).then_some(col)
         });
@@ -171,6 +174,20 @@ impl VoxelModel {
     /// Returns [`kv6::ParseError`] if the bytes are not a valid `.kv6`.
     pub fn from_kv6_bytes(bytes: &[u8]) -> Result<Self, kv6::ParseError> {
         kv6::parse(bytes).map(|kv6| Self::from_kv6(&kv6))
+    }
+
+    /// Compile and serialize the model to `.vxl` bytes — a small voxlap
+    /// world holding just this model. The world is square (`vsid` = next
+    /// power of two ≥ the larger horizontal dimension); z is voxlap
+    /// z-down, `0..256` (models taller than 256 are clipped).
+    #[must_use]
+    pub fn to_vxl_bytes(&self) -> Vec<u8> {
+        let vsid = self.xsiz.max(self.ysiz).max(1).next_power_of_two();
+        let vxl = Vxl::from_dense(vsid, |x, y, z| {
+            let col = self.get(x, y, z);
+            (col != 0).then_some(col)
+        });
+        vxl::serialize(&vxl)
     }
 
     /// The raw dense voxel buffer (`0` = empty), indexed
@@ -282,6 +299,20 @@ mod tests {
         let back = VoxelModel::from_kv6_bytes(&m.to_kv6_bytes()).unwrap();
         assert_eq!(back.occupied_count(), 26);
         assert_eq!(back.get(1, 1, 1), 0, "enclosed centre voxel is dropped");
+    }
+
+    #[test]
+    fn exports_a_vxl_that_round_trips() {
+        let mut m = VoxelModel::new(4, 4, 8);
+        m.set(1, 1, 5, 0x80ff_0000);
+        m.set(2, 3, 0, 0x8000_ff00);
+        let vxl = roxlap_formats::vxl::parse(&m.to_vxl_bytes()).expect("vxl parses");
+        assert!(
+            vxl.voxel_color(1, 1, 5).is_some(),
+            "a set voxel is in the vxl"
+        );
+        assert!(vxl.voxel_color(2, 3, 0).is_some());
+        assert!(vxl.voxel_color(0, 0, 0).is_none(), "an empty cell is air");
     }
 
     #[test]

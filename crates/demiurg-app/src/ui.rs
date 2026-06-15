@@ -32,6 +32,7 @@ pub struct UiActions {
     pub new_model: bool,
     pub open_kv6: bool,
     pub save_kv6: bool,
+    pub save_vxl: bool,
     pub open_project: bool,
     pub save_project: bool,
     pub undo: bool,
@@ -41,43 +42,47 @@ pub struct UiActions {
     pub quit_cancel: bool,
 }
 
-/// Draw the editor chrome for one frame. `highlight` is the wire box of
-/// the voxel under the cursor, as framebuffer-pixel line segments.
+/// Draw the editor chrome for one frame (menus, tool panel, quit modal).
+/// The 3D reference lines / hover box are drawn by the host via
+/// `SceneRenderer::draw_lines`, not here.
 #[allow(clippy::too_many_lines)] // a flat panel layout reads better unsplit
 pub fn build(
-    ctx: &egui::Context,
+    ui: &mut egui::Ui,
     editor: &mut Editor,
     actions: &mut UiActions,
-    overlay: &[([(f64, f64); 2], egui::Color32)],
     show_quit_confirm: bool,
 ) {
     let lang = editor.lang;
     let t = |m: Msg| tr(lang, m);
 
-    egui::TopBottomPanel::top("menubar").show(ctx, |ui| {
-        egui::menu::bar(ui, |ui| {
+    egui::Panel::top("menubar").show_inside(ui, |ui| {
+        egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button(t(Msg::File), |ui| {
                 if ui.button(t(Msg::New)).clicked() {
                     actions.new_model = true;
-                    ui.close_menu();
+                    ui.close();
                 }
                 ui.separator();
                 if ui.button(t(Msg::OpenKv6)).clicked() {
                     actions.open_kv6 = true;
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui.button(t(Msg::SaveKv6)).clicked() {
                     actions.save_kv6 = true;
-                    ui.close_menu();
+                    ui.close();
+                }
+                if ui.button(t(Msg::SaveVxl)).clicked() {
+                    actions.save_vxl = true;
+                    ui.close();
                 }
                 ui.separator();
                 if ui.button(t(Msg::OpenProject)).clicked() {
                     actions.open_project = true;
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui.button(t(Msg::SaveProject)).clicked() {
                     actions.save_project = true;
-                    ui.close_menu();
+                    ui.close();
                 }
             });
             ui.menu_button(t(Msg::Edit), |ui| {
@@ -86,14 +91,14 @@ pub fn build(
                     .clicked()
                 {
                     actions.undo = true;
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui
                     .add_enabled(editor.document.can_redo(), egui::Button::new(t(Msg::Redo)))
                     .clicked()
                 {
                     actions.redo = true;
-                    ui.close_menu();
+                    ui.close();
                 }
             });
             ui.menu_button(t(Msg::View), |ui| {
@@ -130,9 +135,9 @@ pub fn build(
         });
     });
 
-    egui::SidePanel::left("tools")
-        .default_width(200.0)
-        .show(ctx, |ui| {
+    egui::Panel::left("tools")
+        .default_size(200.0)
+        .show_inside(ui, |ui| {
             ui.heading(t(Msg::Tools));
             // The 1-7 digits double as keyboard shortcuts (see on_key);
             // show them on the buttons so they're discoverable.
@@ -226,25 +231,6 @@ pub fn build(
             ui.small(t(Msg::HelpOrbit));
         });
 
-    // Paint the overlay (reference grid/axes + hover wire box) over the
-    // 3D render. A bare layer painter (not a panel) is used on purpose: a
-    // CentralPanel would register an interactive area over the whole
-    // viewport and swallow clicks / scroll. Clip to the region the panels
-    // leave so it never draws over them.
-    if !overlay.is_empty() {
-        let ppp = f64::from(ctx.pixels_per_point());
-        let painter = ctx
-            .layer_painter(egui::LayerId::new(
-                egui::Order::Foreground,
-                egui::Id::new("viewport-overlay"),
-            ))
-            .with_clip_rect(ctx.available_rect());
-        for (seg, color) in overlay {
-            let stroke = egui::Stroke::new(1.0, *color);
-            painter.line_segment([to_point(seg[0], ppp), to_point(seg[1], ppp)], stroke);
-        }
-    }
-
     // In-app quit confirmation (replaces a native message box, which the
     // XDG portal doesn't reliably show here).
     if show_quit_confirm {
@@ -252,7 +238,7 @@ pub fn build(
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
+            .show(ui.ctx(), |ui| {
                 ui.label(t(Msg::ConfirmQuitBody));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -265,12 +251,6 @@ pub fn build(
                 });
             });
     }
-}
-
-/// Framebuffer pixel -> egui point (logical).
-#[allow(clippy::cast_possible_truncation)] // screen coords fit f32 comfortably
-fn to_point((x, y): (f64, f64), ppp: f64) -> egui::Pos2 {
-    egui::pos2((x / ppp) as f32, (y / ppp) as f32)
 }
 
 /// A small square colour button for `0x80RRGGBB`.

@@ -87,6 +87,7 @@ pub enum Msg {
     New,
     OpenKv6,
     SaveKv6,
+    SaveVxl,
     OpenProject,
     SaveProject,
     Edit,
@@ -112,7 +113,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 38] = [
+    pub const ALL: [Msg; 39] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -132,6 +133,7 @@ impl Msg {
         Msg::New,
         Msg::OpenKv6,
         Msg::SaveKv6,
+        Msg::SaveVxl,
         Msg::OpenProject,
         Msg::SaveProject,
         Msg::Edit,
@@ -184,6 +186,7 @@ const fn en(msg: Msg) -> &'static str {
         Msg::New => "New",
         Msg::OpenKv6 => "Open .kv6…",
         Msg::SaveKv6 => "Save .kv6…",
+        Msg::SaveVxl => "Save .vxl…",
         Msg::OpenProject => "Open project…",
         Msg::SaveProject => "Save project…",
         Msg::Edit => "Edit",
@@ -227,6 +230,7 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::New => "Создать",
         Msg::OpenKv6 => "Открыть .kv6…",
         Msg::SaveKv6 => "Сохранить .kv6…",
+        Msg::SaveVxl => "Сохранить .vxl…",
         Msg::OpenProject => "Открыть проект…",
         Msg::SaveProject => "Сохранить проект…",
         Msg::Edit => "Правка",

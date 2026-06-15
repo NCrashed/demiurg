@@ -26,20 +26,21 @@ demiurg-i18n = { path = "crates/demiurg-i18n", version = "0.0.1" }
 demiurg-view = { path = "crates/demiurg-view", version = "0.0.1" }
 
 # demiurg depends on roxlap ONLY (see DESIGN.md §1). Pinned to the
-# PUBLISHED crates.io release (not the local ../roxlap checkout, which
-# is mid-development on 1.0.0 and not ready). All four come from the
-# same source so `Kv6`/`Sprite` types stay compatible; bump them
-# together when a new roxlap is published. (mirrors monada's stance.)
+# PUBLISHED crates.io 0.9.0, which carries the features demiurg needs:
+# kv6 surface normals (`Kv6::from_fn_shaded`), dense-model `.vxl` export
+# (`Vxl::from_dense`), and depth-tested debug lines
+# (`SceneRenderer::draw_lines`). All four come from the same source so
+# `Kv6`/`Sprite` types stay compatible; bump together on the next release.
 #
-# roxlap-formats: kv6 read/write + surface extraction (`Kv6::from_fn`).
+# roxlap-formats: kv6 read/write + shaded surface extraction, .vxl export.
 # roxlap-core:    Camera, OpticastSettings, SpriteLighting.
 # roxlap-scene:   Scene graph the renderer composites.
-# roxlap-render:  unified CPU/GPU facade (SceneRenderer, SpriteSet).
+# roxlap-render:  unified CPU/GPU facade (SceneRenderer, SpriteSet, draw_lines).
 # roxlap-voxvideo lands at M5.
-roxlap-formats = "0.8.0"
-roxlap-core = "0.8.0"
-roxlap-scene = "0.8.0"
-roxlap-render = "0.8.0"
+roxlap-formats = "0.9.0"
+roxlap-core = "0.9.0"
+roxlap-scene = "0.9.0"
+roxlap-render = "0.9.0"
 
 # Render-side world math (f64 orbit camera). Mirrors roxlap's pin so
 # the workspaces share one glam.
@@ -52,7 +53,7 @@ serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 # egui input/output bridge for winit (M2 UI); egui itself comes via
 # `roxlap_render::egui` (hud feature) so the versions can't drift.
-egui-winit = { version = "0.29", default-features = false }
+egui-winit = { version = "0.34", default-features = false }
 # Native file dialogs (open/save .kv6 and .demiurg). Web uses a
 # different path (M3), so this stays a native-only dep on demiurg-app.
 rfd = "0.15"
