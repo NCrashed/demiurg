@@ -8,7 +8,7 @@ viewport *is* roxlap, so what you paint is byte-for-byte what the game shows.
 Save directly into the engine's formats. Native today; the browser/WASM build is
 designed but not yet shipped (one codebase, see [DESIGN.md](./DESIGN.md)).
 
-First target: the piece set, board, and animations for **monada chess 2.0**.
+![The demiurg editor with the coco model](./screenshots/coco.png)
 
 ## Status
 
