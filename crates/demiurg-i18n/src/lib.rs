@@ -95,6 +95,7 @@ pub enum Msg {
     Move,
     Show,
     Remove,
+    Opacity,
     // Selection
     Selected,
     Delete,
@@ -150,7 +151,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 72] = [
+    pub const ALL: [Msg; 73] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -178,6 +179,7 @@ impl Msg {
         Msg::Move,
         Msg::Show,
         Msg::Remove,
+        Msg::Opacity,
         Msg::Selected,
         Msg::Delete,
         Msg::Copy,
@@ -264,6 +266,7 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Move => "Move",
         Msg::Show => "Show",
         Msg::Remove => "Remove",
+        Msg::Opacity => "Opacity",
         Msg::Selected => "Selected",
         Msg::Delete => "Delete",
         Msg::Copy => "Copy",
@@ -343,6 +346,7 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Move => "Двигать",
         Msg::Show => "Показать",
         Msg::Remove => "Убрать",
+        Msg::Opacity => "Непрозрачность",
         Msg::Selected => "Выделено",
         Msg::Delete => "Удалить",
         Msg::Copy => "Копировать",

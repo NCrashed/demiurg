@@ -46,6 +46,9 @@ pub struct Reference {
     pub flip_h: bool,
     pub flip_v: bool,
     pub visible: bool,
+    /// Drawing opacity in `0.0..=1.0` (scales the sprite's texel alpha), so a
+    /// bright reference can be dimmed to a faint guide. `1.0` = as loaded.
+    pub opacity: f32,
 }
 
 impl Reference {
@@ -69,6 +72,7 @@ impl Reference {
             flip_h: false,
             flip_v: false,
             visible: true,
+            opacity: 1.0,
         })
     }
 
@@ -76,6 +80,22 @@ impl Reference {
     #[must_use]
     pub fn rgba(&self) -> &[u8] {
         &self.rgba
+    }
+
+    /// The `0x80RRGGBB` voxel colour of texel `(col, row)`, or `None` if it's
+    /// out of bounds or too transparent to sample (an eyedrop should fall
+    /// through transparent pixels to whatever's behind them).
+    #[must_use]
+    pub fn texel(&self, col: u32, row: u32) -> Option<u32> {
+        if col >= self.width || row >= self.height {
+            return None;
+        }
+        let i = ((row * self.width + col) * 4) as usize;
+        let px = self.rgba.get(i..i + 4)?;
+        if px[3] < 8 {
+            return None; // effectively transparent
+        }
+        Some(0x8000_0000 | (u32::from(px[0]) << 16) | (u32::from(px[1]) << 8) | u32::from(px[2]))
     }
 
     /// The plane's `(normal, u, v)` voxel-axis indices. `u`/`v` are the
@@ -178,6 +198,7 @@ mod tests {
             flip_h: false,
             flip_v: false,
             visible: true,
+            opacity: 1.0,
         }
     }
 
@@ -219,5 +240,15 @@ mod tests {
         assert_eq!(origin, [4.0, 0.0, 6.0]);
         assert_eq!(u, [-1.0, 0.0, 0.0]);
         assert_eq!(v, [0.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    fn texel_samples_opaque_pixels_as_voxel_colours() {
+        let mut r = make(2, 1);
+        // Pixel (0,0) = opaque red, (1,0) = transparent.
+        r.rgba = vec![255, 0, 0, 255, 0, 0, 255, 0];
+        assert_eq!(r.texel(0, 0), Some(0x80ff_0000));
+        assert_eq!(r.texel(1, 0), None, "transparent texel is not sampled");
+        assert_eq!(r.texel(2, 0), None, "out of bounds");
     }
 }

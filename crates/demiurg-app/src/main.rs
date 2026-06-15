@@ -9,8 +9,9 @@
 //! Place tool falls back to the floor (the volume's bottom face) when the
 //! ray hits no voxel, so you can build up from an empty model. With the
 //! Select tool, dragging a selected voxel moves the selection in
-//! that face's plane (it floats until deselected); `Ctrl`+click eyedrops a
-//! colour; right-mouse drag orbits; middle-mouse (or Shift+right) drag
+//! that face's plane (it floats until deselected); `Ctrl`+click (or the
+//! Eyedropper tool) picks a colour from the voxel or reference image under
+//! the cursor, whichever is nearer; right-mouse drag orbits; middle-mouse (or Shift+right) drag
 //! pans the view, `Home` recenters it; wheel and `W`/`S` zoom; arrow keys
 //! orbit; the Views panel (or numpad `1`/`3`/`7`, `Ctrl` for the opposite
 //! face) snaps to an axis-aligned view. Hotkeys: `1`-`8` pick a tool (`8` is
@@ -275,6 +276,18 @@ fn float_selection(cells: &[([i32; 3], u32)], dims: (u32, u32, u32)) -> HashSet<
         .iter()
         .filter_map(|(p, _)| in_bounds(*p, dims))
         .collect()
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 
 /// Snap a cursor ray to a whole-voxel offset within a drag plane: meet the
@@ -879,6 +892,7 @@ impl App {
             voxel: cell,
             normal: [0, 0, -1],
             place: [cell[0] as i32, cell[1] as i32, cell[2] as i32],
+            t: f64::INFINITY, // synthetic floor hit; never ordered against a surface
         })
     }
 
@@ -1111,8 +1125,10 @@ impl App {
             self.begin_ref_drag();
             return;
         }
-        // Ctrl+click is a quick eyedropper, whatever the active tool.
-        if self.modifiers.control_key() {
+        // Ctrl+click is a quick eyedropper, whatever the active tool — as is
+        // the Eyedropper tool itself. Both sample the model or the reference,
+        // whichever is nearer (see pick_color_under_cursor).
+        if self.modifiers.control_key() || self.editor.tool == Tool::Eyedropper {
             self.pick_color_under_cursor();
             return;
         }
@@ -1139,19 +1155,70 @@ impl App {
         }
     }
 
-    /// Ctrl+click eyedropper: adopt the colour of the voxel under the
-    /// cursor (ignores empty space).
+    /// Eyedropper (the tool, or a Ctrl+click from any tool): adopt the colour
+    /// under the cursor — sampling whichever of the model voxel or the
+    /// reference image is nearer along the ray, so you can pick colours
+    /// straight off a reference (and the model still occludes it).
     fn pick_color_under_cursor(&mut self) {
-        if let Some(hit) = self.pointer_pick() {
+        let voxel = self.pointer_pick().and_then(|h| {
             let c = self
                 .editor
                 .document
                 .model()
-                .get(hit.voxel[0], hit.voxel[1], hit.voxel[2]);
-            if c != 0 {
-                self.editor.color = c;
-            }
+                .get(h.voxel[0], h.voxel[1], h.voxel[2]);
+            (c != 0).then_some((h.t, c))
+        });
+        let reference = self.reference_pick();
+        let color = match (reference, voxel) {
+            (Some((tr, cr)), Some((tv, cv))) => Some(if tr <= tv { cr } else { cv }),
+            (Some((_, cr)), None) => Some(cr),
+            (None, Some((_, cv))) => Some(cv),
+            (None, None) => None,
+        };
+        if let Some(c) = color {
+            self.editor.color = c;
         }
+    }
+
+    /// Sample the reference image under the cursor: intersect the cursor ray
+    /// with the (visible) reference plane and, if it lands on an opaque texel
+    /// within the image, return `(ray distance, 0x80RRGGBB colour)`.
+    #[allow(clippy::many_single_char_names)] // ray/plane math: o, d, n, t, u, v
+    fn reference_pick(&self) -> Option<(f64, u32)> {
+        let r = self.editor.reference.as_ref()?;
+        if !r.visible {
+            return None;
+        }
+        let (o, d) = self.pointer_ray()?;
+        let (origin, uf, vf, size) = r.placement(self.editor.document.pivot());
+        let origin = [
+            f64::from(origin[0]),
+            f64::from(origin[1]),
+            f64::from(origin[2]),
+        ];
+        let u = [f64::from(uf[0]), f64::from(uf[1]), f64::from(uf[2])];
+        let v = [f64::from(vf[0]), f64::from(vf[1]), f64::from(vf[2])];
+        let n = cross3(u, v); // plane normal (axis-aligned unit vector)
+        let denom = dot3(d, n);
+        if denom.abs() < 1e-9 {
+            return None; // ray parallel to the plane
+        }
+        let rel0 = [origin[0] - o[0], origin[1] - o[1], origin[2] - o[2]];
+        let t = dot3(rel0, n) / denom;
+        if t <= 0.0 {
+            return None; // plane is behind the camera
+        }
+        let hit = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
+        let rel = [hit[0] - origin[0], hit[1] - origin[1], hit[2] - origin[2]];
+        // `u`/`v` are unit, sized 1 texel = 1 voxel, so the dot products are
+        // the column/row directly (and already account for any flip).
+        let (cu, cv) = (dot3(rel, u), dot3(rel, v));
+        if cu < 0.0 || cu >= f64::from(size[0]) || cv < 0.0 || cv >= f64::from(size[1]) {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // bounds-checked above
+        let color = r.texel(cu as u32, cv as u32)?;
+        Some((t, color))
     }
 
     /// Apply the active tool at the current cursor, skipping the cell we
@@ -1851,6 +1918,9 @@ impl App {
         if let (Some(image), Some(r)) = (self.ref_image, self.editor.reference.as_ref()) {
             if r.visible {
                 let (origin, u, v, size) = r.placement(self.editor.document.pivot());
+                // The tint's high byte scales texel alpha — the opacity slider.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let alpha = (r.opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
                 renderer.draw_images(
                     &camera,
                     &[ImageSprite {
@@ -1858,7 +1928,7 @@ impl App {
                         origin,
                         facing: ImageFacing::World { u, v },
                         size,
-                        tint: 0xFFFF_FFFF,
+                        tint: (alpha << 24) | 0x00FF_FFFF,
                         depth_test: true,
                         double_sided: true,
                     }],

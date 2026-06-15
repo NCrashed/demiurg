@@ -491,6 +491,10 @@ fn reference_panel(
             ui.checkbox(&mut r.flip_v, "↕");
         });
         ui.horizontal(|ui| {
+            ui.label(t(Msg::Opacity));
+            ui.add(egui::Slider::new(&mut r.opacity, 0.0..=1.0).show_value(false));
+        });
+        ui.horizontal(|ui| {
             ui.checkbox(&mut r.visible, t(Msg::Show));
             remove = ui.button(t(Msg::Remove)).clicked();
         });

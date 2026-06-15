@@ -19,7 +19,7 @@ use roxlap_core::Camera;
 use roxlap_render::Line3;
 
 /// A resolved voxel pick.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PickHit {
     /// The solid voxel the ray hit — the paint / erase target.
     pub voxel: [u32; 3],
@@ -28,6 +28,9 @@ pub struct PickHit {
     /// The empty cell against that face (`voxel + normal`) — the place
     /// target. May be out of bounds (place would be a no-op there).
     pub place: [i32; 3],
+    /// Ray distance to the entry face of `voxel` (world units, `dir`
+    /// assumed unit). Lets callers order this hit against other surfaces.
+    pub t: f64,
 }
 
 /// March `origin + t·dir` (world space) through `model` and return the
@@ -90,6 +93,8 @@ pub fn pick_voxel(model: &VoxelModel, origin: DVec3, dir: DVec3) -> Option<PickH
     let mut normal = [0i32; 3];
     normal[enter_axis] = if d[enter_axis] >= 0.0 { -1 } else { 1 };
 
+    // Ray distance to the current cell's entry face (starts at the box hit).
+    let mut t_cur = t0;
     loop {
         if model.get(cell[0] as u32, cell[1] as u32, cell[2] as u32) != 0 {
             let voxel = [cell[0] as u32, cell[1] as u32, cell[2] as u32];
@@ -102,6 +107,7 @@ pub fn pick_voxel(model: &VoxelModel, origin: DVec3, dir: DVec3) -> Option<PickH
                 voxel,
                 normal,
                 place,
+                t: t_cur,
             });
         }
 
@@ -119,6 +125,7 @@ pub fn pick_voxel(model: &VoxelModel, origin: DVec3, dir: DVec3) -> Option<PickH
         }
         normal = [0, 0, 0];
         normal[axis] = -step[axis] as i32;
+        t_cur = t_max[axis]; // entry into the cell we just stepped into
         t_max[axis] += t_delta[axis];
     }
 }

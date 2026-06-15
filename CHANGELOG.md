@@ -17,9 +17,12 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
   lets you drag it into position on the grid with the mouse (left-drag slides it
   in its plane, whole-voxel snap). It's drawn as a flat, world-placed image
   sprite (roxlap 0.12 `draw_images`), so the model occludes the parts behind it
-  and it stays undistorted from any angle. Dropping a `.kv6` / `.vox` /
-  `.demiurg` file opens it as the model. The tool panel now scrolls so every
-  section stays reachable.
+  and it stays undistorted from any angle, with an **Opacity** slider to dim a
+  too-bright reference to a faint guide. The eyedropper (the tool, or `Ctrl`
+  +click from any tool) picks colours straight off the reference image —
+  whichever of the model voxel or the reference is nearer the cursor wins.
+  Dropping a `.kv6` / `.vox` / `.demiurg` file opens it as the model. The tool
+  panel now scrolls so every section stays reachable.
 
 ### Changed
 
