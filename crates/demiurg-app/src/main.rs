@@ -46,7 +46,9 @@ use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{Line3, ModelView, OrbitCamera, PickHit, RenderMode, ViewDir, pick_voxel};
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::sprite::SpriteLighting;
-use roxlap_render::{FrameParams, RenderOptions, SceneRenderer, egui};
+use roxlap_render::{
+    FrameParams, ImageFacing, ImageId, ImageSprite, RenderOptions, SceneRenderer, egui,
+};
 use ui::UiActions;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -404,8 +406,10 @@ struct Editor {
     /// "Move reference" mode: left-drag slides the reference in its plane
     /// instead of applying the tool.
     ref_move_mode: bool,
-    /// The reference grid needs re-uploading (loaded / moved / removed).
-    reference_dirty: bool,
+    /// The reference image changed (loaded / replaced / removed): the sprite
+    /// texture must be re-uploaded. Placement changes don't set this — they
+    /// only move the quad, which is rebuilt every frame.
+    ref_image_dirty: bool,
     /// The viewport scene needs a rebuild from the model.
     dirty: bool,
 }
@@ -465,19 +469,19 @@ impl Editor {
             float: None,
             reference: None,
             ref_move_mode: false,
-            reference_dirty: false,
+            ref_image_dirty: false,
             dirty: false,
         }
     }
 
-    /// Load image `bytes` as the reference layer (replacing any current
-    /// one); the viewport refreshes next frame.
+    /// Load image `bytes` as the reference layer (replacing any current one);
+    /// the sprite texture re-uploads next frame.
     fn set_reference(&mut self, bytes: &[u8], name: String) {
         match Reference::load(bytes, name) {
             Ok(r) => {
                 self.reference = Some(r);
                 self.ref_move_mode = false; // start in normal editing
-                self.reference_dirty = true;
+                self.ref_image_dirty = true;
             }
             Err(e) => eprintln!("demiurg: reference image: {e}"),
         }
@@ -611,6 +615,7 @@ fn main() {
         last_tool: Tool::Place,
         force_cpu,
         force_gpu,
+        ref_image: None,
         next_frame: Instant::now(),
     };
 
@@ -748,6 +753,9 @@ struct App {
     force_cpu: bool,
     /// Opt into the GPU renderer (`--gpu`); CPU is the default.
     force_gpu: bool,
+    /// The uploaded reference-image texture (`upload_image`), drawn each
+    /// frame as a world-placed sprite. `None` when no reference is loaded.
+    ref_image: Option<ImageId>,
     /// When the next frame should render (drives the ~60 fps cap).
     next_frame: Instant,
 }
@@ -1082,18 +1090,12 @@ impl App {
         let Some(delta) = plane_drag_delta(o, d, axis, plane_coord, anchor) else {
             return;
         };
-        let mut moved = false;
         if let Some(r) = &mut self.editor.reference {
             let (_, u_axis, v_axis) = r.axes();
-            let (nu, nv) = (base_u + delta[u_axis], base_v + delta[v_axis]);
-            if (r.offset_u, r.offset_v) != (nu, nv) {
-                r.offset_u = nu;
-                r.offset_v = nv;
-                moved = true;
-            }
-        }
-        if moved {
-            self.editor.reference_dirty = true;
+            // Only the in-plane offset changes — the overlay reprojects every
+            // frame, so no texture rebuild (reference_dirty) is needed.
+            r.offset_u = base_u + delta[u_axis];
+            r.offset_v = base_v + delta[v_axis];
         }
     }
 
@@ -1463,7 +1465,7 @@ impl App {
         if a.remove_reference {
             self.editor.reference = None;
             self.editor.ref_move_mode = false;
-            self.editor.reference_dirty = true;
+            self.editor.ref_image_dirty = true;
         }
         if a.save {
             self.save_project();
@@ -1732,7 +1734,7 @@ impl App {
         self.editor.float = None; // a loaded model starts with no float
         self.editor.reference = None; // a stale guide wouldn't align; drop it
         self.editor.ref_move_mode = false;
-        self.editor.reference_dirty = true;
+        self.editor.ref_image_dirty = true;
         self.drag = None;
         self.project_path = None; // callers re-set it for a `.demiurg` open
         self.camera = self.view.framing_camera();
@@ -1788,18 +1790,6 @@ impl App {
             self.prune_selection();
             self.editor.dirty = false;
         }
-        // Refresh the reference grid (loaded / moved / toggled / removed).
-        if self.editor.reference_dirty {
-            let pivot = self.editor.document.pivot();
-            let cells = self
-                .editor
-                .reference
-                .as_ref()
-                .map(reference::Reference::cells)
-                .unwrap_or_default();
-            self.view.set_reference(&cells, pivot);
-            self.editor.reference_dirty = false;
-        }
         self.update_title();
 
         let settings = OpticastSettings::for_oracle_framebuffer(size.width, size.height);
@@ -1839,11 +1829,42 @@ impl App {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
+        // Keep the reference sprite texture in sync with the loaded image
+        // (re-uploaded only on load / replace / remove, not on every move).
+        if self.editor.ref_image_dirty {
+            if let Some(id) = self.ref_image.take() {
+                renderer.drop_image(id);
+            }
+            if let Some(r) = &self.editor.reference {
+                self.ref_image = Some(renderer.upload_image(r.rgba(), r.width, r.height));
+            }
+            self.editor.ref_image_dirty = false;
+        }
         renderer.set_sprites(self.view.sprites());
         renderer.render(self.view.scene_mut(), &camera, &frame);
         // Depth-tested editor gizmos land in the framebuffer; paint_egui
         // then draws the panels on top.
         renderer.draw_lines(&camera, &lines);
+        // The reference image as a flat, depth-tested world sprite: the model
+        // occludes the parts behind it, and it stays undistorted from any
+        // angle. Drawn after the scene/gizmos, before the egui panels.
+        if let (Some(image), Some(r)) = (self.ref_image, self.editor.reference.as_ref()) {
+            if r.visible {
+                let (origin, u, v, size) = r.placement(self.editor.document.pivot());
+                renderer.draw_images(
+                    &camera,
+                    &[ImageSprite {
+                        image,
+                        origin,
+                        facing: ImageFacing::World { u, v },
+                        size,
+                        tint: 0xFFFF_FFFF,
+                        depth_test: true,
+                        double_sided: true,
+                    }],
+                );
+            }
+        }
         renderer.paint_egui(&jobs, &textures, ppp);
         // Next redraw is scheduled by `about_to_wait` at the frame cap.
     }

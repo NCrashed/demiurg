@@ -470,7 +470,8 @@ fn reference_panel(
     ui.checkbox(&mut editor.ref_move_mode, t(Msg::Move))
         .on_hover_text(t(Msg::Move));
 
-    let mut changed = false;
+    // Axis / depth / flip / visibility all only affect how the overlay is
+    // projected (recomputed every frame), so none of them touch the texture.
     let mut remove = false;
     if let Some(r) = &mut editor.reference {
         ui.small(format!("{}  {}×{}", r.name, r.width, r.height));
@@ -480,25 +481,22 @@ fn reference_panel(
                 (RefAxis::Side, Msg::Side),
                 (RefAxis::Top, Msg::Top),
             ] {
-                changed |= ui.selectable_value(&mut r.axis, axis, t(msg)).clicked();
+                ui.selectable_value(&mut r.axis, axis, t(msg));
             }
         });
         ui.horizontal(|ui| {
             ui.label(t(Msg::Depth));
-            changed |= ui.add(egui::DragValue::new(&mut r.depth)).changed();
-            changed |= ui.checkbox(&mut r.flip_h, "↔").changed();
-            changed |= ui.checkbox(&mut r.flip_v, "↕").changed();
+            ui.add(egui::DragValue::new(&mut r.depth));
+            ui.checkbox(&mut r.flip_h, "↔");
+            ui.checkbox(&mut r.flip_v, "↕");
         });
         ui.horizontal(|ui| {
-            changed |= ui.checkbox(&mut r.visible, t(Msg::Show)).changed();
+            ui.checkbox(&mut r.visible, t(Msg::Show));
             remove = ui.button(t(Msg::Remove)).clicked();
         });
     }
     if remove {
         actions.remove_reference = true;
-    }
-    if changed {
-        editor.reference_dirty = true;
     }
 }
 

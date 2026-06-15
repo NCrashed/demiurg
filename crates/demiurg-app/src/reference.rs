@@ -1,8 +1,13 @@
-//! Reference images: pixel art loaded as a flat, 1-voxel-thick guide the
-//! artist traces voxels from. Non-destructive — rendered as a separate
-//! grid in the viewport, never part of the document (so it's never saved,
-//! exported, or edited). Each opaque pixel becomes one voxel on a chosen
-//! grid plane; transparent pixels are dropped.
+//! Reference images: pixel art loaded as a flat guide the artist traces
+//! voxels from. Non-destructive — never part of the document (so it's never
+//! saved, exported, or edited).
+//!
+//! Drawn in the viewport as a flat, world-placed image sprite
+//! (`roxlap_render::SceneRenderer::draw_images`), so the model occludes the
+//! parts behind it and it stays undistorted from any angle — unlike the
+//! earlier voxel-slab (top "film", clipped negatives) and egui-overlay (no
+//! depth test, affine warp) attempts. [`Reference::placement`] turns the
+//! plane / depth / offset / flip state into the sprite's world geometry.
 
 use std::path::Path;
 
@@ -21,14 +26,14 @@ pub enum RefAxis {
 }
 
 /// Largest reference side kept; bigger images are downscaled (nearest
-/// neighbour, preserving aspect) so the plane stays within the voxel grid's
-/// single render chunk.
-const MAX_DIM: u32 = 128;
+/// neighbour, preserving aspect) to keep the overlay texture modest.
+const MAX_DIM: u32 = 512;
 
-/// A loaded reference image placed in the voxel grid.
+/// A loaded reference image placed on a grid plane.
 pub struct Reference {
-    /// Opaque source pixels: `([col, row], 0x80RRGGBB)`.
-    pixels: Vec<([u32; 2], u32)>,
+    /// Straight (un-premultiplied) RGBA pixels, row-major — uploaded as the
+    /// image-sprite texture (`SceneRenderer::upload_image`).
+    rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
     pub name: String,
@@ -44,8 +49,7 @@ pub struct Reference {
 }
 
 impl Reference {
-    /// Decode image `bytes` into a reference: opaque pixels become voxels,
-    /// transparent ones are dropped. `name` labels it in the panel.
+    /// Decode image `bytes` into a reference. `name` labels it in the panel.
     ///
     /// # Errors
     /// A message if the bytes aren't a decodable image.
@@ -53,16 +57,8 @@ impl Reference {
         let img = downscale(image::load_from_memory(bytes).map_err(|e| e.to_string())?);
         let rgba = img.to_rgba8();
         let (width, height) = rgba.dimensions();
-        let mut pixels = Vec::new();
-        for (x, y, px) in rgba.enumerate_pixels() {
-            let [r, g, b, a] = px.0;
-            if a >= 128 {
-                let col = 0x8000_0000 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
-                pixels.push(([x, y], col));
-            }
-        }
         Ok(Reference {
-            pixels,
+            rgba: rgba.into_raw(),
             width,
             height,
             name,
@@ -76,6 +72,12 @@ impl Reference {
         })
     }
 
+    /// The straight-RGBA pixel buffer, for `SceneRenderer::upload_image`.
+    #[must_use]
+    pub fn rgba(&self) -> &[u8] {
+        &self.rgba
+    }
+
     /// The plane's `(normal, u, v)` voxel-axis indices. `u`/`v` are the
     /// in-plane axes the image's columns/rows and the offsets run along.
     #[must_use]
@@ -87,40 +89,49 @@ impl Reference {
         }
     }
 
-    /// Placed voxel cells `([x, y, z], colour)` for the current axis /
-    /// depth / flips. Empty when hidden. Image row 0 maps to the top of the
-    /// plane (z is down), so it reads upright.
+    /// World geometry for the image sprite: the top-left corner (image texel
+    /// `(0, 0)`), the world `u`/`v` directions its columns/rows run along,
+    /// and its size (1 texel = 1 voxel). Placed at the plane's `depth` and
+    /// in-plane `offset`, shifted by `-pivot` to align with the model. Flips
+    /// move the corner to the opposite edge and reverse the axis, so the
+    /// sprite stays a positive-size quad.
     #[must_use]
-    #[allow(clippy::cast_possible_wrap)] // image dimensions are small
-    pub fn cells(&self) -> Vec<([i32; 3], u32)> {
-        if !self.visible {
-            return Vec::new();
+    #[allow(clippy::cast_precision_loss)] // image dims + voxel coords are small
+    pub fn placement(&self, pivot: [f32; 3]) -> ([f32; 3], [f32; 3], [f32; 3], [f32; 2]) {
+        let (w, h) = (self.width as f32, self.height as f32);
+        // Corner voxel (column 0, row 0) and the world column/row axes.
+        let (corner, mut u, mut v) = match self.axis {
+            RefAxis::Front => ([self.offset_u, self.depth, self.offset_v], X, Z),
+            RefAxis::Side => ([self.depth, self.offset_u, self.offset_v], Y, Z),
+            RefAxis::Top => ([self.offset_u, self.offset_v, self.depth], X, Y),
+        };
+        let mut origin = [
+            corner[0] as f32 - pivot[0],
+            corner[1] as f32 - pivot[1],
+            corner[2] as f32 - pivot[2],
+        ];
+        if self.flip_h {
+            origin = add(origin, scale(u, w));
+            u = scale(u, -1.0);
         }
-        let (w, h) = (self.width as i32, self.height as i32);
-        self.pixels
-            .iter()
-            .map(|&([px, py], col)| {
-                let cx = self.offset_u
-                    + if self.flip_h {
-                        w - 1 - px as i32
-                    } else {
-                        px as i32
-                    };
-                let cy = self.offset_v
-                    + if self.flip_v {
-                        h - 1 - py as i32
-                    } else {
-                        py as i32
-                    };
-                let pos = match self.axis {
-                    RefAxis::Front => [cx, self.depth, cy],
-                    RefAxis::Side => [self.depth, cx, cy],
-                    RefAxis::Top => [cx, cy, self.depth],
-                };
-                (pos, col)
-            })
-            .collect()
+        if self.flip_v {
+            origin = add(origin, scale(v, h));
+            v = scale(v, -1.0);
+        }
+        (origin, u, v, [w, h])
     }
+}
+
+const X: [f32; 3] = [1.0, 0.0, 0.0];
+const Y: [f32; 3] = [0.0, 1.0, 0.0];
+const Z: [f32; 3] = [0.0, 0.0, 1.0];
+
+fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn scale(a: [f32; 3], s: f32) -> [f32; 3] {
+    [a[0] * s, a[1] * s, a[2] * s]
 }
 
 /// Whether a path's extension is a supported reference-image format (used
@@ -154,9 +165,9 @@ fn downscale(img: DynamicImage) -> DynamicImage {
 mod tests {
     use super::*;
 
-    fn make(pixels: Vec<([u32; 2], u32)>, w: u32, h: u32) -> Reference {
+    fn make(w: u32, h: u32) -> Reference {
         Reference {
-            pixels,
+            rgba: vec![0; (w * h * 4) as usize],
             width: w,
             height: h,
             name: "t".to_string(),
@@ -171,20 +182,8 @@ mod tests {
     }
 
     #[test]
-    fn front_plane_maps_columns_to_x_rows_to_z_with_offset() {
-        let mut r = make(vec![([0, 0], 0x80ff_ffff), ([2, 3], 0x8011_2233)], 4, 5);
-        r.depth = 1;
-        r.offset_u = 10;
-        r.offset_v = 20;
-        let cells = r.cells();
-        // col -> x + offset_u, row -> z + offset_v, depth along y.
-        assert!(cells.contains(&([10, 1, 20], 0x80ff_ffff)));
-        assert!(cells.contains(&([12, 1, 23], 0x8011_2233)));
-    }
-
-    #[test]
     fn axes_are_normal_u_v_per_plane() {
-        let mut r = make(vec![], 1, 1);
+        let mut r = make(1, 1);
         r.axis = RefAxis::Front;
         assert_eq!(r.axes(), (1, 0, 2));
         r.axis = RefAxis::Side;
@@ -194,17 +193,31 @@ mod tests {
     }
 
     #[test]
-    fn flip_h_mirrors_columns() {
-        let mut r = make(vec![([0, 0], 0x80ff_0000)], 4, 1);
-        r.flip_h = true;
-        // col 0 of a width-4 image mirrors to x = 3.
-        assert_eq!(r.cells(), vec![([3, 0, 0], 0x80ff_0000)]);
+    #[allow(clippy::float_cmp)] // exact integer-valued placement
+    fn front_placement_origin_axes_and_size() {
+        let mut r = make(4, 6);
+        r.depth = 1;
+        r.offset_u = 10;
+        r.offset_v = 20;
+        // Corner (col 0, row 0) -> voxel (10, 1, 20) - pivot(0); columns run
+        // +X, rows +Z; size is the image dims.
+        let (origin, u, v, size) = r.placement([0.0; 3]);
+        assert_eq!(origin, [10.0, 1.0, 20.0]);
+        assert_eq!(u, [1.0, 0.0, 0.0]);
+        assert_eq!(v, [0.0, 0.0, 1.0]);
+        assert_eq!(size, [4.0, 6.0]);
     }
 
     #[test]
-    fn hidden_reference_has_no_cells() {
-        let mut r = make(vec![([0, 0], 0x80ff_ffff)], 1, 1);
-        r.visible = false;
-        assert!(r.cells().is_empty());
+    #[allow(clippy::float_cmp)] // exact integer-valued placement
+    fn flips_move_the_corner_and_reverse_the_axis() {
+        let mut r = make(4, 6);
+        r.flip_h = true;
+        r.flip_v = true;
+        // Corner shifts to the far edge (+4 in X, +6 in Z) and both axes flip.
+        let (origin, u, v, _) = r.placement([0.0; 3]);
+        assert_eq!(origin, [4.0, 0.0, 6.0]);
+        assert_eq!(u, [-1.0, 0.0, 0.0]);
+        assert_eq!(v, [0.0, 0.0, -1.0]);
     }
 }

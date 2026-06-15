@@ -10,14 +10,21 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 ### Added
 
 - Reference images: load pixel art (PNG / BMP / JPG / GIF / TGA / WEBP) as a
-  flat, 1-voxel-thick guide to trace voxels from — via File ▸ Open reference
-  image or by dragging an image onto the window. It's non-destructive (a
-  separate render layer, never saved/exported/edited): place it on the Front /
-  Side / Top plane, set its depth, flip it, hide it, or remove it. The Reference
-  panel's **Move** toggle lets you drag it into position on the grid with the
-  mouse (left-drag slides it in its plane, whole-voxel snap). Dropping a
-  `.kv6` / `.vox` / `.demiurg` file opens it as the model. The tool panel now
-  scrolls so every section stays reachable.
+  flat guide to trace voxels from — via File ▸ Open reference image or by
+  dragging an image onto the window. It's non-destructive (never
+  saved/exported/edited): place it on the Front / Side / Top plane, set its
+  depth, flip it, hide it, or remove it. The Reference panel's **Move** toggle
+  lets you drag it into position on the grid with the mouse (left-drag slides it
+  in its plane, whole-voxel snap). It's drawn as a flat, world-placed image
+  sprite (roxlap 0.12 `draw_images`), so the model occludes the parts behind it
+  and it stays undistorted from any angle. Dropping a `.kv6` / `.vox` /
+  `.demiurg` file opens it as the model. The tool panel now scrolls so every
+  section stays reachable.
+
+### Changed
+
+- Bumped roxlap to 0.12.0, for the world-placed 2D image sprites
+  (`SceneRenderer::upload_image` / `draw_images`) that draw reference images.
 
 ## [0.3.0] - 2026-06-15
 

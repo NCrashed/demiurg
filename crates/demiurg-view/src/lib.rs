@@ -58,9 +58,6 @@ pub struct ModelView {
     /// The single persistent grid (voxel mode populates its chunk;
     /// sprite mode leaves it empty).
     grid_id: GridId,
-    /// A second grid for the reference image (a non-destructive guide;
-    /// never the model). Empty unless a reference is loaded.
-    ref_grid_id: GridId,
     sprites: SpriteSet,
     /// Largest model dimension in voxels — the camera frames to it.
     extent: f64,
@@ -72,11 +69,9 @@ impl ModelView {
     pub fn new(model: &VoxelModel, mode: RenderMode) -> Self {
         let mut scene = Scene::new();
         let grid_id = scene.add_grid(GridTransform::identity());
-        let ref_grid_id = scene.add_grid(GridTransform::identity());
         let mut view = Self {
             scene,
             grid_id,
-            ref_grid_id,
             sprites: empty_sprite_set(),
             extent: 1.0,
         };
@@ -90,16 +85,11 @@ impl ModelView {
         let (xsiz, ysiz, zsiz) = model.dims();
         self.extent = f64::from(xsiz.max(ysiz).max(zsiz)).max(1.0);
 
-        // Keep both grids aligned to -pivot so a voxel (x, y, z) sits at
-        // world (x, y, z) - pivot, matching the picker, in both modes. The
-        // reference grid keeps its own chunk (managed by set_reference); we
-        // only reposition it here so it tracks pivot changes.
+        // Keep the grid aligned to -pivot so a voxel (x, y, z) sits at world
+        // (x, y, z) - pivot, matching the picker, in both modes.
         let p = model.pivot;
         let neg = DVec3::new(-f64::from(p[0]), -f64::from(p[1]), -f64::from(p[2]));
         if let Some(grid) = self.scene.grid_mut(self.grid_id) {
-            grid.transform = GridTransform::at(neg);
-        }
-        if let Some(grid) = self.scene.grid_mut(self.ref_grid_id) {
             grid.transform = GridTransform::at(neg);
         }
 
@@ -146,30 +136,6 @@ impl ModelView {
         }
         // `chunk_versions` survives the remove above, so this strictly
         // increases the version → `refresh_dirty` re-uploads the chunk.
-        grid.bump_chunk_version(IVec3::ZERO);
-    }
-
-    /// Populate (or, with empty `cells`, clear) the reference grid — a flat
-    /// guide layer that renders in both modes but is never part of the
-    /// document. Cells are `([x, y, z], colour)` in model-voxel space,
-    /// placed at -`pivot` to align with the model.
-    pub fn set_reference(&mut self, cells: &[([i32; 3], u32)], pivot: [f32; 3]) {
-        let neg = DVec3::new(
-            -f64::from(pivot[0]),
-            -f64::from(pivot[1]),
-            -f64::from(pivot[2]),
-        );
-        let Some(grid) = self.scene.grid_mut(self.ref_grid_id) else {
-            return;
-        };
-        grid.transform = GridTransform::at(neg);
-        grid.chunks.remove(&IVec3::ZERO);
-        if !cells.is_empty() {
-            let chunk = grid.ensure_chunk(IVec3::ZERO);
-            for &([x, y, z], col) in cells {
-                roxlap_formats::edit::set_cube(chunk, x, y, z, Some(col));
-            }
-        }
         grid.bump_chunk_version(IVec3::ZERO);
     }
 
@@ -222,8 +188,7 @@ mod tests {
             view.sprites().instances.is_empty(),
             "no sprites in voxel mode"
         );
-        // The model grid plus the (empty) reference grid.
-        assert_eq!(view.scene_mut().grid_count(), 2, "model + reference grids");
+        assert_eq!(view.scene_mut().grid_count(), 1, "one model grid");
     }
 
     #[test]
@@ -250,23 +215,6 @@ mod tests {
             grid.voxel_solid(IVec3::new(5, 4, 3)),
             "the new voxel reached the grid chunk"
         );
-    }
-
-    #[test]
-    fn set_reference_populates_the_reference_grid() {
-        let m = VoxelModel::new(4, 4, 4);
-        let mut view = ModelView::new(&m, RenderMode::Voxel);
-        view.set_reference(&[([1, 2, 0], 0x80ff_0000)], [0.0; 3]);
-        let rid = view.ref_grid_id;
-        let grid = view.scene_mut().grid_mut(rid).expect("reference grid");
-        assert!(
-            grid.voxel_solid(IVec3::new(1, 2, 0)),
-            "reference cell placed"
-        );
-        // Clearing empties it again.
-        view.set_reference(&[], [0.0; 3]);
-        let grid = view.scene_mut().grid_mut(rid).expect("reference grid");
-        assert!(!grid.voxel_solid(IVec3::new(1, 2, 0)), "reference cleared");
     }
 
     #[test]
