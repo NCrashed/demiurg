@@ -35,6 +35,9 @@ pub struct Reference {
     pub axis: RefAxis,
     /// Offset along the plane normal, in voxels.
     pub depth: i32,
+    /// In-plane offset along the plane's two axes (set by the mouse drag).
+    pub offset_u: i32,
+    pub offset_v: i32,
     pub flip_h: bool,
     pub flip_v: bool,
     pub visible: bool,
@@ -65,10 +68,23 @@ impl Reference {
             name,
             axis: RefAxis::Front,
             depth: 0,
+            offset_u: 0,
+            offset_v: 0,
             flip_h: false,
             flip_v: false,
             visible: true,
         })
+    }
+
+    /// The plane's `(normal, u, v)` voxel-axis indices. `u`/`v` are the
+    /// in-plane axes the image's columns/rows and the offsets run along.
+    #[must_use]
+    pub fn axes(&self) -> (usize, usize, usize) {
+        match self.axis {
+            RefAxis::Front => (1, 0, 2), // normal Y; u = X, v = Z
+            RefAxis::Side => (0, 1, 2),  // normal X; u = Y, v = Z
+            RefAxis::Top => (2, 0, 1),   // normal Z; u = X, v = Y
+        }
     }
 
     /// Placed voxel cells `([x, y, z], colour)` for the current axis /
@@ -84,16 +100,18 @@ impl Reference {
         self.pixels
             .iter()
             .map(|&([px, py], col)| {
-                let cx = if self.flip_h {
-                    w - 1 - px as i32
-                } else {
-                    px as i32
-                };
-                let cy = if self.flip_v {
-                    h - 1 - py as i32
-                } else {
-                    py as i32
-                };
+                let cx = self.offset_u
+                    + if self.flip_h {
+                        w - 1 - px as i32
+                    } else {
+                        px as i32
+                    };
+                let cy = self.offset_v
+                    + if self.flip_v {
+                        h - 1 - py as i32
+                    } else {
+                        py as i32
+                    };
                 let pos = match self.axis {
                     RefAxis::Front => [cx, self.depth, cy],
                     RefAxis::Side => [self.depth, cx, cy],
@@ -130,4 +148,63 @@ fn downscale(img: DynamicImage) -> DynamicImage {
     let nw = ((f64::from(w) * scale) as u32).max(1);
     let nh = ((f64::from(h) * scale) as u32).max(1);
     img.resize_exact(nw, nh, image::imageops::FilterType::Nearest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make(pixels: Vec<([u32; 2], u32)>, w: u32, h: u32) -> Reference {
+        Reference {
+            pixels,
+            width: w,
+            height: h,
+            name: "t".to_string(),
+            axis: RefAxis::Front,
+            depth: 0,
+            offset_u: 0,
+            offset_v: 0,
+            flip_h: false,
+            flip_v: false,
+            visible: true,
+        }
+    }
+
+    #[test]
+    fn front_plane_maps_columns_to_x_rows_to_z_with_offset() {
+        let mut r = make(vec![([0, 0], 0x80ff_ffff), ([2, 3], 0x8011_2233)], 4, 5);
+        r.depth = 1;
+        r.offset_u = 10;
+        r.offset_v = 20;
+        let cells = r.cells();
+        // col -> x + offset_u, row -> z + offset_v, depth along y.
+        assert!(cells.contains(&([10, 1, 20], 0x80ff_ffff)));
+        assert!(cells.contains(&([12, 1, 23], 0x8011_2233)));
+    }
+
+    #[test]
+    fn axes_are_normal_u_v_per_plane() {
+        let mut r = make(vec![], 1, 1);
+        r.axis = RefAxis::Front;
+        assert_eq!(r.axes(), (1, 0, 2));
+        r.axis = RefAxis::Side;
+        assert_eq!(r.axes(), (0, 1, 2));
+        r.axis = RefAxis::Top;
+        assert_eq!(r.axes(), (2, 0, 1));
+    }
+
+    #[test]
+    fn flip_h_mirrors_columns() {
+        let mut r = make(vec![([0, 0], 0x80ff_0000)], 4, 1);
+        r.flip_h = true;
+        // col 0 of a width-4 image mirrors to x = 3.
+        assert_eq!(r.cells(), vec![([3, 0, 0], 0x80ff_0000)]);
+    }
+
+    #[test]
+    fn hidden_reference_has_no_cells() {
+        let mut r = make(vec![([0, 0], 0x80ff_ffff)], 1, 1);
+        r.visible = false;
+        assert!(r.cells().is_empty());
+    }
 }

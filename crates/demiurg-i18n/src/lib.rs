@@ -92,6 +92,7 @@ pub enum Msg {
     Side,
     Depth,
     Flip,
+    Move,
     Show,
     Remove,
     // Selection
@@ -149,7 +150,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 71] = [
+    pub const ALL: [Msg; 72] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -174,6 +175,7 @@ impl Msg {
         Msg::Side,
         Msg::Depth,
         Msg::Flip,
+        Msg::Move,
         Msg::Show,
         Msg::Remove,
         Msg::Selected,
@@ -259,6 +261,7 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Side => "Side",
         Msg::Depth => "Depth",
         Msg::Flip => "Flip",
+        Msg::Move => "Move",
         Msg::Show => "Show",
         Msg::Remove => "Remove",
         Msg::Selected => "Selected",
@@ -337,6 +340,7 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Side => "Сбоку",
         Msg::Depth => "Глубина",
         Msg::Flip => "Отразить",
+        Msg::Move => "Двигать",
         Msg::Show => "Показать",
         Msg::Remove => "Убрать",
         Msg::Selected => "Выделено",

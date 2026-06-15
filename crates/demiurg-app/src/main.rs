@@ -252,6 +252,20 @@ struct DragMove {
     last_delta: [i32; 3],
 }
 
+/// An in-progress drag of the reference layer (Move mode): slides it in its
+/// own plane, offsetting from where it sat when the drag began.
+struct RefDrag {
+    /// The reference plane's normal axis (0/1/2).
+    axis: usize,
+    /// World coordinate of the reference plane along `axis`.
+    plane_coord: f64,
+    /// World point where the grab ray met the plane.
+    anchor: [f64; 3],
+    /// In-plane offsets when the drag began.
+    base_u: i32,
+    base_v: i32,
+}
+
 /// The in-bounds cells of a float layer as a selection set (for the
 /// highlight while it floats).
 fn float_selection(cells: &[([i32; 3], u32)], dims: (u32, u32, u32)) -> HashSet<[u32; 3]> {
@@ -387,6 +401,9 @@ struct Editor {
     float: Option<FloatLayer>,
     /// A reference image rendered as a non-destructive guide layer, if any.
     reference: Option<Reference>,
+    /// "Move reference" mode: left-drag slides the reference in its plane
+    /// instead of applying the tool.
+    ref_move_mode: bool,
     /// The reference grid needs re-uploading (loaded / moved / removed).
     reference_dirty: bool,
     /// The viewport scene needs a rebuild from the model.
@@ -447,6 +464,7 @@ impl Editor {
             clipboard: Vec::new(),
             float: None,
             reference: None,
+            ref_move_mode: false,
             reference_dirty: false,
             dirty: false,
         }
@@ -458,6 +476,7 @@ impl Editor {
         match Reference::load(bytes, name) {
             Ok(r) => {
                 self.reference = Some(r);
+                self.ref_move_mode = false; // start in normal editing
                 self.reference_dirty = true;
             }
             Err(e) => eprintln!("demiurg: reference image: {e}"),
@@ -588,6 +607,7 @@ fn main() {
         confirm_quit: false,
         marquee: None,
         drag: None,
+        ref_drag: None,
         last_tool: Tool::Place,
         force_cpu,
         force_gpu,
@@ -719,6 +739,8 @@ struct App {
     marquee: Option<Marquee>,
     /// An in-progress move drag of the floating layer, else `None`.
     drag: Option<DragMove>,
+    /// An in-progress drag of the reference layer (Move mode), else `None`.
+    ref_drag: Option<RefDrag>,
     /// The active tool last frame, to detect a tool switch (keyboard or
     /// UI) and settle a floating layer when the user leaves Select.
     last_tool: Tool,
@@ -801,7 +823,7 @@ impl App {
         }
         // No hover box mid-drag: the selection outline already tracks the
         // moving layer, and the hover would pick the model under it.
-        if self.drag.is_none() {
+        if self.drag.is_none() && self.ref_drag.is_none() {
             if let Some(cell) = self.hover_cell() {
                 lines.extend(demiurg_view::voxel_box_lines_3d(pivot, cell));
             }
@@ -1010,12 +1032,82 @@ impl App {
         self.editor.dirty = true;
     }
 
+    /// Begin dragging the reference layer in its own plane (Move mode).
+    fn begin_ref_drag(&mut self) {
+        let Some(r) = &self.editor.reference else {
+            return;
+        };
+        let (axis, _, _) = r.axes();
+        let (depth, base_u, base_v) = (r.depth, r.offset_u, r.offset_v);
+        let pivot = self.editor.document.pivot();
+        // The reference sits on voxel coord `depth` along the normal axis;
+        // grab the plane through the voxel centres (+0.5) for a 1:1 feel.
+        let plane_coord = f64::from(depth) + 0.5 - f64::from(pivot[axis]);
+        let Some((o, d)) = self.pointer_ray() else {
+            return;
+        };
+        if d[axis].abs() < 1e-9 {
+            return;
+        }
+        let t = (plane_coord - o[axis]) / d[axis];
+        if t <= 0.0 {
+            return;
+        }
+        let anchor = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
+        self.ref_drag = Some(RefDrag {
+            axis,
+            plane_coord,
+            anchor,
+            base_u,
+            base_v,
+        });
+    }
+
+    /// Update the reference drag: snap the cursor ray to a whole-voxel
+    /// in-plane offset and apply it to the reference.
+    fn update_ref_drag(&mut self) {
+        let Some(drag) = &self.ref_drag else {
+            return;
+        };
+        let (axis, plane_coord, anchor, base_u, base_v) = (
+            drag.axis,
+            drag.plane_coord,
+            drag.anchor,
+            drag.base_u,
+            drag.base_v,
+        );
+        let Some((o, d)) = self.pointer_ray() else {
+            return;
+        };
+        let Some(delta) = plane_drag_delta(o, d, axis, plane_coord, anchor) else {
+            return;
+        };
+        let mut moved = false;
+        if let Some(r) = &mut self.editor.reference {
+            let (_, u_axis, v_axis) = r.axes();
+            let (nu, nv) = (base_u + delta[u_axis], base_v + delta[v_axis]);
+            if (r.offset_u, r.offset_v) != (nu, nv) {
+                r.offset_u = nu;
+                r.offset_v = nv;
+                moved = true;
+            }
+        }
+        if moved {
+            self.editor.reference_dirty = true;
+        }
+    }
+
     /// Left-button press: a quick eyedropper (Ctrl), a selection marquee
     /// (Select tool), a drag-paint stroke (continuous tools), or a
     /// click-once tool.
     fn begin_paint(&mut self) {
         if self.confirm_quit || self.busy() {
             return; // don't edit behind the quit / saving / dialog modal
+        }
+        // "Move reference" mode: left-drag slides the reference, not the tool.
+        if self.editor.ref_move_mode && self.editor.reference.is_some() {
+            self.begin_ref_drag();
+            return;
         }
         // Ctrl+click is a quick eyedropper, whatever the active tool.
         if self.modifiers.control_key() {
@@ -1087,6 +1179,9 @@ impl App {
     /// until deselected), resolve a marquee, or close the drag-paint
     /// stroke (one undo step).
     fn end_paint(&mut self) {
+        if self.ref_drag.take().is_some() {
+            return; // reference repositioned
+        }
         if self.drag.take().is_some() {
             return; // the moved layer stays floating until deselect
         }
@@ -1367,6 +1462,7 @@ impl App {
         }
         if a.remove_reference {
             self.editor.reference = None;
+            self.editor.ref_move_mode = false;
             self.editor.reference_dirty = true;
         }
         if a.save {
@@ -1635,6 +1731,7 @@ impl App {
         self.editor.selection.clear();
         self.editor.float = None; // a loaded model starts with no float
         self.editor.reference = None; // a stale guide wouldn't align; drop it
+        self.editor.ref_move_mode = false;
         self.editor.reference_dirty = true;
         self.drag = None;
         self.project_path = None; // callers re-set it for a `.demiurg` open
@@ -1947,6 +2044,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
+                if self.ref_drag.is_some() {
+                    self.update_ref_drag();
+                }
                 if self.drag.is_some() {
                     self.update_drag();
                 }

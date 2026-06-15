@@ -457,36 +457,46 @@ fn reference_panel(
 ) {
     ui.separator();
     ui.label(t(Msg::Reference));
-    let Some(r) = &mut editor.reference else {
+    if editor.reference.is_none() {
         if ui.button(t(Msg::OpenReference)).clicked() {
             actions.open_reference = true;
         }
         return;
-    };
+    }
 
-    ui.small(format!("{}  {}×{}", r.name, r.width, r.height));
+    // The Move toggle lives on the editor, not the reference, so handle it
+    // before borrowing the reference for the rest of the controls. When on,
+    // a left-drag in the viewport slides the reference in its plane.
+    ui.checkbox(&mut editor.ref_move_mode, t(Msg::Move))
+        .on_hover_text(t(Msg::Move));
+
     let mut changed = false;
-    ui.horizontal(|ui| {
-        for (axis, msg) in [
-            (RefAxis::Front, Msg::Front),
-            (RefAxis::Side, Msg::Side),
-            (RefAxis::Top, Msg::Top),
-        ] {
-            changed |= ui.selectable_value(&mut r.axis, axis, t(msg)).clicked();
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.label(t(Msg::Depth));
-        changed |= ui.add(egui::DragValue::new(&mut r.depth)).changed();
-        changed |= ui.checkbox(&mut r.flip_h, "↔").changed();
-        changed |= ui.checkbox(&mut r.flip_v, "↕").changed();
-    });
-    ui.horizontal(|ui| {
-        changed |= ui.checkbox(&mut r.visible, t(Msg::Show)).changed();
-        if ui.button(t(Msg::Remove)).clicked() {
-            actions.remove_reference = true;
-        }
-    });
+    let mut remove = false;
+    if let Some(r) = &mut editor.reference {
+        ui.small(format!("{}  {}×{}", r.name, r.width, r.height));
+        ui.horizontal(|ui| {
+            for (axis, msg) in [
+                (RefAxis::Front, Msg::Front),
+                (RefAxis::Side, Msg::Side),
+                (RefAxis::Top, Msg::Top),
+            ] {
+                changed |= ui.selectable_value(&mut r.axis, axis, t(msg)).clicked();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(t(Msg::Depth));
+            changed |= ui.add(egui::DragValue::new(&mut r.depth)).changed();
+            changed |= ui.checkbox(&mut r.flip_h, "↔").changed();
+            changed |= ui.checkbox(&mut r.flip_v, "↕").changed();
+        });
+        ui.horizontal(|ui| {
+            changed |= ui.checkbox(&mut r.visible, t(Msg::Show)).changed();
+            remove = ui.button(t(Msg::Remove)).clicked();
+        });
+    }
+    if remove {
+        actions.remove_reference = true;
+    }
     if changed {
         editor.reference_dirty = true;
     }
