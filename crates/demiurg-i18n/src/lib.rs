@@ -104,10 +104,11 @@ pub enum Msg {
     File,
     New,
     OpenKv6,
-    SaveKv6,
-    SaveVxl,
     OpenProject,
-    SaveProject,
+    Save,
+    SaveAs,
+    ExportKv6,
+    ExportVxl,
     Edit,
     Undo,
     Redo,
@@ -129,11 +130,16 @@ pub enum Msg {
     ConfirmQuitBody,
     QuitAnyway,
     Cancel,
+    // Save progress + autosave recovery
+    Saving,
+    RecoveredTitle,
+    RecoveredBody,
+    Ok,
 }
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 57] = [
+    pub const ALL: [Msg; 62] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -168,10 +174,11 @@ impl Msg {
         Msg::File,
         Msg::New,
         Msg::OpenKv6,
-        Msg::SaveKv6,
-        Msg::SaveVxl,
         Msg::OpenProject,
-        Msg::SaveProject,
+        Msg::Save,
+        Msg::SaveAs,
+        Msg::ExportKv6,
+        Msg::ExportVxl,
         Msg::Edit,
         Msg::Undo,
         Msg::Redo,
@@ -191,6 +198,10 @@ impl Msg {
         Msg::ConfirmQuitBody,
         Msg::QuitAnyway,
         Msg::Cancel,
+        Msg::Saving,
+        Msg::RecoveredTitle,
+        Msg::RecoveredBody,
+        Msg::Ok,
     ];
 }
 
@@ -239,10 +250,11 @@ const fn en(msg: Msg) -> &'static str {
         Msg::File => "File",
         Msg::New => "New",
         Msg::OpenKv6 => "Open .kv6…",
-        Msg::SaveKv6 => "Save .kv6…",
-        Msg::SaveVxl => "Save .vxl…",
         Msg::OpenProject => "Open project…",
-        Msg::SaveProject => "Save project…",
+        Msg::Save => "Save",
+        Msg::SaveAs => "Save As…",
+        Msg::ExportKv6 => "Export .kv6…",
+        Msg::ExportVxl => "Export .vxl…",
         Msg::Edit => "Edit",
         Msg::Undo => "Undo",
         Msg::Redo => "Redo",
@@ -264,6 +276,10 @@ const fn en(msg: Msg) -> &'static str {
         Msg::ConfirmQuitBody => "Quit without saving?",
         Msg::QuitAnyway => "Quit",
         Msg::Cancel => "Cancel",
+        Msg::Saving => "Saving…",
+        Msg::RecoveredTitle => "Recovered work",
+        Msg::RecoveredBody => "Loaded unsaved work from an autosave. Save it to keep it.",
+        Msg::Ok => "OK",
     }
 }
 
@@ -303,10 +319,11 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::File => "Файл",
         Msg::New => "Создать",
         Msg::OpenKv6 => "Открыть .kv6…",
-        Msg::SaveKv6 => "Сохранить .kv6…",
-        Msg::SaveVxl => "Сохранить .vxl…",
         Msg::OpenProject => "Открыть проект…",
-        Msg::SaveProject => "Сохранить проект…",
+        Msg::Save => "Сохранить",
+        Msg::SaveAs => "Сохранить как…",
+        Msg::ExportKv6 => "Экспорт .kv6…",
+        Msg::ExportVxl => "Экспорт .vxl…",
         Msg::Edit => "Правка",
         Msg::Undo => "Отменить",
         Msg::Redo => "Повторить",
@@ -328,6 +345,12 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::ConfirmQuitBody => "Выйти без сохранения?",
         Msg::QuitAnyway => "Выйти",
         Msg::Cancel => "Отмена",
+        Msg::Saving => "Сохранение…",
+        Msg::RecoveredTitle => "Восстановление",
+        Msg::RecoveredBody => {
+            "Загружены несохранённые данные из автосейва. Сохраните их, чтобы не потерять."
+        }
+        Msg::Ok => "OK",
     }
 }
 

@@ -39,10 +39,13 @@ const PRESETS: [u32; 8] = [
 pub struct UiActions {
     pub new_model: bool,
     pub open_kv6: bool,
-    pub save_kv6: bool,
-    pub save_vxl: bool,
     pub open_project: bool,
-    pub save_project: bool,
+    /// Save the project (Ctrl+S): overwrite the known path or prompt.
+    pub save: bool,
+    /// Save the project to a new path (dialog).
+    pub save_as: bool,
+    pub export_kv6: bool,
+    pub export_vxl: bool,
     pub undo: bool,
     pub redo: bool,
     pub delete_sel: bool,
@@ -53,6 +56,19 @@ pub struct UiActions {
     /// Quit-confirmation modal: the user chose to quit / to cancel.
     pub quit_confirm: bool,
     pub quit_cancel: bool,
+    /// The autosave-recovery banner was dismissed.
+    pub recovered_ok: bool,
+}
+
+/// Which overlay modals to draw this frame.
+#[derive(Clone, Copy)]
+pub struct Modals {
+    /// The unsaved-changes quit confirmation.
+    pub quit_confirm: bool,
+    /// A user save is in flight (show a blocking spinner).
+    pub saving: bool,
+    /// Work was recovered from an autosave (show a dismissible banner).
+    pub recovered: bool,
 }
 
 /// Draw the editor chrome for one frame (menus, tool panel, quit modal).
@@ -63,7 +79,7 @@ pub fn build(
     ui: &mut egui::Ui,
     editor: &mut Editor,
     actions: &mut UiActions,
-    show_quit_confirm: bool,
+    modals: Modals,
     marquee: Option<[(f64, f64); 2]>,
 ) {
     let lang = editor.lang;
@@ -81,21 +97,26 @@ pub fn build(
                     actions.open_kv6 = true;
                     ui.close();
                 }
-                if ui.button(t(Msg::SaveKv6)).clicked() {
-                    actions.save_kv6 = true;
-                    ui.close();
-                }
-                if ui.button(t(Msg::SaveVxl)).clicked() {
-                    actions.save_vxl = true;
-                    ui.close();
-                }
-                ui.separator();
                 if ui.button(t(Msg::OpenProject)).clicked() {
                     actions.open_project = true;
                     ui.close();
                 }
-                if ui.button(t(Msg::SaveProject)).clicked() {
-                    actions.save_project = true;
+                ui.separator();
+                if ui.button(t(Msg::Save)).clicked() {
+                    actions.save = true;
+                    ui.close();
+                }
+                if ui.button(t(Msg::SaveAs)).clicked() {
+                    actions.save_as = true;
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button(t(Msg::ExportKv6)).clicked() {
+                    actions.export_kv6 = true;
+                    ui.close();
+                }
+                if ui.button(t(Msg::ExportVxl)).clicked() {
+                    actions.export_vxl = true;
                     ui.close();
                 }
             });
@@ -257,7 +278,7 @@ pub fn build(
 
     // In-app quit confirmation (replaces a native message box, which the
     // XDG portal doesn't reliably show here).
-    if show_quit_confirm {
+    if modals.quit_confirm {
         egui::Window::new(t(Msg::ConfirmQuitTitle))
             .collapsible(false)
             .resizable(false)
@@ -273,6 +294,38 @@ pub fn build(
                         actions.quit_cancel = true;
                     }
                 });
+            });
+    }
+
+    // Saving spinner: the write runs on a worker thread, so this animates
+    // (the loop keeps rendering) — the OS sees a responsive window instead
+    // of a frozen one it would offer to kill.
+    if modals.saving {
+        egui::Window::new(t(Msg::Saving))
+            .collapsible(false)
+            .resizable(false)
+            .title_bar(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new());
+                    ui.label(t(Msg::Saving));
+                });
+            });
+    }
+
+    // Autosave-recovery banner (dismissible).
+    if modals.recovered {
+        egui::Window::new(t(Msg::RecoveredTitle))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label(t(Msg::RecoveredBody));
+                ui.add_space(8.0);
+                if ui.button(t(Msg::Ok)).clicked() {
+                    actions.recovered_ok = true;
+                }
             });
     }
 }

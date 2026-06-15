@@ -18,15 +18,21 @@
 //! copies the selection and `Ctrl+V` pastes it as a floating layer at its
 //! original position (settled into the model on deselect), `Delete`
 //! removes the selection, `Esc` deselects (settling any pasted layer) or
-//! else quits. `DEMIURG_LANG=ru` starts in Russian. The GPU backend is
-//! used by default; `ROXLAP_GPU=0` forces the CPU renderer.
+//! else quits. `Ctrl+S` saves the project (overwriting its path once
+//! known); saves run on a background thread (with a spinner) so the UI
+//! never freezes, and a periodic autosave to the OS temp dir is recovered
+//! on the next launch after a crash. `DEMIURG_LANG=ru` starts in Russian.
+//! The GPU backend is used by default; `ROXLAP_GPU=0` forces the CPU
+//! renderer.
 
 mod ui;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use demiurg_core::{Document, VoxelModel, project};
@@ -65,6 +71,52 @@ const FRAME_DT: Duration = Duration::from_micros(16_667);
 /// faces — where boundaries otherwise vanish — while staying subtle on
 /// already-readable lit faces.
 const VOXEL_EDGE_COLOR: u32 = 0x66d4_d8e0;
+/// How often a background autosave is written while there are unsaved
+/// changes — a crash-recovery snapshot, not "the save".
+const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(20);
+
+/// The on-disk format a save writes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SaveFormat {
+    Project,
+    Kv6,
+    Vxl,
+}
+
+impl SaveFormat {
+    /// Serialize `model` to this format's bytes.
+    fn encode(self, model: &VoxelModel) -> Vec<u8> {
+        match self {
+            SaveFormat::Project => project::to_bytes(model),
+            SaveFormat::Kv6 => model.to_kv6_bytes(),
+            SaveFormat::Vxl => model.to_vxl_bytes(),
+        }
+    }
+}
+
+/// A save running on a worker thread, so a slow serialize/write never
+/// freezes the UI — the OS would otherwise flag the window as hung and
+/// offer to kill it, taking the unsaved model with it. The result arrives
+/// over `rx`; the model is snapshotted (cloned) into the worker so the
+/// main loop keeps rendering (and the save spinner animates) meanwhile.
+struct PendingSave {
+    rx: Receiver<std::io::Result<()>>,
+    path: PathBuf,
+    format: SaveFormat,
+    /// User-initiated (modal + mark saved on success) vs a silent autosave.
+    user: bool,
+}
+
+/// Path of the background autosave (a crash-recovery snapshot in the OS
+/// temp dir, loaded on the next start if it survived a crash).
+fn autosave_path() -> PathBuf {
+    std::env::temp_dir().join("demiurg-autosave.demiurg")
+}
+
+/// Load the autosave file as a model, or `None` if it's missing/corrupt.
+fn recover_autosave(path: &Path) -> Option<VoxelModel> {
+    project::from_bytes(&std::fs::read(path).ok()?).ok()
+}
 
 /// The active editing tool.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -388,25 +440,38 @@ impl Editor {
 }
 
 fn main() {
-    let path = std::env::args().nth(1);
-    let model = if let Some(p) = &path {
-        load_any(p)
+    let arg = std::env::args().nth(1);
+    let autosave = autosave_path();
+
+    // A `.demiurg` argument is an editable project (its path drives Ctrl+S);
+    // a `.kv6` opens as a fresh model. With no argument, recover an autosave
+    // if one survived a previous crash.
+    let (model, project_path, doc_name, recovered) = if let Some(p) = &arg {
+        let proj = p.ends_with(".demiurg").then(|| PathBuf::from(p));
+        (load_any(p), proj, stem_of(Path::new(p)), false)
+    } else if let Some(m) = recover_autosave(&autosave) {
+        eprintln!(
+            "demiurg: recovered unsaved work from {}",
+            autosave.display()
+        );
+        (m, None, None, true)
     } else {
         eprintln!("demiurg: blank canvas (pass a .kv6 or .demiurg path to open one)");
-        new_model()
+        (new_model(), None, None, false)
     };
 
     let view = ModelView::new(&model, DEFAULT_RENDER_MODE);
     let camera = view.framing_camera();
-    let doc_name = path
-        .as_deref()
-        .and_then(|p| stem_of(std::path::Path::new(p)));
+    let mut editor = Editor::new(model);
+    if recovered {
+        editor.document.mark_unsaved(); // recovered work has no save point yet
+    }
     let mut app = App {
         window: None,
         renderer: None,
         view,
         camera,
-        editor: Editor::new(model),
+        editor,
         egui_ctx: egui::Context::default(),
         egui_state: None,
         keys: Keys::default(),
@@ -418,6 +483,11 @@ fn main() {
         cursor: (0.0, 0.0),
         last_drag: None,
         doc_name,
+        project_path,
+        pending_save: None,
+        autosave_path: autosave,
+        next_autosave: Instant::now() + AUTOSAVE_INTERVAL,
+        recovered,
         last_title: None,
         confirm_quit: false,
         marquee: None,
@@ -524,6 +594,17 @@ struct App {
     last_drag: Option<(f64, f64)>,
     /// File stem of the open document (for the title), or `None` if new.
     doc_name: Option<String>,
+    /// Path of the open `.demiurg` project, if any — `Ctrl+S` overwrites it
+    /// without a dialog.
+    project_path: Option<PathBuf>,
+    /// A background save in progress, else `None`.
+    pending_save: Option<PendingSave>,
+    /// Where the periodic background autosave is written.
+    autosave_path: PathBuf,
+    /// When the next autosave is due.
+    next_autosave: Instant,
+    /// Show the "recovered from autosave" banner until dismissed.
+    recovered: bool,
     /// Last window title set, to avoid redundant `set_title` calls.
     last_title: Option<String>,
     /// The unsaved-changes quit modal is showing.
@@ -823,8 +904,8 @@ impl App {
     /// (Select tool), a drag-paint stroke (continuous tools), or a
     /// click-once tool.
     fn begin_paint(&mut self) {
-        if self.confirm_quit {
-            return; // don't edit behind the quit modal
+        if self.confirm_quit || self.saving() {
+            return; // don't edit behind the quit / saving modal
         }
         // Ctrl+click is a quick eyedropper, whatever the active tool.
         if self.modifiers.control_key() {
@@ -1082,7 +1163,7 @@ impl App {
         if self.editor.document.is_modified() {
             self.confirm_quit = true;
         } else {
-            event_loop.exit();
+            self.do_exit(event_loop);
         }
     }
 
@@ -1116,11 +1197,15 @@ impl App {
             .as_mut()
             .expect("egui state")
             .take_egui_input(window);
-        let show_quit = self.confirm_quit;
+        let modals = ui::Modals {
+            quit_confirm: self.confirm_quit,
+            saving: self.saving(),
+            recovered: self.recovered,
+        };
         let editor = &mut self.editor;
         let mut actions = UiActions::default();
         let out = ctx.run_ui(raw, |ui| {
-            ui::build(ui, editor, &mut actions, show_quit, marquee);
+            ui::build(ui, editor, &mut actions, modals, marquee);
         });
         self.egui_state
             .as_mut()
@@ -1151,10 +1236,8 @@ impl App {
         if let Some(dir) = a.set_view {
             self.camera.set_view(dir);
         }
-        // Saving serializes the document model, so bake a floating layer
-        // in first or it would be silently left out of the file.
-        if a.save_kv6 || a.save_vxl || a.save_project {
-            self.commit_float();
+        if a.recovered_ok {
+            self.recovered = false;
         }
         if a.new_model {
             self.load_model(new_model());
@@ -1167,7 +1250,7 @@ impl App {
             {
                 match std::fs::read(&path).map(|b| VoxelModel::from_kv6_bytes(&b)) {
                     Ok(Ok(m)) => {
-                        self.load_model(m);
+                        self.load_model(m); // a .kv6 has no project path
                         self.doc_name = stem_of(&path);
                     }
                     Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
@@ -1184,55 +1267,143 @@ impl App {
                     Ok(Ok(m)) => {
                         self.load_model(m);
                         self.doc_name = stem_of(&path);
+                        self.project_path = Some(path); // Ctrl+S overwrites it
                     }
                     Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
                     Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
                 }
             }
         }
-        if a.save_kv6 {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("kv6", &["kv6"])
-                .set_file_name("model.kv6")
-                .save_file()
-            {
-                let bytes = self.editor.document.model().to_kv6_bytes();
-                self.on_saved(&path, std::fs::write(&path, bytes));
-            }
+        if a.save {
+            self.save_project();
         }
-        if a.save_vxl {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("vxl", &["vxl"])
-                .set_file_name("model.vxl")
-                .save_file()
-            {
-                let bytes = self.editor.document.model().to_vxl_bytes();
-                self.on_saved(&path, std::fs::write(&path, bytes));
-            }
+        if a.save_as {
+            self.save_dialog(SaveFormat::Project);
         }
-        if a.save_project {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("demiurg", &["demiurg"])
-                .set_file_name("model.demiurg")
-                .save_file()
-            {
-                let bytes = project::to_bytes(self.editor.document.model());
-                self.on_saved(&path, std::fs::write(&path, bytes));
-            }
+        if a.export_kv6 {
+            self.save_dialog(SaveFormat::Kv6);
+        }
+        if a.export_vxl {
+            self.save_dialog(SaveFormat::Vxl);
         }
     }
 
-    /// React to a save attempt: on success, clear the modified flag and
-    /// adopt the file name; on failure, just log.
-    fn on_saved(&mut self, path: &std::path::Path, result: std::io::Result<()>) {
-        match result {
-            Ok(()) => {
-                eprintln!("demiurg: saved {}", path.display());
-                self.editor.document.mark_saved();
-                self.doc_name = stem_of(path);
-            }
-            Err(e) => eprintln!("demiurg: write {} failed: {e}", path.display()),
+    /// `Ctrl+S` / Save: overwrite the open project file in the background
+    /// when its path is known, else fall back to a Save-As dialog.
+    fn save_project(&mut self) {
+        self.commit_float();
+        if let Some(path) = self.project_path.clone() {
+            self.start_save(path, SaveFormat::Project, true);
+        } else {
+            self.save_dialog(SaveFormat::Project);
         }
+    }
+
+    /// Pick a destination for `format` via a native dialog, then save to it
+    /// in the background.
+    fn save_dialog(&mut self, format: SaveFormat) {
+        self.commit_float();
+        let (filter, ext, default) = match format {
+            SaveFormat::Project => ("demiurg", "demiurg", "model.demiurg"),
+            SaveFormat::Kv6 => ("kv6", "kv6", "model.kv6"),
+            SaveFormat::Vxl => ("vxl", "vxl", "model.vxl"),
+        };
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter(filter, &[ext])
+            .set_file_name(default);
+        // Default a project Save-As to the current file's folder + name.
+        if format == SaveFormat::Project {
+            if let Some(p) = &self.project_path {
+                if let Some(dir) = p.parent() {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(name) = p.file_name() {
+                    dialog = dialog.set_file_name(name.to_string_lossy());
+                }
+            }
+        }
+        if let Some(path) = dialog.save_file() {
+            self.start_save(path, format, true);
+        }
+    }
+
+    /// Spawn a background save of a snapshot of the current model. One at a
+    /// time: if a save is already running this is dropped (a later save or
+    /// autosave retries), so the worker count stays bounded.
+    fn start_save(&mut self, path: PathBuf, format: SaveFormat, user: bool) {
+        if self.pending_save.is_some() {
+            return;
+        }
+        let model = self.editor.document.model().clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let job_path = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(std::fs::write(&job_path, format.encode(&model)));
+        });
+        self.pending_save = Some(PendingSave {
+            rx,
+            path,
+            format,
+            user,
+        });
+    }
+
+    /// Whether a *user* save is in flight (its modal blocks editing). An
+    /// autosave runs silently and doesn't block.
+    fn saving(&self) -> bool {
+        self.pending_save.as_ref().is_some_and(|p| p.user)
+    }
+
+    /// Collect a finished background save: mark the project saved / adopt
+    /// its path on success, or log the failure.
+    fn poll_save(&mut self) {
+        let result = match self.pending_save.as_ref().map(|p| p.rx.try_recv()) {
+            None | Some(Err(TryRecvError::Empty)) => return, // none / still running
+            Some(Ok(r)) => r,
+            Some(Err(TryRecvError::Disconnected)) => {
+                Err(std::io::Error::other("save worker stopped before writing"))
+            }
+        };
+        let done = self.pending_save.take().expect("pending save");
+        match (result, done.user) {
+            (Ok(()), true) => {
+                eprintln!("demiurg: saved {}", done.path.display());
+                if done.format == SaveFormat::Project {
+                    self.editor.document.mark_saved();
+                    self.doc_name = stem_of(&done.path);
+                    self.project_path = Some(done.path);
+                }
+            }
+            (Ok(()), false) => {} // silent autosave success
+            (Err(e), true) => eprintln!("demiurg: save {} failed: {e}", done.path.display()),
+            (Err(e), false) => eprintln!("demiurg: autosave failed: {e}"),
+        }
+    }
+
+    /// Write a background autosave if one is due and there are unsaved
+    /// changes — a crash-recovery snapshot, never marked as "the save".
+    fn maybe_autosave(&mut self) {
+        if Instant::now() < self.next_autosave {
+            return;
+        }
+        self.next_autosave = Instant::now() + AUTOSAVE_INTERVAL;
+        if self.pending_save.is_some() || !self.editor.document.is_modified() {
+            return;
+        }
+        let path = self.autosave_path.clone();
+        self.start_save(path, SaveFormat::Project, false);
+    }
+
+    /// Drop the autosave file (a clean exit means the work is saved or
+    /// deliberately discarded, so there's nothing to recover next time).
+    fn clear_autosave(&self) {
+        let _ = std::fs::remove_file(&self.autosave_path);
+    }
+
+    /// Exit cleanly: remove the crash-recovery autosave, then quit.
+    fn do_exit(&self, event_loop: &ActiveEventLoop) {
+        self.clear_autosave();
+        event_loop.exit();
     }
 
     /// Replace the document model, rebuild the sprite, refresh the
@@ -1246,6 +1417,7 @@ impl App {
         self.editor.selection.clear();
         self.editor.float = None; // a loaded model starts with no float
         self.drag = None;
+        self.project_path = None; // callers re-set it for a `.demiurg` open
         self.camera = self.view.framing_camera();
         self.editor.dirty = false;
     }
@@ -1269,12 +1441,16 @@ impl App {
         let (jobs, textures, ppp, actions) = self.run_ui(&window, marquee);
         self.apply_actions(&actions);
         if actions.quit_confirm {
-            event_loop.exit();
+            self.do_exit(event_loop);
             return;
         }
         if actions.quit_cancel {
             self.confirm_quit = false;
         }
+        // Background-save bookkeeping: collect any finished save and write a
+        // periodic autosave so a crash leaves something to recover.
+        self.poll_save();
+        self.maybe_autosave();
         // A tool switch (keyboard or a panel click) away from a floating
         // layer settles it into the model.
         if self.editor.tool != self.last_tool {
@@ -1345,6 +1521,9 @@ impl App {
     fn on_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, pressed: bool) {
         let ctrl = self.modifiers.control_key();
         let shift = self.modifiers.shift_key();
+        if self.saving() {
+            return; // keys are blocked behind the saving modal
+        }
         match code {
             KeyCode::Digit1 if pressed => self.editor.tool = Tool::Place,
             KeyCode::Digit2 if pressed => self.editor.tool = Tool::Erase,
@@ -1359,6 +1538,8 @@ impl App {
             KeyCode::KeyY if pressed && ctrl => self.do_redo(),
             KeyCode::KeyC if pressed && ctrl => self.copy_selection(),
             KeyCode::KeyV if pressed && ctrl => self.paste_clipboard(),
+            // Ctrl+S overwrites the project file (S without Ctrl zooms out).
+            KeyCode::KeyS if ctrl && pressed => self.save_project(),
             KeyCode::Delete | KeyCode::Backspace if pressed => self.delete_selection(),
             KeyCode::ArrowLeft => self.keys.left = pressed,
             KeyCode::ArrowRight => self.keys.right = pressed,

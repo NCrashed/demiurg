@@ -13,6 +13,16 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
   exposed voxel faces so boundaries read even on flat-shaded faces in shadow,
   where coplanar voxels would otherwise blend into one patch (there is no
   ambient occlusion / light baking).
+- Save / Save As for the project: `Ctrl+S` overwrites the open `.demiurg` file
+  without a dialog once its path is known; Save As picks a new path. The kv6 and
+  vxl menu entries are now labelled Export.
+- Saves run on a background thread with a "Saving…" spinner, so a slow
+  serialize/write no longer freezes the window (which the OS would flag as hung
+  and offer to kill, losing the model).
+- Background autosave: while there are unsaved changes the project is snapshotted
+  to the OS temp dir every 20 s; on the next launch a surviving autosave (after a
+  crash) is loaded automatically with a "Recovered work" banner. A clean exit
+  removes it.
 
 ### Fixed
 

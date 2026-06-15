@@ -143,6 +143,14 @@ impl Document {
         self.saved_id = self.current_state_id();
     }
 
+    /// Force the "modified since save" state — e.g. after recovering
+    /// unsaved work from an autosave, which has no real save point yet.
+    /// `u64::MAX` is never a real edit id (ids start at 1), so the document
+    /// reads modified until the next [`mark_saved`](Self::mark_saved).
+    pub fn mark_unsaved(&mut self) {
+        self.saved_id = u64::MAX;
+    }
+
     /// Whether the document differs from the last saved state. Robust to
     /// undo/redo: undoing back to the saved edit reads as unmodified,
     /// and a different edit at the same depth reads as modified (ids are
