@@ -8,7 +8,8 @@
 //! Controls: left mouse applies the active tool (hold to drag-paint);
 //! with the Select tool, dragging a selected voxel moves the selection in
 //! that face's plane (it floats until deselected); `Ctrl`+click eyedrops a
-//! colour; right-mouse drag orbits; wheel and `W`/`S` zoom; arrow keys
+//! colour; right-mouse drag orbits; middle-mouse (or Shift+right) drag
+//! pans the view, `Home` recenters it; wheel and `W`/`S` zoom; arrow keys
 //! orbit. Hotkeys: `1`-`8` pick a tool (`8` is
 //! Select), `Ctrl+Z` undo, `Ctrl+Y` / `Ctrl+Shift+Z` redo, `Ctrl+C`
 //! copies the selection and `Ctrl+V` pastes it as a floating layer at its
@@ -364,6 +365,7 @@ fn main() {
         keys: Keys::default(),
         modifiers: ModifiersState::empty(),
         orbiting: false,
+        panning: false,
         painting: false,
         last_paint: None,
         cursor: (0.0, 0.0),
@@ -452,6 +454,7 @@ struct Keys {
     zoom_out: bool,
 }
 
+#[allow(clippy::struct_excessive_bools)] // independent input/UI flags, not a state enum
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<SceneRenderer>,
@@ -464,6 +467,8 @@ struct App {
     modifiers: ModifiersState,
     /// Right-mouse drag orbits the camera (left mouse edits).
     orbiting: bool,
+    /// Middle-mouse (or Shift+right) drag pans the camera's look-at point.
+    panning: bool,
     /// Left mouse held with a continuous tool: an open drag-paint stroke.
     painting: bool,
     /// Last cell painted this stroke, to skip redundant re-applies.
@@ -497,6 +502,19 @@ impl App {
         if dyaw != 0.0 || dpitch != 0.0 || dzoom != 0.0 {
             self.camera.orbit(dyaw, dpitch, dzoom);
         }
+    }
+
+    /// Pan the camera by a cursor delta in pixels, so the grabbed point
+    /// tracks the cursor. The world-per-pixel scale uses the renderer's
+    /// ~90° horizontal FOV (focal = width / 2) at the look-at distance, so
+    /// the pan feels 1:1 with the drag; negated so the scene follows.
+    fn pan_camera(&mut self, dx: f64, dy: f64) {
+        let width = self
+            .window
+            .as_ref()
+            .map_or(1.0, |w| f64::from(w.inner_size().width).max(1.0));
+        let world_per_px = self.camera.dist / (width * 0.5);
+        self.camera.pan(-dx * world_per_px, -dy * world_per_px);
     }
 
     /// The cell the active tool would affect under the cursor (place
@@ -1260,6 +1278,7 @@ impl App {
             KeyCode::ArrowDown => self.keys.down = pressed,
             KeyCode::KeyW => self.keys.zoom_in = pressed,
             KeyCode::KeyS => self.keys.zoom_out = pressed,
+            KeyCode::Home if pressed => self.camera.recenter(), // undo a pan
             KeyCode::Escape if pressed => {
                 if self.confirm_quit {
                     self.confirm_quit = false; // Esc dismisses the modal
@@ -1370,8 +1389,27 @@ impl ApplicationHandler for App {
                 button: MouseButton::Right,
                 ..
             } => {
-                self.orbiting = state == ElementState::Pressed;
-                if !self.orbiting {
+                // Right drag orbits, or pans while Shift is held (a pan
+                // path for setups without a middle mouse button).
+                if state == ElementState::Pressed {
+                    if self.modifiers.shift_key() {
+                        self.panning = true;
+                    } else {
+                        self.orbiting = true;
+                    }
+                } else {
+                    self.orbiting = false;
+                    self.panning = false;
+                    self.last_drag = None;
+                }
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Middle,
+                ..
+            } => {
+                self.panning = state == ElementState::Pressed;
+                if !self.panning {
                     self.last_drag = None;
                 }
             }
@@ -1387,6 +1425,11 @@ impl ApplicationHandler for App {
                     if let Some((lx, ly)) = self.last_drag {
                         self.camera
                             .orbit((position.x - lx) * 0.01, -(position.y - ly) * 0.01, 0.0);
+                    }
+                    self.last_drag = Some((position.x, position.y));
+                } else if self.panning {
+                    if let Some((lx, ly)) = self.last_drag {
+                        self.pan_camera(position.x - lx, position.y - ly);
                     }
                     self.last_drag = Some((position.x, position.y));
                 }

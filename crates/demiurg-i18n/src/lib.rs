@@ -230,7 +230,7 @@ const fn en(msg: Msg) -> &'static str {
         Msg::RenderVoxel => "Voxel grid",
         Msg::Language => "Language",
         Msg::HelpApply => "LMB: apply tool",
-        Msg::HelpOrbit => "RMB drag: orbit · wheel: zoom",
+        Msg::HelpOrbit => "RMB: orbit · MMB/Shift+RMB: pan · Home: recenter · wheel: zoom",
         Msg::HelpSelect => {
             "drag selected: move · drag empty: marquee · Shift/Alt +/- · Ctrl+click pick"
         }
@@ -286,7 +286,7 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::RenderVoxel => "Воксельная сетка",
         Msg::Language => "Язык",
         Msg::HelpApply => "ЛКМ: применить инструмент",
-        Msg::HelpOrbit => "ПКМ: вращение · колесо: зум",
+        Msg::HelpOrbit => "ПКМ: вращение · СКМ/Shift+ПКМ: пан · Home: в центр · колесо: зум",
         Msg::HelpSelect => {
             "тянуть выделенный: двигать · тянуть пустоту: рамка · Shift/Alt +/- · Ctrl+клик пипетка"
         }
