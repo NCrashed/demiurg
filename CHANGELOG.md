@@ -16,9 +16,10 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 - Save / Save As for the project: `Ctrl+S` overwrites the open `.demiurg` file
   without a dialog once its path is known; Save As picks a new path. The kv6 and
   vxl menu entries are now labelled Export.
-- Saves run on a background thread with a "Saving…" spinner, so a slow
-  serialize/write no longer freezes the window (which the OS would flag as hung
-  and offer to kill, losing the model).
+- File I/O no longer freezes the window (which the OS would flag as hung and
+  offer to kill, losing the model): the open/save **dialogs** run on a worker
+  thread off the event loop, and **saves** serialize/write on a worker thread
+  too, with a "Saving…" spinner.
 - Background autosave: while there are unsaved changes the project is snapshotted
   to the OS temp dir every 20 s; on the next launch a surviving autosave (after a
   crash) is loaded automatically with a "Recovered work" banner. A clean exit

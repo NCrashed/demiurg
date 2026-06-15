@@ -107,6 +107,51 @@ struct PendingSave {
     user: bool,
 }
 
+/// What a pending file dialog will do with the path it returns.
+#[derive(Clone, Copy)]
+enum DialogKind {
+    OpenKv6,
+    OpenProject,
+    Save(SaveFormat),
+}
+
+/// A native file dialog running on a worker thread. The dialog (an XDG
+/// portal / OS dialog) blocks its thread, not the event loop, so the
+/// window keeps pumping events and the OS doesn't flag it as hung. The
+/// chosen path (or `None` if cancelled) arrives over `rx`.
+struct PendingDialog {
+    rx: Receiver<Option<PathBuf>>,
+    kind: DialogKind,
+}
+
+/// Run a native file dialog (blocking) and return the chosen path. Called
+/// on a worker thread off the main loop (except macOS, whose `AppKit`
+/// panels must run on the main thread).
+fn run_dialog(kind: DialogKind, dir: Option<PathBuf>, name: Option<&str>) -> Option<PathBuf> {
+    match kind {
+        DialogKind::OpenKv6 => rfd::FileDialog::new()
+            .add_filter("kv6", &["kv6"])
+            .pick_file(),
+        DialogKind::OpenProject => rfd::FileDialog::new()
+            .add_filter("demiurg", &["demiurg"])
+            .pick_file(),
+        DialogKind::Save(format) => {
+            let (filter, ext, default) = match format {
+                SaveFormat::Project => ("demiurg", "demiurg", "model.demiurg"),
+                SaveFormat::Kv6 => ("kv6", "kv6", "model.kv6"),
+                SaveFormat::Vxl => ("vxl", "vxl", "model.vxl"),
+            };
+            let mut dialog = rfd::FileDialog::new()
+                .add_filter(filter, &[ext])
+                .set_file_name(name.unwrap_or(default));
+            if let Some(dir) = dir {
+                dialog = dialog.set_directory(dir);
+            }
+            dialog.save_file()
+        }
+    }
+}
+
 /// Path of the background autosave (a crash-recovery snapshot in the OS
 /// temp dir, loaded on the next start if it survived a crash).
 fn autosave_path() -> PathBuf {
@@ -485,6 +530,7 @@ fn main() {
         doc_name,
         project_path,
         pending_save: None,
+        pending_dialog: None,
         autosave_path: autosave,
         next_autosave: Instant::now() + AUTOSAVE_INTERVAL,
         recovered,
@@ -599,6 +645,8 @@ struct App {
     project_path: Option<PathBuf>,
     /// A background save in progress, else `None`.
     pending_save: Option<PendingSave>,
+    /// A native file dialog running off the event loop, else `None`.
+    pending_dialog: Option<PendingDialog>,
     /// Where the periodic background autosave is written.
     autosave_path: PathBuf,
     /// When the next autosave is due.
@@ -904,8 +952,8 @@ impl App {
     /// (Select tool), a drag-paint stroke (continuous tools), or a
     /// click-once tool.
     fn begin_paint(&mut self) {
-        if self.confirm_quit || self.saving() {
-            return; // don't edit behind the quit / saving modal
+        if self.confirm_quit || self.busy() {
+            return; // don't edit behind the quit / saving / dialog modal
         }
         // Ctrl+click is a quick eyedropper, whatever the active tool.
         if self.modifiers.control_key() {
@@ -1244,10 +1292,87 @@ impl App {
             self.doc_name = None;
         }
         if a.open_kv6 {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("kv6", &["kv6"])
-                .pick_file()
-            {
+            self.open_dialog(DialogKind::OpenKv6);
+        }
+        if a.open_project {
+            self.open_dialog(DialogKind::OpenProject);
+        }
+        if a.save {
+            self.save_project();
+        }
+        if a.save_as {
+            self.save_to(SaveFormat::Project, true);
+        }
+        if a.export_kv6 {
+            self.save_to(SaveFormat::Kv6, true);
+        }
+        if a.export_vxl {
+            self.save_to(SaveFormat::Vxl, true);
+        }
+    }
+
+    /// `Ctrl+S` / Save: settle a float, then overwrite the known project
+    /// path (background write) or pop a Save dialog.
+    fn save_project(&mut self) {
+        self.save_to(SaveFormat::Project, false);
+    }
+
+    /// Save `format`: overwrite the open project path directly when known
+    /// and `ask` is false (Ctrl+S), else pick a path via a dialog (Save
+    /// As / Export). Both the dialog and the write run off the event loop.
+    fn save_to(&mut self, format: SaveFormat, ask: bool) {
+        self.commit_float();
+        if !ask {
+            if let Some(path) = self.project_path.clone() {
+                self.start_save(path, SaveFormat::Project, true);
+                return;
+            }
+        }
+        self.open_dialog(DialogKind::Save(format));
+    }
+
+    /// Launch a native file dialog on a worker thread (so it can't freeze
+    /// the window), to be collected by [`poll_dialog`](Self::poll_dialog).
+    fn open_dialog(&mut self, kind: DialogKind) {
+        if self.busy() {
+            return; // one dialog / user save at a time
+        }
+        // Default a project Save-As to the open file's folder + name.
+        let (dir, name) = match (kind, &self.project_path) {
+            (DialogKind::Save(SaveFormat::Project), Some(p)) => (
+                p.parent().map(Path::to_path_buf),
+                p.file_name().map(|n| n.to_string_lossy().into_owned()),
+            ),
+            _ => (None, None),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        #[cfg(not(target_os = "macos"))]
+        std::thread::spawn(move || {
+            let _ = tx.send(run_dialog(kind, dir, name.as_deref()));
+        });
+        // `AppKit` panels must run on the main thread; native macOS apps stay
+        // responsive during their own modal, so the sync block is fine there.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = tx.send(run_dialog(kind, dir, name.as_deref()));
+        }
+        self.pending_dialog = Some(PendingDialog { rx, kind });
+    }
+
+    /// Collect a finished file dialog and act on the chosen path: load a
+    /// model (open) or kick off a background save.
+    fn poll_dialog(&mut self) {
+        let path = match self.pending_dialog.as_ref().map(|d| d.rx.try_recv()) {
+            None | Some(Err(TryRecvError::Empty)) => return, // none / still open
+            Some(Ok(p)) => p,
+            Some(Err(TryRecvError::Disconnected)) => None, // worker stopped
+        };
+        let kind = self.pending_dialog.take().expect("pending dialog").kind;
+        let Some(path) = path else {
+            return; // cancelled
+        };
+        match kind {
+            DialogKind::OpenKv6 => {
                 match std::fs::read(&path).map(|b| VoxelModel::from_kv6_bytes(&b)) {
                     Ok(Ok(m)) => {
                         self.load_model(m); // a .kv6 has no project path
@@ -1257,12 +1382,7 @@ impl App {
                     Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
                 }
             }
-        }
-        if a.open_project {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("demiurg", &["demiurg"])
-                .pick_file()
-            {
+            DialogKind::OpenProject => {
                 match std::fs::read(&path).map(|b| project::from_bytes(&b)) {
                     Ok(Ok(m)) => {
                         self.load_model(m);
@@ -1273,57 +1393,7 @@ impl App {
                     Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
                 }
             }
-        }
-        if a.save {
-            self.save_project();
-        }
-        if a.save_as {
-            self.save_dialog(SaveFormat::Project);
-        }
-        if a.export_kv6 {
-            self.save_dialog(SaveFormat::Kv6);
-        }
-        if a.export_vxl {
-            self.save_dialog(SaveFormat::Vxl);
-        }
-    }
-
-    /// `Ctrl+S` / Save: overwrite the open project file in the background
-    /// when its path is known, else fall back to a Save-As dialog.
-    fn save_project(&mut self) {
-        self.commit_float();
-        if let Some(path) = self.project_path.clone() {
-            self.start_save(path, SaveFormat::Project, true);
-        } else {
-            self.save_dialog(SaveFormat::Project);
-        }
-    }
-
-    /// Pick a destination for `format` via a native dialog, then save to it
-    /// in the background.
-    fn save_dialog(&mut self, format: SaveFormat) {
-        self.commit_float();
-        let (filter, ext, default) = match format {
-            SaveFormat::Project => ("demiurg", "demiurg", "model.demiurg"),
-            SaveFormat::Kv6 => ("kv6", "kv6", "model.kv6"),
-            SaveFormat::Vxl => ("vxl", "vxl", "model.vxl"),
-        };
-        let mut dialog = rfd::FileDialog::new()
-            .add_filter(filter, &[ext])
-            .set_file_name(default);
-        // Default a project Save-As to the current file's folder + name.
-        if format == SaveFormat::Project {
-            if let Some(p) = &self.project_path {
-                if let Some(dir) = p.parent() {
-                    dialog = dialog.set_directory(dir);
-                }
-                if let Some(name) = p.file_name() {
-                    dialog = dialog.set_file_name(name.to_string_lossy());
-                }
-            }
-        }
-        if let Some(path) = dialog.save_file() {
-            self.start_save(path, format, true);
+            DialogKind::Save(format) => self.start_save(path, format, true),
         }
     }
 
@@ -1352,6 +1422,12 @@ impl App {
     /// autosave runs silently and doesn't block.
     fn saving(&self) -> bool {
         self.pending_save.as_ref().is_some_and(|p| p.user)
+    }
+
+    /// Whether a modal operation (user save or open file dialog) is in
+    /// flight, during which editing input is ignored.
+    fn busy(&self) -> bool {
+        self.saving() || self.pending_dialog.is_some()
     }
 
     /// Collect a finished background save: mark the project saved / adopt
@@ -1387,7 +1463,12 @@ impl App {
             return;
         }
         self.next_autosave = Instant::now() + AUTOSAVE_INTERVAL;
-        if self.pending_save.is_some() || !self.editor.document.is_modified() {
+        // Skip while a save is in flight (start_save would drop it) or a
+        // dialog is open (its result may be a save we mustn't pre-empt).
+        if self.pending_save.is_some()
+            || self.pending_dialog.is_some()
+            || !self.editor.document.is_modified()
+        {
             return;
         }
         let path = self.autosave_path.clone();
@@ -1447,8 +1528,10 @@ impl App {
         if actions.quit_cancel {
             self.confirm_quit = false;
         }
-        // Background-save bookkeeping: collect any finished save and write a
-        // periodic autosave so a crash leaves something to recover.
+        // Off-loop I/O bookkeeping: collect a finished file dialog and any
+        // finished save, then write a periodic autosave so a crash leaves
+        // something to recover.
+        self.poll_dialog();
         self.poll_save();
         self.maybe_autosave();
         // A tool switch (keyboard or a panel click) away from a floating
@@ -1521,8 +1604,8 @@ impl App {
     fn on_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, pressed: bool) {
         let ctrl = self.modifiers.control_key();
         let shift = self.modifiers.shift_key();
-        if self.saving() {
-            return; // keys are blocked behind the saving modal
+        if self.busy() {
+            return; // keys are blocked behind the saving / dialog modal
         }
         match code {
             KeyCode::Digit1 if pressed => self.editor.tool = Tool::Place,
