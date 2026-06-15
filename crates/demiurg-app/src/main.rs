@@ -8,13 +8,16 @@
 //! Controls: left mouse applies the active tool (hold to drag-paint);
 //! `Ctrl`+click eyedrops a colour; right-mouse drag orbits; wheel and
 //! `W`/`S` zoom; arrow keys orbit. Hotkeys: `1`-`8` pick a tool (`8` is
-//! Select), `Ctrl+Z` undo, `Ctrl+Y` / `Ctrl+Shift+Z` redo, `Ctrl+C` /
-//! `Ctrl+V` copy / paste the selection, `Delete` removes it, `Esc` quits.
-//! `DEMIURG_LANG=ru` starts in Russian. The GPU backend is used by
-//! default; `ROXLAP_GPU=0` forces the CPU renderer.
+//! Select), `Ctrl+Z` undo, `Ctrl+Y` / `Ctrl+Shift+Z` redo, `Ctrl+C`
+//! copies the selection and `Ctrl+V` pastes it as a floating layer at its
+//! original position (settled into the model on deselect), `Delete`
+//! removes the selection, `Esc` deselects (settling any pasted layer) or
+//! else quits. `DEMIURG_LANG=ru` starts in Russian. The GPU backend is
+//! used by default; `ROXLAP_GPU=0` forces the CPU renderer.
 
 mod ui;
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::process::exit;
 use std::sync::Arc;
@@ -83,6 +86,25 @@ struct Marquee {
     mode: SelMode,
 }
 
+/// A floating layer: voxels lifted above the model (created by paste),
+/// rendered on top but **not** part of the document until committed — so
+/// they can sit on, or later be dragged over, other voxels without
+/// overwriting them. Cells are absolute voxel coordinates (`i32`, so a
+/// drag can carry them out of bounds and back) plus colour. Committing
+/// writes the in-bounds cells into the model as one undo step.
+struct FloatLayer {
+    cells: Vec<([i32; 3], u32)>,
+}
+
+/// The in-bounds cells of a float layer as a selection set (for the
+/// highlight while it floats).
+fn float_selection(cells: &[([i32; 3], u32)], dims: (u32, u32, u32)) -> HashSet<[u32; 3]> {
+    cells
+        .iter()
+        .filter_map(|(p, _)| in_bounds(*p, dims))
+        .collect()
+}
+
 /// The selection mode implied by the held modifiers (Ctrl is reserved for
 /// the eyedropper, so it doesn't appear here).
 fn sel_mode(m: ModifiersState) -> SelMode {
@@ -134,11 +156,38 @@ struct Editor {
     /// The currently selected voxel cells (Select tool). Operated on by
     /// delete / copy / paste; pruned to bounds after structural edits.
     selection: HashSet<[u32; 3]>,
-    /// Copied voxels, stored relative to the selection's min corner so a
-    /// paste can be re-anchored anywhere: `(offset, colour)`.
+    /// Copied voxels at their **absolute** source positions, so a paste
+    /// lands where they came from: `(position, colour)`.
     clipboard: Vec<([i32; 3], u32)>,
+    /// The pasted voxels currently floating above the model, if any (see
+    /// [`FloatLayer`]); committed into the model on deselect.
+    float: Option<FloatLayer>,
     /// The viewport scene needs a rebuild from the model.
     dirty: bool,
+}
+
+impl Editor {
+    /// The model as the viewport should show it: the document model with
+    /// the floating layer (if any) composited on top. Borrows the document
+    /// model when nothing floats (the common case); clones and overlays
+    /// only while a float is active.
+    #[allow(clippy::cast_sign_loss)] // negative float cells are filtered out first
+    fn display_model(&self) -> Cow<'_, VoxelModel> {
+        let Some(layer) = &self.float else {
+            return Cow::Borrowed(self.document.model());
+        };
+        let mut composite = self.document.model().clone();
+        let (dx, dy, dz) = composite.dims();
+        for &(pos, col) in &layer.cells {
+            if pos[0] >= 0 && pos[1] >= 0 && pos[2] >= 0 {
+                let (px, py, pz) = (pos[0] as u32, pos[1] as u32, pos[2] as u32);
+                if px < dx && py < dy && pz < dz {
+                    composite.set(px, py, pz, col);
+                }
+            }
+        }
+        Cow::Owned(composite)
+    }
 }
 
 impl Editor {
@@ -163,6 +212,7 @@ impl Editor {
             resize_dims: [dx, dy, dz],
             selection: HashSet::new(),
             clipboard: Vec::new(),
+            float: None,
             dirty: false,
         }
     }
@@ -263,6 +313,7 @@ fn main() {
         last_title: None,
         confirm_quit: false,
         marquee: None,
+        last_tool: Tool::Place,
         next_frame: Instant::now(),
     };
 
@@ -367,6 +418,9 @@ struct App {
     confirm_quit: bool,
     /// An in-progress selection marquee drag (Select tool), else `None`.
     marquee: Option<Marquee>,
+    /// The active tool last frame, to detect a tool switch (keyboard or
+    /// UI) and settle a floating layer when the user leaves Select.
+    last_tool: Tool,
     /// When the next frame should render (drives the ~60 fps cap).
     next_frame: Instant,
 }
@@ -447,8 +501,10 @@ impl App {
             self.pick_color_under_cursor();
             return;
         }
-        // The Select tool drags a marquee instead of editing voxels.
+        // The Select tool drags a marquee instead of editing voxels. A
+        // new gesture first settles any floating (pasted) layer.
         if self.editor.tool == Tool::Select {
+            self.commit_float();
             self.marquee = Some(Marquee {
                 start: self.cursor,
                 mode: sel_mode(self.modifiers),
@@ -558,9 +614,15 @@ impl App {
         }
     }
 
-    /// Delete the selected voxels as one undo step, then clear the
-    /// selection (the cells are gone).
+    /// Delete the selection. A floating (pasted) layer is just discarded
+    /// — it was never in the model. Otherwise the selected model voxels
+    /// are cleared as one undo step.
     fn delete_selection(&mut self) {
+        if self.editor.float.take().is_some() {
+            self.editor.selection.clear();
+            self.editor.dirty = true;
+            return;
+        }
         if self.editor.selection.is_empty() {
             return;
         }
@@ -571,66 +633,67 @@ impl App {
         self.editor.selection.clear();
     }
 
-    /// Copy the occupied selected voxels to the clipboard, stored relative
-    /// to the selection's min corner so paste can be re-anchored.
+    /// Copy the occupied selected voxels to the clipboard at their
+    /// absolute positions, so a paste lands back where they came from.
+    /// Settles any floating layer first, so the copy reads real voxels.
     #[allow(clippy::cast_possible_wrap)] // voxel coords are far below i32::MAX
     fn copy_selection(&mut self) {
+        self.commit_float();
         let model = self.editor.document.model();
-        let occ: Vec<([u32; 3], u32)> = self
+        let occ: Vec<([i32; 3], u32)> = self
             .editor
             .selection
             .iter()
             .filter_map(|&c| {
                 let col = model.get(c[0], c[1], c[2]);
-                (col != 0).then_some((c, col))
+                (col != 0).then_some(([c[0] as i32, c[1] as i32, c[2] as i32], col))
             })
             .collect();
-        if occ.is_empty() {
-            return;
+        if !occ.is_empty() {
+            self.editor.clipboard = occ;
         }
-        let min = occ.iter().fold([u32::MAX; 3], |m, (c, _)| {
-            [m[0].min(c[0]), m[1].min(c[1]), m[2].min(c[2])]
-        });
-        self.editor.clipboard = occ
-            .into_iter()
-            .map(|(c, col)| {
-                (
-                    [
-                        (c[0] - min[0]) as i32,
-                        (c[1] - min[1]) as i32,
-                        (c[2] - min[2]) as i32,
-                    ],
-                    col,
-                )
-            })
-            .collect();
     }
 
-    /// Paste the clipboard with its min corner at the cell under the
-    /// cursor (or the origin), as one undo step; the pasted voxels become
-    /// the new selection.
+    /// Paste the clipboard as a **floating layer** at its original
+    /// positions (see [`FloatLayer`]): the voxels overlay the model but
+    /// aren't written until the layer is deselected, so they can be moved
+    /// without clobbering anything. Any existing float is settled first.
     fn paste_clipboard(&mut self) {
         if self.editor.clipboard.is_empty() {
             return;
         }
-        let anchor = self.hover_cell().unwrap_or([0, 0, 0]);
-        let dims = self.editor.document.dims();
-        let mut cells = Vec::new();
-        let mut pasted = HashSet::new();
-        for (rel, col) in &self.editor.clipboard {
-            let p = [anchor[0] + rel[0], anchor[1] + rel[1], anchor[2] + rel[2]];
-            if let Some(v) = in_bounds(p, dims) {
-                cells.push((v, *col));
-                pasted.insert(v);
-            }
-        }
-        if cells.is_empty() {
+        self.commit_float();
+        let cells = self.editor.clipboard.clone();
+        self.editor.selection = float_selection(&cells, self.editor.document.dims());
+        self.editor.float = Some(FloatLayer { cells });
+        self.editor.dirty = true; // rebuild the composite with the layer
+    }
+
+    /// Bake the floating layer into the model (its in-bounds cells, one
+    /// undo step) and drop it. No-op when nothing floats.
+    fn commit_float(&mut self) {
+        let Some(f) = self.editor.float.take() else {
             return;
+        };
+        // The composite changes either way (the layer is baked in or, if
+        // fully out of bounds, simply removed), so a rebuild is due.
+        self.editor.dirty = true;
+        let dims = self.editor.document.dims();
+        let cells: Vec<([u32; 3], u32)> = f
+            .cells
+            .iter()
+            .filter_map(|(p, col)| in_bounds(*p, dims).map(|v| (v, *col)))
+            .collect();
+        if !cells.is_empty() {
+            self.editor.document.set_cells(cells);
         }
-        if self.editor.document.set_cells(cells) {
-            self.editor.dirty = true;
-        }
-        self.editor.selection = pasted;
+    }
+
+    /// Deselect: settle any floating layer into the model and clear the
+    /// selection highlight.
+    fn deselect(&mut self) {
+        self.commit_float();
+        self.editor.selection.clear();
     }
 
     /// Drop selection cells that fell out of bounds (e.g. after a resize
@@ -665,8 +728,10 @@ impl App {
     }
 
     /// Quit, or — if there are unsaved changes — raise the in-app
-    /// confirmation modal (shown by the UI next frame).
+    /// confirmation modal (shown by the UI next frame). A floating layer
+    /// is settled first, so it counts as unsaved work.
     fn request_exit(&mut self, event_loop: &ActiveEventLoop) {
+        self.commit_float();
         if self.editor.document.is_modified() {
             self.confirm_quit = true;
         } else {
@@ -735,6 +800,11 @@ impl App {
         }
         if a.paste_sel {
             self.paste_clipboard();
+        }
+        // Saving serializes the document model, so bake a floating layer
+        // in first or it would be silently left out of the file.
+        if a.save_kv6 || a.save_vxl || a.save_project {
+            self.commit_float();
         }
         if a.new_model {
             self.load_model(new_model());
@@ -824,6 +894,7 @@ impl App {
         self.editor.refresh_palette();
         self.editor.sync_resize_dims();
         self.editor.selection.clear();
+        self.editor.float = None; // a loaded model starts with no float
         self.camera = self.view.framing_camera();
         self.editor.dirty = false;
     }
@@ -853,9 +924,20 @@ impl App {
         if actions.quit_cancel {
             self.confirm_quit = false;
         }
+        // A tool switch (keyboard or a panel click) away from a floating
+        // layer settles it into the model.
+        if self.editor.tool != self.last_tool {
+            self.commit_float();
+            self.last_tool = self.editor.tool;
+        }
         if self.editor.dirty {
-            self.view
-                .set_model(self.editor.document.model(), self.editor.render_mode);
+            // Render the document with the floating layer composited on
+            // top (a borrow when nothing floats, a clone while it does).
+            let mode = self.editor.render_mode;
+            {
+                let display = self.editor.display_model();
+                self.view.set_model(&display, mode);
+            }
             self.editor.refresh_palette();
             self.prune_selection();
             self.editor.dirty = false;
@@ -936,6 +1018,8 @@ impl App {
             KeyCode::Escape if pressed => {
                 if self.confirm_quit {
                     self.confirm_quit = false; // Esc dismisses the modal
+                } else if self.editor.float.is_some() || !self.editor.selection.is_empty() {
+                    self.deselect(); // Esc first settles a float / clears selection
                 } else {
                     self.request_exit(event_loop);
                 }
@@ -1082,5 +1166,38 @@ impl ApplicationHandler for App {
             }
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn float_selection_keeps_only_in_bounds_cells() {
+        let cells = vec![
+            ([0, 0, 0], 0x80ff_0000),
+            ([5, 5, 5], 0x8000_ff00),  // out of a 4^3 model
+            ([-1, 0, 0], 0x8000_00ff), // negative
+        ];
+        let sel = float_selection(&cells, (4, 4, 4));
+        assert_eq!(sel.len(), 1, "only the in-bounds cell is selectable");
+        assert!(sel.contains(&[0, 0, 0]));
+    }
+
+    #[test]
+    fn display_model_overlays_the_float_but_leaves_the_document_clean() {
+        let mut ed = Editor::new(VoxelModel::new(4, 4, 4));
+        ed.float = Some(FloatLayer {
+            cells: vec![([1, 1, 1], 0x80ff_0000), ([9, 9, 9], 0x8000_ff00)],
+        });
+        let disp = ed.display_model();
+        assert_eq!(disp.get(1, 1, 1), 0x80ff_0000, "in-bounds float shows");
+        assert_eq!(disp.get(9, 9, 9), 0, "out-of-bounds float cell is skipped");
+        assert_eq!(
+            ed.document.model().get(1, 1, 1),
+            0,
+            "the document model is not mutated by display"
+        );
     }
 }
