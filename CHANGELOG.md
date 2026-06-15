@@ -7,6 +7,12 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- The menu bar shows a build stamp — `demiurg <version> · <commit>` — so you
+  can tell which version and git commit a binary was built from (selectable to
+  copy into a bug report). Source-tarball builds with no git show `unknown`.
+
 ## [0.4.0] - 2026-06-16
 
 Reference images: trace voxels over loaded pixel art, drawn in the viewport as a

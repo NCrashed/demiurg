@@ -14,6 +14,15 @@ use roxlap_render::egui;
 use crate::reference::RefAxis;
 use crate::{Editor, Tool};
 
+/// Build stamp shown at the foot of the tool panel: the crate version and
+/// the git commit it was built from (stamped by `build.rs`).
+const BUILD_INFO: &str = concat!(
+    "demiurg ",
+    env!("CARGO_PKG_VERSION"),
+    " · ",
+    env!("DEMIURG_GIT_COMMIT"),
+);
+
 /// The viewport axis colour (X red, Y green, Z blue) as an egui colour,
 /// so panel axis labels match the gizmo.
 #[allow(clippy::cast_possible_truncation)] // channels masked to 0..=255
@@ -186,6 +195,15 @@ pub fn build(
                 for l in Lang::all() {
                     ui.selectable_value(&mut editor.lang, l, l.native_name());
                 }
+            });
+            // Build stamp at the far right: version + the git commit this
+            // binary was built from (selectable so it copies into a bug
+            // report). See BUILD_INFO / build.rs.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(BUILD_INFO).small().weak())
+                        .selectable(true),
+                );
             });
         });
     });
