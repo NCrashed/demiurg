@@ -8,7 +8,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/NCrashed/demiurg"
@@ -25,9 +25,9 @@ categories = ["game-development", "graphics"]
 [workspace.dependencies]
 # Internal crates, by path during local dev (the version is what a
 # crates.io publish pins, so it tracks workspace.package.version).
-demiurg-core = { path = "crates/demiurg-core", version = "0.3.0" }
-demiurg-i18n = { path = "crates/demiurg-i18n", version = "0.3.0" }
-demiurg-view = { path = "crates/demiurg-view", version = "0.3.0" }
+demiurg-core = { path = "crates/demiurg-core", version = "0.4.0" }
+demiurg-i18n = { path = "crates/demiurg-i18n", version = "0.4.0" }
+demiurg-view = { path = "crates/demiurg-view", version = "0.4.0" }
 
 # demiurg depends on roxlap ONLY (see DESIGN.md §1). Pinned to the
 # PUBLISHED crates.io 0.12.0, which carries the features demiurg needs:

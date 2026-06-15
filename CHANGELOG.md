@@ -7,6 +7,11 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-16
+
+Reference images: trace voxels over loaded pixel art, drawn in the viewport as a
+flat, depth-tested guide on roxlap 0.12's world-placed image sprites.
+
 ### Added
 
 - Reference images: load pixel art (PNG / BMP / JPG / GIF / TGA / WEBP) as a
@@ -123,7 +128,8 @@ paint is what the game shows.
 - The browser/WASM build (M3), `.kfa` animation (M4), and voxel-video (M5) are
   designed but not yet implemented — see DESIGN.md §9.
 
-[Unreleased]: https://github.com/NCrashed/demiurg/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/NCrashed/demiurg/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/NCrashed/demiurg/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/NCrashed/demiurg/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/NCrashed/demiurg/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/NCrashed/demiurg/releases/tag/v0.1.0

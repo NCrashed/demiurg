@@ -89,7 +89,7 @@ demiurg-app     native binary (winit + egui over the roxlap framebuffer)
 ## Dependencies
 
 roxlap only — `roxlap-formats`, `roxlap-render`, `roxlap-scene`, `roxlap-core`
-(crates.io 0.9.0). No monada dependency. See [DESIGN.md](./DESIGN.md) for the
+(crates.io 0.12.0). No monada dependency. See [DESIGN.md](./DESIGN.md) for the
 architecture and roadmap.
 
 ## License
