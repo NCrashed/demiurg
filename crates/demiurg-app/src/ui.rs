@@ -233,104 +233,30 @@ pub fn build(
             // Scroll the tool panel: with all sections it can exceed a
             // short window's height.
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading(t(Msg::Tools));
-                // The 1-8 digits double as keyboard shortcuts (see on_key);
-                // show them on the buttons so they're discoverable.
-                for (i, (tool, msg)) in [
-                    (Tool::Place, Msg::Place),
-                    (Tool::Erase, Msg::Erase),
-                    (Tool::Paint, Msg::Paint),
-                    (Tool::Eyedropper, Msg::Eyedropper),
-                    (Tool::Box, Msg::BoxTool),
-                    (Tool::Sphere, Msg::Sphere),
-                    (Tool::Fill, Msg::FloodFill),
-                    (Tool::Select, Msg::Select),
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    ui.selectable_value(&mut editor.tool, tool, format!("{}.  {}", i + 1, t(msg)));
+                // Panels are scoped to the editing context so each mode
+                // shows only what applies (a rig in Animate mode hides the
+                // voxel tools, a plain model hides the rig controls):
+                //   Model           — voxel tools only
+                //   Rig ▸ Sculpt    — rig header + voxel tools (edit a bone)
+                //   Rig ▸ Animate   — rig header + animation (read-only)
+                let animate = editor.rig.is_some() && editor.rig_animate;
+                if editor.rig.is_some() {
+                    rig_panel(ui, editor, actions, &t);
                 }
-                if editor.tool == Tool::Sphere {
-                    ui.add(egui::Slider::new(&mut editor.radius, 0..=8).text(t(Msg::Radius)));
+                if animate {
+                    animate_panel(ui, editor, &t);
+                } else {
+                    voxel_tools_panel(ui, editor, actions, &t);
                 }
-
-                ui.separator();
-                ui.label(t(Msg::Colour));
-                let mut rgb = color_to_rgb(editor.color);
-                if ui.color_edit_button_srgb(&mut rgb).changed() {
-                    editor.color = rgb_to_color(rgb);
-                }
-                ui.horizontal_wrapped(|ui| {
-                    for &preset in &PRESETS {
-                        if swatch(ui, preset).clicked() {
-                            editor.color = preset;
-                        }
-                    }
-                });
-
-                // Colours already used in the model, so artists can re-pick an
-                // exact existing shade. Cloned out first to avoid borrowing
-                // `editor` immutably while the closure writes `editor.color`.
-                if !editor.model_palette.is_empty() {
-                    ui.separator();
-                    ui.label(t(Msg::ModelColours));
-                    let used = editor.model_palette.clone();
-                    ui.horizontal_wrapped(|ui| {
-                        for c in used {
-                            if swatch(ui, c).clicked() {
-                                editor.color = c;
-                            }
-                        }
-                    });
-                }
-
-                ui.separator();
-                ui.label(t(Msg::Mirror));
-                ui.horizontal(|ui| {
-                    for (axis, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
-                        ui.checkbox(
-                            &mut editor.document.mirror[axis],
-                            egui::RichText::new(name).color(axis_color(axis)),
-                        );
-                    }
-                });
-
-                ui.separator();
-                ui.label(t(Msg::Pivot));
-                let mut pivot = editor.document.pivot();
-                let mut changed = false;
-                ui.horizontal(|ui| {
-                    for (axis, name) in [(0, "x"), (1, "y"), (2, "z")] {
-                        ui.colored_label(axis_color(axis), name);
-                        changed |= ui
-                            .add(egui::DragValue::new(&mut pivot[axis]).speed(0.5))
-                            .changed();
-                    }
-                });
-                if changed {
-                    editor.document.set_pivot(pivot);
-                    editor.dirty = true;
-                }
-                if ui.button(t(Msg::CenterPivot)).clicked() {
-                    let (dx, dy, dz) = editor.document.dims();
-                    editor
-                        .document
-                        .set_pivot([dx as f32 * 0.5, dy as f32 * 0.5, dz as f32 * 0.5]);
-                    editor.dirty = true;
-                }
-
-                bones_panel(ui, editor, actions, &t);
-                size_panel(ui, editor, &t);
-                selection_panel(ui, editor, actions, &t);
-                reference_panel(ui, editor, actions, &t);
                 views_panel(ui, actions, &t);
 
                 ui.separator();
-                if editor.tool == Tool::Select {
-                    ui.small(t(Msg::HelpSelect));
-                } else {
-                    ui.small(t(Msg::HelpApply));
+                if !animate {
+                    if editor.tool == Tool::Select {
+                        ui.small(t(Msg::HelpSelect));
+                    } else {
+                        ui.small(t(Msg::HelpApply));
+                    }
                 }
                 ui.small(t(Msg::HelpOrbit));
             });
@@ -483,13 +409,10 @@ fn selection_panel(
     });
 }
 
-/// The Reference section: load a pixel-art guide and place it. When one is
-/// loaded, shows its name/size and controls for the plane (Front/Side/Top),
-/// depth offset, horizontal/vertical flips, visibility, and removal. Edits
-/// The Bones section (rig mode only): pick which bone the tools edit.
-/// Selecting a bone is deferred to the host (it swaps the working model),
-/// so the click records `actions.select_bone`.
-fn bones_panel(
+/// The Rig section (rig mode): the character name, the Sculpt / Animate
+/// sub-mode tabs, and the bone list. Switching mode or bone is deferred to
+/// the host, which swaps the scene / working model.
+fn rig_panel(
     ui: &mut egui::Ui,
     editor: &Editor,
     actions: &mut UiActions,
@@ -498,14 +421,32 @@ fn bones_panel(
     let Some(rig) = &editor.rig else {
         return;
     };
+    let heading = if rig.name.is_empty() {
+        t(Msg::Rig).to_string()
+    } else {
+        rig.name.clone()
+    };
+    ui.heading(heading);
+    // Sculpt (edit a bone) vs Animate (posed preview): clicking the inactive
+    // tab toggles the mode (the host does the scene / camera swap).
+    ui.horizontal(|ui| {
+        if ui
+            .selectable_label(!editor.rig_animate, t(Msg::Sculpt))
+            .clicked()
+            && editor.rig_animate
+        {
+            actions.toggle_animate = true;
+        }
+        if ui
+            .selectable_label(editor.rig_animate, t(Msg::Animate))
+            .clicked()
+            && !editor.rig_animate
+        {
+            actions.toggle_animate = true;
+        }
+    });
     ui.separator();
     ui.label(t(Msg::Bones));
-    // Edit (per-bone mesh) vs Animate (posed preview) — emit an action; the
-    // host does the side effects (swap the scene / camera).
-    let mut animate = editor.rig_animate;
-    if ui.checkbox(&mut animate, t(Msg::Animate)).changed() {
-        actions.toggle_animate = true;
-    }
     for (i, bone) in rig.bones.iter().enumerate() {
         let label = if bone.name.is_empty() {
             format!("{i}")
@@ -521,6 +462,128 @@ fn bones_panel(
     }
 }
 
+/// The Animation section (Rig ▸ Animate): the rig's clips. Read-only for
+/// now — playback runs automatically; a scrubbing timeline comes later.
+fn animate_panel(ui: &mut egui::Ui, editor: &Editor, t: &impl Fn(Msg) -> &'static str) {
+    let Some(rig) = &editor.rig else {
+        return;
+    };
+    ui.separator();
+    ui.label(t(Msg::Clips));
+    if rig.clips.is_empty() {
+        ui.small("—");
+    } else {
+        for clip in &rig.clips {
+            ui.small(clip.name.as_str());
+        }
+    }
+}
+
+/// The voxel-editing tools — shown in plain Model mode and in Rig ▸ Sculpt
+/// (editing the active bone's mesh): tool picker, paint colour, symmetry,
+/// pivot, model size, selection, and the reference-image guide.
+#[allow(clippy::cast_precision_loss)] // pivot is centred from small voxel dims
+fn voxel_tools_panel(
+    ui: &mut egui::Ui,
+    editor: &mut Editor,
+    actions: &mut UiActions,
+    t: &impl Fn(Msg) -> &'static str,
+) {
+    ui.heading(t(Msg::Tools));
+    // The 1-8 digits double as keyboard shortcuts (see on_key); show them on
+    // the buttons so they're discoverable.
+    for (i, (tool, msg)) in [
+        (Tool::Place, Msg::Place),
+        (Tool::Erase, Msg::Erase),
+        (Tool::Paint, Msg::Paint),
+        (Tool::Eyedropper, Msg::Eyedropper),
+        (Tool::Box, Msg::BoxTool),
+        (Tool::Sphere, Msg::Sphere),
+        (Tool::Fill, Msg::FloodFill),
+        (Tool::Select, Msg::Select),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        ui.selectable_value(&mut editor.tool, tool, format!("{}.  {}", i + 1, t(msg)));
+    }
+    if editor.tool == Tool::Sphere {
+        ui.add(egui::Slider::new(&mut editor.radius, 0..=8).text(t(Msg::Radius)));
+    }
+
+    ui.separator();
+    ui.label(t(Msg::Colour));
+    let mut rgb = color_to_rgb(editor.color);
+    if ui.color_edit_button_srgb(&mut rgb).changed() {
+        editor.color = rgb_to_color(rgb);
+    }
+    ui.horizontal_wrapped(|ui| {
+        for &preset in &PRESETS {
+            if swatch(ui, preset).clicked() {
+                editor.color = preset;
+            }
+        }
+    });
+
+    // Colours already used in the model, so artists can re-pick an exact
+    // existing shade. Cloned out first to avoid borrowing `editor` immutably
+    // while the closure writes `editor.color`.
+    if !editor.model_palette.is_empty() {
+        ui.separator();
+        ui.label(t(Msg::ModelColours));
+        let used = editor.model_palette.clone();
+        ui.horizontal_wrapped(|ui| {
+            for c in used {
+                if swatch(ui, c).clicked() {
+                    editor.color = c;
+                }
+            }
+        });
+    }
+
+    ui.separator();
+    ui.label(t(Msg::Mirror));
+    ui.horizontal(|ui| {
+        for (axis, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
+            ui.checkbox(
+                &mut editor.document.mirror[axis],
+                egui::RichText::new(name).color(axis_color(axis)),
+            );
+        }
+    });
+
+    ui.separator();
+    ui.label(t(Msg::Pivot));
+    let mut pivot = editor.document.pivot();
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        for (axis, name) in [(0, "x"), (1, "y"), (2, "z")] {
+            ui.colored_label(axis_color(axis), name);
+            changed |= ui
+                .add(egui::DragValue::new(&mut pivot[axis]).speed(0.5))
+                .changed();
+        }
+    });
+    if changed {
+        editor.document.set_pivot(pivot);
+        editor.dirty = true;
+    }
+    if ui.button(t(Msg::CenterPivot)).clicked() {
+        let (dx, dy, dz) = editor.document.dims();
+        editor
+            .document
+            .set_pivot([dx as f32 * 0.5, dy as f32 * 0.5, dz as f32 * 0.5]);
+        editor.dirty = true;
+    }
+
+    size_panel(ui, editor, t);
+    selection_panel(ui, editor, actions, t);
+    reference_panel(ui, editor, actions, t);
+}
+
+/// The Reference section: load a pixel-art guide and place it. When one is
+/// loaded, shows its name/size and controls for the plane (Front/Side/Top),
+/// depth offset, horizontal/vertical flips, visibility, and removal. Edits
 /// mutate the reference directly and flag it for a viewport refresh.
 fn reference_panel(
     ui: &mut egui::Ui,
