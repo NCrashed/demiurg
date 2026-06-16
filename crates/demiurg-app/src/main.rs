@@ -42,7 +42,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use demiurg_core::{Document, VoxelModel, project};
+use demiurg_core::{Document, Rig, VoxelModel, project};
 use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{
     KfaView, Line3, ModelView, OrbitCamera, PickHit, RenderMode, ViewDir, pick_voxel,
@@ -93,6 +93,9 @@ enum SaveFormat {
     Kv6,
     Vxl,
     Vox,
+    /// A rigged character (`.rkc`). Encoded from the rig, not a model —
+    /// handled directly in [`App::start_save`].
+    Rkc,
 }
 
 impl SaveFormat {
@@ -103,6 +106,7 @@ impl SaveFormat {
             SaveFormat::Kv6 => model.to_kv6_bytes(),
             SaveFormat::Vxl => model.to_vxl_bytes(),
             SaveFormat::Vox => model.to_vox_bytes(),
+            SaveFormat::Rkc => unreachable!("rkc is encoded from the rig in start_save"),
         }
     }
 
@@ -113,6 +117,7 @@ impl SaveFormat {
             SaveFormat::Kv6 => ("kv6", "kv6", "model.kv6"),
             SaveFormat::Vxl => ("vxl", "vxl", "model.vxl"),
             SaveFormat::Vox => ("vox", "vox", "model.vox"),
+            SaveFormat::Rkc => ("character", "rkc", "character.rkc"),
         }
     }
 }
@@ -429,6 +434,13 @@ struct Editor {
     /// texture must be re-uploaded. Placement changes don't set this — they
     /// only move the quad, which is rebuilt every frame.
     ref_image_dirty: bool,
+    /// When editing a rigged character: the rig being edited. `document`
+    /// holds the working copy of [`active_bone`]'s mesh; the other bones
+    /// keep their last-committed mesh here. `None` = plain model editing.
+    rig: Option<Rig>,
+    /// The bone whose mesh `document` currently edits (index into
+    /// `rig.bones`). Meaningless when `rig` is `None`.
+    active_bone: usize,
     /// The viewport scene needs a rebuild from the model.
     dirty: bool,
 }
@@ -489,6 +501,8 @@ impl Editor {
             reference: None,
             ref_move_mode: false,
             ref_image_dirty: false,
+            rig: None,
+            active_bone: 0,
             dirty: false,
         }
     }
@@ -591,16 +605,42 @@ fn main() {
     let arg = args.into_iter().find(|a| !a.starts_with('-'));
     let autosave = autosave_path();
 
-    // An `.rkc` argument opens a KFA rig (no editable document model yet);
-    // a `.demiurg` is an editable project (its path drives Ctrl+S); a
-    // `.kv6` / `.vox` opens as a fresh model. With no argument, recover an
+    // An `.rkc` argument (or DEMIURG_KFA) opens a rigged character for
+    // editing; a `.demiurg` is an editable project (its path drives Ctrl+S);
+    // a `.kv6` / `.vox` opens as a fresh model. With no argument, recover an
     // autosave if one survived a previous crash.
     let rkc_arg = arg
         .as_deref()
         .filter(|p| p.to_ascii_lowercase().ends_with(".rkc"))
         .map(str::to_string);
-    let (model, project_path, doc_name, recovered) = if let Some(p) = &rkc_arg {
-        (new_model(), None, stem_of(Path::new(p)), false)
+    let startup_rig: Option<Rig> = if let Some(p) = &rkc_arg {
+        match std::fs::read(p).map(|b| Rig::from_rkc_bytes(&b)) {
+            Ok(Ok(rig)) if !rig.bones.is_empty() => Some(rig),
+            Ok(Ok(_)) => {
+                eprintln!("demiurg: {p}: character has no bones");
+                None
+            }
+            Ok(Err(e)) => {
+                eprintln!("demiurg: {p}: {e}");
+                None
+            }
+            Err(e) => {
+                eprintln!("demiurg: read {p}: {e}");
+                None
+            }
+        }
+    } else if std::env::var_os("DEMIURG_KFA").is_some() {
+        Some(demiurg_view::demo_rig())
+    } else {
+        None
+    };
+
+    let (model, project_path, doc_name, recovered) = if let Some(rig) = &startup_rig {
+        // Rig mode starts editing the first bone's mesh.
+        let name = rkc_arg.as_deref().and_then(|p| stem_of(Path::new(p)));
+        (rig.bones[0].model.clone(), None, name, false)
+    } else if rkc_arg.is_some() {
+        (new_model(), None, None, false) // .rkc given but failed to load
     } else if let Some(p) = &arg {
         let proj = p.ends_with(".demiurg").then(|| PathBuf::from(p));
         (load_any(p), proj, stem_of(Path::new(p)), false)
@@ -615,33 +655,10 @@ fn main() {
         (new_model(), None, None, false)
     };
 
-    // The KFA rig preview: a loaded `.rkc`, or a synthetic demo rig when
-    // DEMIURG_KFA is set (until rig authoring exists).
-    let kfa = if let Some(p) = &rkc_arg {
-        match std::fs::read(p) {
-            Ok(bytes) => KfaView::load(&bytes).map_or_else(
-                |e| {
-                    eprintln!("demiurg: {p}: {e}");
-                    None
-                },
-                Some,
-            ),
-            Err(e) => {
-                eprintln!("demiurg: read {p}: {e}");
-                None
-            }
-        }
-    } else if std::env::var_os("DEMIURG_KFA").is_some() {
-        Some(KfaView::from_rig(demiurg_view::demo_rig(), Some(0)))
-    } else {
-        None
-    };
-
     let view = ModelView::new(&model, DEFAULT_RENDER_MODE);
-    let camera = kfa
-        .as_ref()
-        .map_or_else(|| view.framing_camera(), KfaView::framing_camera);
+    let camera = view.framing_camera();
     let mut editor = Editor::new(model);
+    editor.rig = startup_rig; // edits the active bone (0); None = plain model
     if recovered {
         editor.document.mark_unsaved(); // recovered work has no save point yet
     }
@@ -677,7 +694,10 @@ fn main() {
         force_cpu,
         force_gpu,
         ref_image: None,
-        kfa,
+        // The posed-rig preview (KfaView) is dormant in this slice — rig
+        // editing renders the active bone as a plain model. A later Edit /
+        // Animate toggle revives it.
+        kfa: None,
         next_frame: Instant::now(),
     };
 
@@ -1608,6 +1628,12 @@ impl App {
         if a.export_vox {
             self.save_to(SaveFormat::Vox, true);
         }
+        if a.export_rkc {
+            self.save_to(SaveFormat::Rkc, true);
+        }
+        if let Some(i) = a.select_bone {
+            self.select_bone(i);
+        }
     }
 
     /// `Ctrl+S` / Save: settle a float, then overwrite the known project
@@ -1715,12 +1741,24 @@ impl App {
         if self.pending_save.is_some() {
             return;
         }
-        let model = self.editor.document.model().clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let job_path = path.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(std::fs::write(&job_path, format.encode(&model)));
-        });
+        if format == SaveFormat::Rkc {
+            // Snapshot the rig (with the active bone's pending edits folded
+            // in) and serialize off the event loop.
+            self.commit_active_bone();
+            let Some(rig) = self.editor.rig.clone() else {
+                return; // not in rig mode
+            };
+            std::thread::spawn(move || {
+                let _ = tx.send(std::fs::write(&job_path, rig.to_rkc_bytes()));
+            });
+        } else {
+            let model = self.editor.document.model().clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(std::fs::write(&job_path, format.encode(&model)));
+            });
+        }
         self.pending_save = Some(PendingSave {
             rx,
             path,
@@ -1809,14 +1847,16 @@ impl App {
         }
     }
 
-    /// Read a `.rkc` rigged-character file and show it as the KFA preview,
-    /// framing the camera on it.
+    /// Read a `.rkc` rigged-character file and open it for editing (rig
+    /// mode), starting on the first bone.
     fn load_character(&mut self, path: &Path) {
         match std::fs::read(path) {
-            Ok(bytes) => match KfaView::load(&bytes) {
-                Ok(view) => {
-                    self.camera = view.framing_camera();
-                    self.kfa = Some(view);
+            Ok(bytes) => match Rig::from_rkc_bytes(&bytes) {
+                Ok(rig) if rig.bones.is_empty() => {
+                    eprintln!("demiurg: {}: character has no bones", path.display());
+                }
+                Ok(rig) => {
+                    self.enter_rig(rig);
                     self.doc_name = stem_of(path);
                 }
                 Err(e) => eprintln!("demiurg: {}: {e}", path.display()),
@@ -1875,6 +1915,7 @@ impl App {
     /// Replace the document model, rebuild the sprite, refresh the
     /// palette, and reframe.
     fn load_model(&mut self, model: VoxelModel) {
+        self.editor.rig = None; // leaving rig mode for a plain model
         self.editor.document.replace_model(model);
         self.view
             .set_model(self.editor.document.model(), self.editor.render_mode);
@@ -1889,6 +1930,55 @@ impl App {
         self.project_path = None; // callers re-set it for a `.demiurg` open
         self.camera = self.view.framing_camera();
         self.editor.dirty = false;
+    }
+
+    /// Enter rig-edit mode: edit `rig`'s bones one at a time. `document`
+    /// holds the active bone's mesh; the Bones panel switches bones.
+    fn enter_rig(&mut self, rig: Rig) {
+        self.editor.rig = Some(rig);
+        self.editor.active_bone = 0;
+        self.load_active_bone();
+    }
+
+    /// Load the active bone's mesh into the document for editing, and
+    /// reframe. (Leaves `editor.rig` in place — only the working model
+    /// changes.)
+    fn load_active_bone(&mut self) {
+        let Some(rig) = &self.editor.rig else {
+            return;
+        };
+        let model = rig.bones[self.editor.active_bone].model.clone();
+        self.editor.document.replace_model(model);
+        self.view
+            .set_model(self.editor.document.model(), self.editor.render_mode);
+        self.editor.refresh_palette();
+        self.editor.sync_resize_dims();
+        self.editor.selection.clear();
+        self.editor.float = None;
+        self.drag = None;
+        self.camera = self.view.framing_camera();
+        self.editor.dirty = false;
+    }
+
+    /// Write the document's working model back into the active bone, so the
+    /// rig reflects the edits (called before switching bones or saving).
+    fn commit_active_bone(&mut self) {
+        if let Some(rig) = &mut self.editor.rig {
+            if let Some(bone) = rig.bones.get_mut(self.editor.active_bone) {
+                bone.model = self.editor.document.model().clone();
+            }
+        }
+    }
+
+    /// Switch which bone the tools edit: commit the current bone, then load
+    /// bone `i`.
+    fn select_bone(&mut self, i: usize) {
+        if self.editor.rig.is_none() || i == self.editor.active_bone {
+            return;
+        }
+        self.commit_active_bone();
+        self.editor.active_bone = i;
+        self.load_active_bone();
     }
 
     #[allow(clippy::too_many_lines)] // the per-frame sequence reads better unsplit

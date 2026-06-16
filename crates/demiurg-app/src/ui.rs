@@ -64,6 +64,10 @@ pub struct UiActions {
     pub export_kv6: bool,
     pub export_vxl: bool,
     pub export_vox: bool,
+    /// Export the rig as a `.rkc` character.
+    pub export_rkc: bool,
+    /// Switch the active rig bone (index into `rig.bones`).
+    pub select_bone: Option<usize>,
     pub undo: bool,
     pub redo: bool,
     pub delete_sel: bool,
@@ -152,6 +156,13 @@ pub fn build(
                 if ui.button(t(Msg::ExportVox)).clicked() {
                     actions.export_vox = true;
                     ui.close();
+                }
+                if editor.rig.is_some() {
+                    ui.separator();
+                    if ui.button(t(Msg::ExportCharacter)).clicked() {
+                        actions.export_rkc = true;
+                        ui.close();
+                    }
                 }
             });
             ui.menu_button(t(Msg::Edit), |ui| {
@@ -307,6 +318,7 @@ pub fn build(
                     editor.dirty = true;
                 }
 
+                bones_panel(ui, editor, actions, &t);
                 size_panel(ui, editor, &t);
                 selection_panel(ui, editor, actions, &t);
                 reference_panel(ui, editor, actions, &t);
@@ -472,6 +484,35 @@ fn selection_panel(
 /// The Reference section: load a pixel-art guide and place it. When one is
 /// loaded, shows its name/size and controls for the plane (Front/Side/Top),
 /// depth offset, horizontal/vertical flips, visibility, and removal. Edits
+/// The Bones section (rig mode only): pick which bone the tools edit.
+/// Selecting a bone is deferred to the host (it swaps the working model),
+/// so the click records `actions.select_bone`.
+fn bones_panel(
+    ui: &mut egui::Ui,
+    editor: &Editor,
+    actions: &mut UiActions,
+    t: &impl Fn(Msg) -> &'static str,
+) {
+    let Some(rig) = &editor.rig else {
+        return;
+    };
+    ui.separator();
+    ui.label(t(Msg::Bones));
+    for (i, bone) in rig.bones.iter().enumerate() {
+        let label = if bone.name.is_empty() {
+            format!("{i}")
+        } else {
+            format!("{i}  {}", bone.name)
+        };
+        if ui
+            .selectable_label(i == editor.active_bone, label)
+            .clicked()
+        {
+            actions.select_bone = Some(i);
+        }
+    }
+}
+
 /// mutate the reference directly and flag it for a viewport refresh.
 fn reference_panel(
     ui: &mut egui::Ui,

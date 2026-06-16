@@ -122,6 +122,8 @@ pub enum Msg {
     ExportKv6,
     ExportVxl,
     ExportVox,
+    ExportCharacter,
+    Bones,
     Edit,
     Undo,
     Redo,
@@ -152,7 +154,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 74] = [
+    pub const ALL: [Msg; 76] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -204,6 +206,8 @@ impl Msg {
         Msg::ExportKv6,
         Msg::ExportVxl,
         Msg::ExportVox,
+        Msg::ExportCharacter,
+        Msg::Bones,
         Msg::Edit,
         Msg::Undo,
         Msg::Redo,
@@ -292,6 +296,8 @@ const fn en(msg: Msg) -> &'static str {
         Msg::ExportKv6 => "Export .kv6…",
         Msg::ExportVxl => "Export .vxl…",
         Msg::ExportVox => "Export .vox…",
+        Msg::ExportCharacter => "Export character…",
+        Msg::Bones => "Bones",
         Msg::Edit => "Edit",
         Msg::Undo => "Undo",
         Msg::Redo => "Redo",
@@ -373,6 +379,8 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::ExportKv6 => "Экспорт .kv6…",
         Msg::ExportVxl => "Экспорт .vxl…",
         Msg::ExportVox => "Экспорт .vox…",
+        Msg::ExportCharacter => "Экспорт персонажа…",
+        Msg::Bones => "Кости",
         Msg::Edit => "Правка",
         Msg::Undo => "Отменить",
         Msg::Redo => "Повторить",
