@@ -901,29 +901,34 @@ impl App {
     fn scene_lines(&self) -> Vec<Line3> {
         let pivot = self.editor.document.pivot();
         let mut lines = Vec::new();
-        if self.editor.show_grid {
-            lines.extend(demiurg_view::reference_lines_3d(
-                pivot,
-                self.editor.document.dims(),
-            ));
-        }
-        if self.editor.show_edges {
-            lines.extend(demiurg_view::voxel_edge_lines_3d(
-                self.editor.document.model(),
-                pivot,
-                VOXEL_EDGE_COLOR,
-                1.0,
-            ));
-        }
-        if !self.editor.selection.is_empty() {
-            let cells: Vec<[u32; 3]> = self.editor.selection.iter().copied().collect();
-            lines.extend(demiurg_view::selection_lines_3d(pivot, &cells));
-        }
-        // No hover box mid-drag: the selection outline already tracks the
-        // moving layer, and the hover would pick the model under it.
-        if self.drag.is_none() && self.ref_drag.is_none() {
-            if let Some(cell) = self.hover_cell() {
-                lines.extend(demiurg_view::voxel_box_lines_3d(pivot, cell));
+        // The editing gizmos (grid box, voxel edges, selection, hover cube)
+        // belong to the document model — skip them in the Animate preview,
+        // which renders the posed rig instead.
+        if self.kfa.is_none() {
+            if self.editor.show_grid {
+                lines.extend(demiurg_view::reference_lines_3d(
+                    pivot,
+                    self.editor.document.dims(),
+                ));
+            }
+            if self.editor.show_edges {
+                lines.extend(demiurg_view::voxel_edge_lines_3d(
+                    self.editor.document.model(),
+                    pivot,
+                    VOXEL_EDGE_COLOR,
+                    1.0,
+                ));
+            }
+            if !self.editor.selection.is_empty() {
+                let cells: Vec<[u32; 3]> = self.editor.selection.iter().copied().collect();
+                lines.extend(demiurg_view::selection_lines_3d(pivot, &cells));
+            }
+            // No hover box mid-drag: the selection outline already tracks the
+            // moving layer, and the hover would pick the model under it.
+            if self.drag.is_none() && self.ref_drag.is_none() {
+                if let Some(cell) = self.hover_cell() {
+                    lines.extend(demiurg_view::voxel_box_lines_3d(pivot, cell));
+                }
             }
         }
         if let Some(kfa) = &self.kfa {
