@@ -455,6 +455,9 @@ struct Editor {
     /// Overlay a wireframe on exposed voxel faces, so boundaries read even
     /// in flat-shaded shadow (there is no ambient occlusion / light bake).
     show_edges: bool,
+    /// Mirror the viewport horizontally to correct roxlap's left-handed
+    /// (X-mirrored) render. On by default; pure view setting, never saved.
+    flip_x: bool,
     /// Sprite vs voxel-grid render.
     render_mode: RenderMode,
     /// Target dimensions edited in the Size panel (the "Resize" button
@@ -543,6 +546,7 @@ impl Editor {
             lighting: true,
             show_grid: true,
             show_edges: true,
+            flip_x: true,
             render_mode: DEFAULT_RENDER_MODE,
             resize_dims: [dx, dy, dz],
             selection: HashSet::new(),
@@ -987,23 +991,34 @@ impl App {
         lines
     }
 
+    /// Cursor position to cast rays through. With the viewport flip on, the
+    /// display is mirrored but the engine's projection isn't, so a click at
+    /// window-x corresponds to the engine's `width - x`.
+    fn ray_cursor(&self) -> (f64, f64) {
+        if self.editor.flip_x {
+            if let Some(w) = self.window.as_ref() {
+                return (
+                    f64::from(w.inner_size().width) - self.cursor.0,
+                    self.cursor.1,
+                );
+            }
+        }
+        self.cursor
+    }
+
     /// The voxel under the cursor, if any.
     fn pointer_pick(&self) -> Option<PickHit> {
         let cam = self.camera.to_roxlap();
-        let ray = self
-            .renderer
-            .as_ref()?
-            .view_ray(&cam, self.cursor.0, self.cursor.1)?;
+        let (cx, cy) = self.ray_cursor();
+        let ray = self.renderer.as_ref()?.view_ray(&cam, cx, cy)?;
         pick_voxel(self.editor.document.model(), ray.origin, ray.dir)
     }
 
     /// The cursor ray as world `(origin, dir)` component arrays.
     fn pointer_ray(&self) -> Option<([f64; 3], [f64; 3])> {
         let cam = self.camera.to_roxlap();
-        let r = self
-            .renderer
-            .as_ref()?
-            .view_ray(&cam, self.cursor.0, self.cursor.1)?;
+        let (cx, cy) = self.ray_cursor();
+        let r = self.renderer.as_ref()?.view_ray(&cam, cx, cy)?;
         Some((
             [r.origin.x, r.origin.y, r.origin.z],
             [r.dir.x, r.dir.y, r.dir.z],
@@ -1045,10 +1060,8 @@ impl App {
     /// floating voxel can be grabbed even though it isn't in the document.
     fn grab_pick(&self) -> Option<PickHit> {
         let cam = self.camera.to_roxlap();
-        let ray = self
-            .renderer
-            .as_ref()?
-            .view_ray(&cam, self.cursor.0, self.cursor.1)?;
+        let (cx, cy) = self.ray_cursor();
+        let ray = self.renderer.as_ref()?.view_ray(&cam, cx, cy)?;
         pick_voxel(&self.editor.display_model(), ray.origin, ray.dir)
     }
 
@@ -1524,12 +1537,23 @@ impl App {
         } else if let Some(window) = &self.window {
             let size = window.inner_size();
             let cam = self.camera.to_roxlap();
+            let w = f64::from(size.width);
+            // The pick is in the engine's (unflipped) screen space, so mirror
+            // the rectangle's X when the viewport flip is on.
+            let rect = if self.editor.flip_x {
+                [
+                    (w - m.start.0, m.start.1),
+                    (w - self.cursor.0, self.cursor.1),
+                ]
+            } else {
+                [m.start, self.cursor]
+            };
             demiurg_view::marquee_voxels(
                 self.editor.document.model(),
                 &cam,
-                f64::from(size.width),
+                w,
                 f64::from(size.height),
-                [m.start, self.cursor],
+                rect,
             )
         } else {
             Vec::new()
@@ -2313,6 +2337,7 @@ impl App {
             }
             self.editor.ref_image_dirty = false;
         }
+        renderer.set_flip_x(self.editor.flip_x);
         renderer.set_sprites(self.view.sprites());
         // The KFA rig's limb sprites. set_sprites resets the registry each
         // frame, so re-establish the rig after it, then apply the current
@@ -2567,15 +2592,21 @@ impl ApplicationHandler for App {
                 if self.painting {
                     self.paint_step();
                 }
+                // A mirrored viewport flips the horizontal drag sense, so the
+                // camera rotates / pans the way the cursor moves on screen.
+                let sx = if self.editor.flip_x { -1.0 } else { 1.0 };
                 if self.orbiting {
                     if let Some((lx, ly)) = self.last_drag {
-                        self.camera
-                            .orbit((position.x - lx) * 0.01, -(position.y - ly) * 0.01, 0.0);
+                        self.camera.orbit(
+                            sx * (position.x - lx) * 0.01,
+                            -(position.y - ly) * 0.01,
+                            0.0,
+                        );
                     }
                     self.last_drag = Some((position.x, position.y));
                 } else if self.panning {
                     if let Some((lx, ly)) = self.last_drag {
-                        self.pan_camera(position.x - lx, position.y - ly);
+                        self.pan_camera(sx * (position.x - lx), position.y - ly);
                     }
                     self.last_drag = Some((position.x, position.y));
                 }

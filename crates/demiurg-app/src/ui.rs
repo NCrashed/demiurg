@@ -187,6 +187,7 @@ pub fn build(
                 ui.checkbox(&mut editor.lighting, t(Msg::Lighting));
                 ui.checkbox(&mut editor.show_grid, t(Msg::Grid));
                 ui.checkbox(&mut editor.show_edges, t(Msg::VoxelEdges));
+                ui.checkbox(&mut editor.flip_x, t(Msg::FlipX));
                 ui.separator();
                 ui.label(t(Msg::Render));
                 if ui
