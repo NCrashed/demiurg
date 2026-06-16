@@ -549,17 +549,26 @@ fn skeleton_panel(ui: &mut egui::Ui, editor: &mut Editor, t: &impl Fn(Msg) -> &'
         }
     });
 
-    // Rotation axis (applied to both sides of the hinge).
+    // Rotation axis — pick a principal axis (always a unit vector, so the
+    // pose never distorts; a free numeric axis is too easy to leave
+    // non-normalised).
     ui.label(t(Msg::Axis));
+    let cur = [bone.hinge.v[0].x, bone.hinge.v[0].y, bone.hinge.v[0].z];
     ui.horizontal(|ui| {
-        for (axis, name) in [(0usize, "x"), (1, "y"), (2, "z")] {
-            ui.colored_label(axis_color(axis), name);
-            let f = match axis {
-                0 => &mut bone.hinge.v[0].x,
-                1 => &mut bone.hinge.v[0].y,
-                _ => &mut bone.hinge.v[0].z,
-            };
-            changed |= ui.add(egui::DragValue::new(f).speed(0.1)).changed();
+        for (axis, name) in [(0usize, "X"), (1, "Y"), (2, "Z")] {
+            let mut unit = [0.0f32; 3];
+            unit[axis] = 1.0;
+            #[allow(clippy::float_cmp)] // unit axes are exact 0.0 / 1.0
+            let active = cur == unit;
+            if ui
+                .selectable_label(active, egui::RichText::new(name).color(axis_color(axis)))
+                .clicked()
+            {
+                bone.hinge.v[0].x = unit[0];
+                bone.hinge.v[0].y = unit[1];
+                bone.hinge.v[0].z = unit[2];
+                changed = true;
+            }
         }
     });
     if changed {

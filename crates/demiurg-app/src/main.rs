@@ -293,6 +293,26 @@ struct RefDrag {
     base_v: i32,
 }
 
+/// An in-progress drag of a rig bone (Skeleton mode): moves the bone in a
+/// screen-parallel plane through its pivot. The world delta is applied to
+/// the bone's parent-side velcro `p[1]` (a child) or `rig.root` (the root).
+struct BoneDrag {
+    /// Bone being moved (index into `rig.bones`).
+    bone: usize,
+    /// Drag plane through the bone pivot: a point on it + its (unit) normal,
+    /// the camera forward at grab time.
+    plane_point: [f64; 3],
+    plane_normal: [f64; 3],
+    /// World point where the grab ray met the plane.
+    anchor: [f64; 3],
+    /// The value being edited at grab time — `p[1]` for a child, `rig.root`
+    /// for the root bone.
+    base: [f32; 3],
+    /// The parent bone's world basis `[s, h, f]`, to map a world delta into
+    /// the velcro's parent-local space. `None` for the root (world space).
+    parent_basis: Option<[[f64; 3]; 3]>,
+}
+
 /// The in-bounds cells of a float layer as a selection set (for the
 /// highlight while it floats).
 fn float_selection(cells: &[([i32; 3], u32)], dims: (u32, u32, u32)) -> HashSet<[u32; 3]> {
@@ -304,6 +324,17 @@ fn float_selection(cells: &[([i32; 3], u32)], dims: (u32, u32, u32)) -> HashSet<
 
 fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Intersect ray `(o, d)` with the plane through `point` with normal `n`.
+/// `None` if parallel or behind the camera.
+fn ray_plane(o: [f64; 3], d: [f64; 3], point: [f64; 3], n: [f64; 3]) -> Option<[f64; 3]> {
+    let denom = dot3(d, n);
+    if denom.abs() < 1e-9 {
+        return None;
+    }
+    let t = dot3([point[0] - o[0], point[1] - o[1], point[2] - o[2]], n) / denom;
+    (t > 0.0).then(|| [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t])
 }
 
 fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -604,7 +635,7 @@ impl Editor {
     }
 }
 
-#[allow(clippy::similar_names)] // force_cpu / force_gpu are a deliberate pair
+#[allow(clippy::similar_names, clippy::too_many_lines)] // linear startup setup
 fn main() {
     // The CPU renderer is the default (it's reliable everywhere); `--gpu`
     // opts into the GPU backend, `--cpu` forces CPU. The first non-flag
@@ -711,6 +742,7 @@ fn main() {
         marquee: None,
         drag: None,
         ref_drag: None,
+        bone_drag: None,
         last_tool: Tool::Place,
         force_cpu,
         force_gpu,
@@ -849,6 +881,7 @@ struct App {
     drag: Option<DragMove>,
     /// An in-progress drag of the reference layer (Move mode), else `None`.
     ref_drag: Option<RefDrag>,
+    bone_drag: Option<BoneDrag>,
     /// The active tool last frame, to detect a tool switch (keyboard or
     /// UI) and settle a floating layer when the user leaves Select.
     last_tool: Tool,
@@ -1215,6 +1248,103 @@ impl App {
         }
     }
 
+    /// Begin dragging the active bone (Skeleton mode): grab a screen-parallel
+    /// plane through its pivot and remember the value being moved (`p[1]` for
+    /// a child bone, `rig.root` for the root) and the parent's basis.
+    fn begin_bone_drag(&mut self) {
+        let bone = self.editor.active_bone;
+        let Some((o, d)) = self.pointer_ray() else {
+            return;
+        };
+        let normal = self.camera.to_roxlap().forward;
+        let Some(kfa) = &self.kfa else {
+            return;
+        };
+        let Some((pivot, _)) = kfa.limb_pose(bone) else {
+            return;
+        };
+        let Some(rig) = &self.editor.rig else {
+            return;
+        };
+        let Some(b) = rig.bones.get(bone) else {
+            return;
+        };
+        let (base, parent_basis) = if b.hinge.parent < 0 {
+            (rig.root, None)
+        } else {
+            let p1 = b.hinge.p[1];
+            #[allow(clippy::cast_sign_loss)] // parent >= 0 checked above
+            let pb = kfa
+                .limb_pose(b.hinge.parent as usize)
+                .map(|(_, m)| m.map(|a| [f64::from(a[0]), f64::from(a[1]), f64::from(a[2])]));
+            ([p1.x, p1.y, p1.z], pb)
+        };
+        let plane_point = [
+            f64::from(pivot[0]),
+            f64::from(pivot[1]),
+            f64::from(pivot[2]),
+        ];
+        let Some(anchor) = ray_plane(o, d, plane_point, normal) else {
+            return;
+        };
+        self.bone_drag = Some(BoneDrag {
+            bone,
+            plane_point,
+            plane_normal: normal,
+            anchor,
+            base,
+            parent_basis,
+        });
+    }
+
+    /// Update a bone drag: move the bone to follow the cursor in its plane,
+    /// applying the world delta to `p[1]` (parent-local) or `rig.root`.
+    #[allow(clippy::cast_possible_truncation)] // world deltas are small
+    fn update_bone_drag(&mut self) {
+        let Some(drag) = &self.bone_drag else {
+            return;
+        };
+        let (bone, plane_point, normal, anchor, base, parent_basis) = (
+            drag.bone,
+            drag.plane_point,
+            drag.plane_normal,
+            drag.anchor,
+            drag.base,
+            drag.parent_basis,
+        );
+        let Some((o, d)) = self.pointer_ray() else {
+            return;
+        };
+        let Some(cur) = ray_plane(o, d, plane_point, normal) else {
+            return;
+        };
+        let wd = [cur[0] - anchor[0], cur[1] - anchor[1], cur[2] - anchor[2]];
+        // World delta -> parent-local (the velcro is in the parent's space);
+        // the basis is orthonormal, so the inverse is its transpose (dots).
+        let local = match parent_basis {
+            Some(m) => [dot3(wd, m[0]), dot3(wd, m[1]), dot3(wd, m[2])],
+            None => wd,
+        };
+        let new = [
+            base[0] + local[0] as f32,
+            base[1] + local[1] as f32,
+            base[2] + local[2] as f32,
+        ];
+        if let Some(rig) = &mut self.editor.rig {
+            match rig.bones.get(bone).map(|b| b.hinge.parent) {
+                Some(p) if p < 0 => rig.root = new,
+                Some(_) => {
+                    let h = &mut rig.bones[bone].hinge;
+                    h.p[1].x = new[0];
+                    h.p[1].y = new[1];
+                    h.p[1].z = new[2];
+                }
+                None => {}
+            }
+        }
+        self.editor.rig_dirty = true;
+    }
+
     /// Left-button press: a quick eyedropper (Ctrl), a selection marquee
     /// (Select tool), a drag-paint stroke (continuous tools), or a
     /// click-once tool.
@@ -1223,7 +1353,12 @@ impl App {
             return; // don't edit behind the quit / saving / dialog modal
         }
         if self.editor.rig.is_some() && self.editor.rig_mode != RigMode::Sculpt {
-            return; // Skeleton / Animate previews are read-only
+            // Skeleton: left-drag repositions the active bone. Animate is
+            // read-only.
+            if self.editor.rig_mode == RigMode::Skeleton {
+                self.begin_bone_drag();
+            }
+            return;
         }
         // "Move reference" mode: left-drag slides the reference, not the tool.
         if self.editor.ref_move_mode && self.editor.reference.is_some() {
@@ -1353,6 +1488,9 @@ impl App {
     /// until deselected), resolve a marquee, or close the drag-paint
     /// stroke (one undo step).
     fn end_paint(&mut self) {
+        if self.bone_drag.take().is_some() {
+            return; // bone repositioned
+        }
         if self.ref_drag.take().is_some() {
             return; // reference repositioned
         }
@@ -2417,6 +2555,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
+                if self.bone_drag.is_some() {
+                    self.update_bone_drag();
+                }
                 if self.ref_drag.is_some() {
                     self.update_ref_drag();
                 }

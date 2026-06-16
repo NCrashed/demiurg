@@ -52,6 +52,16 @@ impl KfaView {
         &mut self.kfas
     }
 
+    /// World pose of bone `i` from the last solve: its pivot position and
+    /// orthonormal basis `[s, h, f]`. `None` if out of range. Used to drag
+    /// a bone in the viewport (the pivot gives the drag plane; the parent's
+    /// basis maps a world delta into the hinge's local velcro space).
+    #[must_use]
+    pub fn limb_pose(&self, i: usize) -> Option<([f32; 3], [[f32; 3]; 3])> {
+        let sprite = self.kfas.first()?.limbs.get(i)?;
+        Some((sprite.p, [sprite.s, sprite.h, sprite.f]))
+    }
+
     /// A camera framed on the rig — orbits the root, far enough out to hold
     /// the largest bone mesh.
     #[must_use]
