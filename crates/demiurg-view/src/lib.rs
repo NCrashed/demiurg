@@ -21,7 +21,7 @@ mod kfa;
 mod pick;
 
 pub use camera::{OrbitCamera, ViewDir};
-pub use kfa::{KfaView, demo_character};
+pub use kfa::{KfaView, demo_character, demo_rkc_bytes};
 pub use pick::{
     AXIS_COLORS, PickHit, marquee_voxels, pick_voxel, project_to_screen, reference_lines_3d,
     selection_lines_3d, voxel_box_lines_3d, voxel_edge_lines_3d,

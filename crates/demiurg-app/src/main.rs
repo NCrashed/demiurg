@@ -3,7 +3,7 @@
 //! provides the tools, palette, mirror, pivot, and file menu.
 //!
 //! Usage:
-//!   demiurg [--gpu|--cpu] [path.kv6|.vox|.demiurg]   # no path -> blank
+//!   demiurg [--gpu|--cpu] [path.kv6|.vox|.demiurg|.rkc]   # no path -> blank
 //!
 //! Controls: left mouse applies the active tool (hold to drag-paint); the
 //! Place tool falls back to the floor (the volume's bottom face) when the
@@ -137,6 +137,7 @@ enum DialogKind {
     OpenVox,
     OpenProject,
     OpenReference,
+    OpenCharacter,
     Save(SaveFormat),
 }
 
@@ -168,6 +169,9 @@ fn run_dialog(kind: DialogKind, dir: Option<PathBuf>, name: Option<&str>) -> Opt
                 "image",
                 &["png", "jpg", "jpeg", "bmp", "gif", "tga", "webp"],
             )
+            .pick_file(),
+        DialogKind::OpenCharacter => rfd::FileDialog::new()
+            .add_filter("character", &["rkc"])
             .pick_file(),
         DialogKind::Save(format) => {
             let (filter, ext, default) = format.dialog_spec();
@@ -571,15 +575,33 @@ fn main() {
     // opts into the GPU backend, `--cpu` forces CPU. The first non-flag
     // argument is the file to open.
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Dev utility: write a sample `.rkc` (the synthetic demo rig) and exit,
+    // with no window — a quick way to mint a file for the load path.
+    if let Some(path) = std::env::var_os("DEMIURG_KFA_DUMP") {
+        match std::fs::write(&path, demiurg_view::demo_rkc_bytes()) {
+            Ok(()) => eprintln!("demiurg: wrote {}", path.to_string_lossy()),
+            Err(e) => eprintln!("demiurg: DEMIURG_KFA_DUMP {}: {e}", path.to_string_lossy()),
+        }
+        return;
+    }
+
     let force_cpu = args.iter().any(|a| a == "--cpu");
     let force_gpu = args.iter().any(|a| a == "--gpu");
     let arg = args.into_iter().find(|a| !a.starts_with('-'));
     let autosave = autosave_path();
 
-    // A `.demiurg` argument is an editable project (its path drives Ctrl+S);
-    // a `.kv6` opens as a fresh model. With no argument, recover an autosave
-    // if one survived a previous crash.
-    let (model, project_path, doc_name, recovered) = if let Some(p) = &arg {
+    // An `.rkc` argument opens a KFA rig (no editable document model yet);
+    // a `.demiurg` is an editable project (its path drives Ctrl+S); a
+    // `.kv6` / `.vox` opens as a fresh model. With no argument, recover an
+    // autosave if one survived a previous crash.
+    let rkc_arg = arg
+        .as_deref()
+        .filter(|p| p.to_ascii_lowercase().ends_with(".rkc"))
+        .map(str::to_string);
+    let (model, project_path, doc_name, recovered) = if let Some(p) = &rkc_arg {
+        (new_model(), None, stem_of(Path::new(p)), false)
+    } else if let Some(p) = &arg {
         let proj = p.ends_with(".demiurg").then(|| PathBuf::from(p));
         (load_any(p), proj, stem_of(Path::new(p)), false)
     } else if let Some(m) = recover_autosave(&autosave) {
@@ -589,12 +611,39 @@ fn main() {
         );
         (m, None, None, true)
     } else {
-        eprintln!("demiurg: blank canvas (pass a .kv6 or .demiurg path to open one)");
+        eprintln!("demiurg: blank canvas (pass a .kv6 / .demiurg / .rkc path to open one)");
         (new_model(), None, None, false)
     };
 
+    // The KFA rig preview: a loaded `.rkc`, or a synthetic demo rig when
+    // DEMIURG_KFA is set (until rig authoring exists).
+    let kfa = if let Some(p) = &rkc_arg {
+        match std::fs::read(p) {
+            Ok(bytes) => KfaView::load(&bytes).map_or_else(
+                |e| {
+                    eprintln!("demiurg: {p}: {e}");
+                    None
+                },
+                Some,
+            ),
+            Err(e) => {
+                eprintln!("demiurg: read {p}: {e}");
+                None
+            }
+        }
+    } else if std::env::var_os("DEMIURG_KFA").is_some() {
+        Some(KfaView::from_character(
+            demiurg_view::demo_character(),
+            Some(0),
+        ))
+    } else {
+        None
+    };
+
     let view = ModelView::new(&model, DEFAULT_RENDER_MODE);
-    let camera = view.framing_camera();
+    let camera = kfa
+        .as_ref()
+        .map_or_else(|| view.framing_camera(), KfaView::framing_camera);
     let mut editor = Editor::new(model);
     if recovered {
         editor.document.mark_unsaved(); // recovered work has no save point yet
@@ -631,10 +680,7 @@ fn main() {
         force_cpu,
         force_gpu,
         ref_image: None,
-        // First slice: a synthetic rig, gated behind DEMIURG_KFA until rig
-        // authoring exists.
-        kfa: std::env::var_os("DEMIURG_KFA")
-            .map(|_| KfaView::from_character(demiurg_view::demo_character(), Some(0))),
+        kfa,
         next_frame: Instant::now(),
     };
 
@@ -1542,6 +1588,9 @@ impl App {
         if a.open_reference {
             self.open_dialog(DialogKind::OpenReference);
         }
+        if a.open_character {
+            self.open_dialog(DialogKind::OpenCharacter);
+        }
         if a.remove_reference {
             self.editor.reference = None;
             self.editor.ref_move_mode = false;
@@ -1657,6 +1706,7 @@ impl App {
                 }
             }
             DialogKind::OpenReference => self.load_reference(&path),
+            DialogKind::OpenCharacter => self.load_character(&path),
             DialogKind::Save(format) => self.start_save(path, format, true),
         }
     }
@@ -1762,12 +1812,35 @@ impl App {
         }
     }
 
-    /// Route a dropped file: an image becomes the reference layer; a
-    /// `.kv6` / `.vox` / `.demiurg` opens as the model; anything else is
-    /// ignored.
+    /// Read a `.rkc` rigged-character file and show it as the KFA preview,
+    /// framing the camera on it.
+    fn load_character(&mut self, path: &Path) {
+        match std::fs::read(path) {
+            Ok(bytes) => match KfaView::load(&bytes) {
+                Ok(view) => {
+                    self.camera = view.framing_camera();
+                    self.kfa = Some(view);
+                    self.doc_name = stem_of(path);
+                }
+                Err(e) => eprintln!("demiurg: {}: {e}", path.display()),
+            },
+            Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
+        }
+    }
+
+    /// Route a dropped file: an image becomes the reference layer; an
+    /// `.rkc` opens as the KFA rig; a `.kv6` / `.vox` / `.demiurg` opens as
+    /// the model; anything else is ignored.
     fn on_dropped_file(&mut self, path: &Path) {
         if reference::is_image(path) {
             self.load_reference(path);
+            return;
+        }
+        if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("rkc"))
+        {
+            self.load_character(path);
             return;
         }
         let read = || std::fs::read(path).map_err(|e| e.to_string());

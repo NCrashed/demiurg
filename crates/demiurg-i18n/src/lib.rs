@@ -116,6 +116,7 @@ pub enum Msg {
     OpenVox,
     OpenProject,
     OpenReference,
+    OpenCharacter,
     Save,
     SaveAs,
     ExportKv6,
@@ -151,7 +152,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 73] = [
+    pub const ALL: [Msg; 74] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -197,6 +198,7 @@ impl Msg {
         Msg::OpenVox,
         Msg::OpenProject,
         Msg::OpenReference,
+        Msg::OpenCharacter,
         Msg::Save,
         Msg::SaveAs,
         Msg::ExportKv6,
@@ -284,6 +286,7 @@ const fn en(msg: Msg) -> &'static str {
         Msg::OpenVox => "Open .vox…",
         Msg::OpenProject => "Open project…",
         Msg::OpenReference => "Open reference image…",
+        Msg::OpenCharacter => "Open character…",
         Msg::Save => "Save",
         Msg::SaveAs => "Save As…",
         Msg::ExportKv6 => "Export .kv6…",
@@ -364,6 +367,7 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::OpenVox => "Открыть .vox…",
         Msg::OpenProject => "Открыть проект…",
         Msg::OpenReference => "Открыть опорное изображение…",
+        Msg::OpenCharacter => "Открыть персонаж…",
         Msg::Save => "Сохранить",
         Msg::SaveAs => "Сохранить как…",
         Msg::ExportKv6 => "Экспорт .kv6…",

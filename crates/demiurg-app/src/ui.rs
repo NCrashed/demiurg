@@ -53,6 +53,8 @@ pub struct UiActions {
     pub open_project: bool,
     /// Open a reference image (file dialog).
     pub open_reference: bool,
+    /// Open a `.rkc` rigged character (file dialog).
+    pub open_character: bool,
     /// Remove the current reference image.
     pub remove_reference: bool,
     /// Save the project (Ctrl+S): overwrite the known path or prompt.
@@ -123,6 +125,10 @@ pub fn build(
                 }
                 if ui.button(t(Msg::OpenReference)).clicked() {
                     actions.open_reference = true;
+                    ui.close();
+                }
+                if ui.button(t(Msg::OpenCharacter)).clicked() {
+                    actions.open_character = true;
                     ui.close();
                 }
                 ui.separator();

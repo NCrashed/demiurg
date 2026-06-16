@@ -11,11 +11,12 @@
 //! whole engine path).
 
 use demiurg_core::VoxelModel;
+use glam::DVec3;
 use roxlap_core::kfa_draw::solve_kfa_limbs;
 use roxlap_formats::character::{self, Bone, Character, Clip, ClipData, MeshRef};
 use roxlap_formats::kfa::{Hinge, KfaSprite, Point3, Seq};
 
-use crate::Line3;
+use crate::{Line3, OrbitCamera};
 
 /// Colour of the skeleton gizmo (always-on-top yellow, like the hover box).
 const BONE_COLOR: u32 = 0xffff_e600;
@@ -34,6 +35,34 @@ impl KfaView {
     pub fn from_character(character: Character, clip: Option<usize>) -> Self {
         let kfas = vec![character.to_kfa_sprite(clip)];
         Self { character, kfas }
+    }
+
+    /// Parse an `.rkc` rigged-character file into a view. Plays the first
+    /// clip if any (rest pose otherwise) — a stand-in until the timeline
+    /// drives playback.
+    ///
+    /// # Errors
+    /// A message if the bytes aren't a valid `.rkc` container.
+    pub fn load(bytes: &[u8]) -> Result<Self, String> {
+        let character = character::parse(bytes).map_err(|e| e.to_string())?;
+        let clip = (!character.clips.is_empty()).then_some(0);
+        Ok(Self::from_character(character, clip))
+    }
+
+    /// A camera framed on the rig — orbits the root, far enough out to hold
+    /// the largest bone mesh.
+    #[must_use]
+    pub fn framing_camera(&self) -> OrbitCamera {
+        let extent = self
+            .character
+            .meshes
+            .iter()
+            .map(|m| m.xsiz.max(m.ysiz).max(m.zsiz))
+            .max()
+            .unwrap_or(1);
+        let r = self.character.root;
+        let center = DVec3::new(f64::from(r[0]), f64::from(r[1]), f64::from(r[2]));
+        OrbitCamera::framing(center, f64::from(extent) * 3.0)
     }
 
     /// The sprites to hand to `SceneRenderer::set_kfa_sprites` /
@@ -160,6 +189,13 @@ pub fn demo_character() -> Character {
     character::parse(&bytes).expect("demo character round-trips through the container")
 }
 
+/// The synthetic [`demo_character`] serialized as `.rkc` bytes — a sample
+/// rig for testing the load path (see `DEMIURG_KFA_DUMP`).
+#[must_use]
+pub fn demo_rkc_bytes() -> Vec<u8> {
+    character::serialize(&demo_character())
+}
+
 /// A solid box of `col`, pivot at its centre (so the sprite places it
 /// centred on the bone root).
 #[allow(clippy::cast_precision_loss)] // box dims are tiny
@@ -174,4 +210,23 @@ fn box_model(x: u32, y: u32, z: u32, col: u32) -> VoxelModel {
     }
     m.pivot = [x as f32 / 2.0, y as f32 / 2.0, z as f32 / 2.0];
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_parses_a_serialized_character() {
+        // Serialize the demo rig and load it back through the `.rkc` path.
+        let bytes = character::serialize(&demo_character());
+        let view = KfaView::load(&bytes).expect("loads a valid .rkc");
+        assert_eq!(view.character.bones.len(), 2, "body + arm");
+        assert_eq!(view.kfas.len(), 1, "one assembled sprite");
+    }
+
+    #[test]
+    fn load_rejects_garbage() {
+        assert!(KfaView::load(b"not an rkc file").is_err());
+    }
 }
