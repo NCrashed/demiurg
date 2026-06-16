@@ -2135,11 +2135,16 @@ impl App {
         renderer.set_sprites(self.view.sprites());
         // The KFA rig's limb sprites. set_sprites resets the registry each
         // frame, so re-establish the rig after it, then apply the current
-        // pose. (Re-establishing every frame is wasteful on GPU; a later
-        // pass can do set_kfa_sprites only when the meshes change.)
-        if let Some(kfa) = &mut self.kfa {
-            renderer.set_kfa_sprites(kfa.kfas_mut());
-            renderer.update_kfa_poses(kfa.kfas_mut());
+        // pose — or clear it (empty set) when there's no preview, so leaving
+        // Animate mode doesn't leave the posed rig drawn over the editor.
+        // (Re-establishing every frame is wasteful on GPU; a later pass can
+        // do set_kfa_sprites only when the set changes.)
+        match &mut self.kfa {
+            Some(kfa) => {
+                renderer.set_kfa_sprites(kfa.kfas_mut());
+                renderer.update_kfa_poses(kfa.kfas_mut());
+            }
+            None => renderer.set_kfa_sprites(&mut []),
         }
         renderer.render(self.view.scene_mut(), &camera, &frame);
         // Depth-tested editor gizmos land in the framebuffer; paint_egui
