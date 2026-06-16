@@ -68,6 +68,8 @@ pub struct UiActions {
     pub export_rkc: bool,
     /// Switch the active rig bone (index into `rig.bones`).
     pub select_bone: Option<usize>,
+    /// Toggle the rig Edit/Animate preview mode.
+    pub toggle_animate: bool,
     pub undo: bool,
     pub redo: bool,
     pub delete_sel: bool,
@@ -498,6 +500,12 @@ fn bones_panel(
     };
     ui.separator();
     ui.label(t(Msg::Bones));
+    // Edit (per-bone mesh) vs Animate (posed preview) — emit an action; the
+    // host does the side effects (swap the scene / camera).
+    let mut animate = editor.rig_animate;
+    if ui.checkbox(&mut animate, t(Msg::Animate)).changed() {
+        actions.toggle_animate = true;
+    }
     for (i, bone) in rig.bones.iter().enumerate() {
         let label = if bone.name.is_empty() {
             format!("{i}")

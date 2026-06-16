@@ -441,6 +441,9 @@ struct Editor {
     /// The bone whose mesh `document` currently edits (index into
     /// `rig.bones`). Meaningless when `rig` is `None`.
     active_bone: usize,
+    /// Rig **Animate** mode: preview the posed, playing rig (read-only)
+    /// instead of editing the active bone. Meaningless when `rig` is `None`.
+    rig_animate: bool,
     /// The viewport scene needs a rebuild from the model.
     dirty: bool,
 }
@@ -503,6 +506,7 @@ impl Editor {
             ref_image_dirty: false,
             rig: None,
             active_bone: 0,
+            rig_animate: false,
             dirty: false,
         }
     }
@@ -1196,6 +1200,9 @@ impl App {
         if self.confirm_quit || self.busy() {
             return; // don't edit behind the quit / saving / dialog modal
         }
+        if self.editor.rig_animate {
+            return; // Animate preview is read-only
+        }
         // "Move reference" mode: left-drag slides the reference, not the tool.
         if self.editor.ref_move_mode && self.editor.reference.is_some() {
             self.begin_ref_drag();
@@ -1631,6 +1638,9 @@ impl App {
         if a.export_rkc {
             self.save_to(SaveFormat::Rkc, true);
         }
+        if a.toggle_animate {
+            self.toggle_rig_animate();
+        }
         if let Some(i) = a.select_bone {
             self.select_bone(i);
         }
@@ -1916,6 +1926,8 @@ impl App {
     /// palette, and reframe.
     fn load_model(&mut self, model: VoxelModel) {
         self.editor.rig = None; // leaving rig mode for a plain model
+        self.editor.rig_animate = false;
+        self.kfa = None;
         self.editor.document.replace_model(model);
         self.view
             .set_model(self.editor.document.model(), self.editor.render_mode);
@@ -1937,7 +1949,33 @@ impl App {
     fn enter_rig(&mut self, rig: Rig) {
         self.editor.rig = Some(rig);
         self.editor.active_bone = 0;
+        self.editor.rig_animate = false;
+        self.kfa = None;
         self.load_active_bone();
+    }
+
+    /// Toggle the rig **Animate** preview: commit edits and show the posed,
+    /// playing rig (read-only); or drop it and return to editing the active
+    /// bone. No-op outside rig mode.
+    fn toggle_rig_animate(&mut self) {
+        if self.editor.rig.is_none() {
+            return;
+        }
+        self.editor.rig_animate = !self.editor.rig_animate;
+        if self.editor.rig_animate {
+            self.commit_active_bone();
+            let rig = self.editor.rig.clone().expect("rig present");
+            let clip = (!rig.clips.is_empty()).then_some(0);
+            let view = KfaView::from_rig(rig, clip);
+            self.camera = view.framing_camera();
+            self.kfa = Some(view);
+            // Empty the static scene so only the posed rig renders.
+            self.view
+                .set_model(&VoxelModel::new(1, 1, 1), self.editor.render_mode);
+        } else {
+            self.kfa = None;
+            self.load_active_bone(); // restores the active bone + camera
+        }
     }
 
     /// Load the active bone's mesh into the document for editing, and
@@ -1971,9 +2009,13 @@ impl App {
     }
 
     /// Switch which bone the tools edit: commit the current bone, then load
-    /// bone `i`.
+    /// bone `i`. In Animate mode it only records the choice (no view swap).
     fn select_bone(&mut self, i: usize) {
         if self.editor.rig.is_none() || i == self.editor.active_bone {
+            return;
+        }
+        if self.editor.rig_animate {
+            self.editor.active_bone = i;
             return;
         }
         self.commit_active_bone();
@@ -2019,7 +2061,9 @@ impl App {
             self.commit_float();
             self.last_tool = self.editor.tool;
         }
-        if self.editor.dirty {
+        // In Animate mode the static scene is empty (the posed rig renders
+        // via the KFA path), so don't repopulate it from the document.
+        if self.editor.dirty && self.kfa.is_none() {
             // Render the document with the floating layer composited on
             // top (a borrow when nothing floats, a clone while it does).
             let mode = self.editor.render_mode;
