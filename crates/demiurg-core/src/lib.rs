@@ -27,9 +27,11 @@ use roxlap_formats::vxl::{self, Vxl};
 
 pub mod edit;
 pub mod project;
+pub mod rig;
 pub mod vox;
 
 pub use edit::Document;
+pub use rig::{Rig, RigBone};
 
 /// A dense, editable voxel model: the in-memory document the editor
 /// mutates and previews.

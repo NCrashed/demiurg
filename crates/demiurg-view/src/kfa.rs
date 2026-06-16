@@ -1,19 +1,16 @@
-//! KFA (skeletal) rig preview — the first slice of the animation editor.
+//! KFA (skeletal) rig preview — the editor's animation view.
 //!
-//! Builds a renderable [`KfaSprite`] from a roxlap
-//! [`Character`](roxlap_formats::character::Character) (the on-disk rigged-
-//! character container), advances its baked clip, and emits skeleton gizmo
-//! lines. The host (`demiurg-app`) hands the sprites to
+//! Owns an editable [`Rig`] (the live document) and the [`KfaSprite`]s built
+//! from it, advances its baked clip, and emits skeleton gizmo lines. The
+//! host (`demiurg-app`) hands the sprites to
 //! `SceneRenderer::{set_kfa_sprites, update_kfa_poses}` each frame.
 //!
-//! Until rig authoring exists, [`demo_character`] seeds a synthetic two-bone
-//! rig (round-tripped through `character::serialize`/`parse` to exercise the
-//! whole engine path).
+//! Until rig authoring exists, [`demo_rig`] seeds a synthetic two-bone rig.
 
-use demiurg_core::VoxelModel;
+use demiurg_core::{Rig, RigBone, VoxelModel};
 use glam::DVec3;
 use roxlap_core::kfa_draw::solve_kfa_limbs;
-use roxlap_formats::character::{self, Bone, Character, Clip, ClipData, MeshRef};
+use roxlap_formats::character::{Clip, ClipData};
 use roxlap_formats::kfa::{Hinge, KfaSprite, Point3, Seq};
 
 use crate::{Line3, OrbitCamera};
@@ -21,20 +18,20 @@ use crate::{Line3, OrbitCamera};
 /// Colour of the skeleton gizmo (always-on-top yellow, like the hover box).
 const BONE_COLOR: u32 = 0xffff_e600;
 
-/// A previewable KFA rig: the source [`Character`] plus the live
+/// A previewable KFA rig: the editable source [`Rig`] plus the live
 /// [`KfaSprite`]s built from it.
 pub struct KfaView {
-    character: Character,
+    rig: Rig,
     kfas: Vec<KfaSprite>,
 }
 
 impl KfaView {
-    /// Build a view from `character`, baking in `clip` (a `Skeletal` clip
-    /// index, or `None` for the rest pose).
+    /// Build a view from `rig`, baking in `clip` (a `Skeletal` clip index,
+    /// or `None` for the rest pose).
     #[must_use]
-    pub fn from_character(character: Character, clip: Option<usize>) -> Self {
-        let kfas = vec![character.to_kfa_sprite(clip)];
-        Self { character, kfas }
+    pub fn from_rig(rig: Rig, clip: Option<usize>) -> Self {
+        let kfas = vec![rig.to_character().to_kfa_sprite(clip)];
+        Self { rig, kfas }
     }
 
     /// Parse an `.rkc` rigged-character file into a view. Plays the first
@@ -44,9 +41,15 @@ impl KfaView {
     /// # Errors
     /// A message if the bytes aren't a valid `.rkc` container.
     pub fn load(bytes: &[u8]) -> Result<Self, String> {
-        let character = character::parse(bytes).map_err(|e| e.to_string())?;
-        let clip = (!character.clips.is_empty()).then_some(0);
-        Ok(Self::from_character(character, clip))
+        let rig = Rig::from_rkc_bytes(bytes)?;
+        let clip = (!rig.clips.is_empty()).then_some(0);
+        Ok(Self::from_rig(rig, clip))
+    }
+
+    /// The sprites to hand to `SceneRenderer::set_kfa_sprites` /
+    /// `update_kfa_poses`.
+    pub fn kfas_mut(&mut self) -> &mut [KfaSprite] {
+        &mut self.kfas
     }
 
     /// A camera framed on the rig — orbits the root, far enough out to hold
@@ -54,21 +57,18 @@ impl KfaView {
     #[must_use]
     pub fn framing_camera(&self) -> OrbitCamera {
         let extent = self
-            .character
-            .meshes
+            .rig
+            .bones
             .iter()
-            .map(|m| m.xsiz.max(m.ysiz).max(m.zsiz))
+            .map(|b| {
+                let (x, y, z) = b.model.dims();
+                x.max(y).max(z)
+            })
             .max()
             .unwrap_or(1);
-        let r = self.character.root;
+        let r = self.rig.root;
         let center = DVec3::new(f64::from(r[0]), f64::from(r[1]), f64::from(r[2]));
         OrbitCamera::framing(center, f64::from(extent) * 3.0)
-    }
-
-    /// The sprites to hand to `SceneRenderer::set_kfa_sprites` /
-    /// `update_kfa_poses`.
-    pub fn kfas_mut(&mut self) -> &mut [KfaSprite] {
-        &mut self.kfas
     }
 
     /// Advance the baked animation by `dt_ms` and re-solve bone transforms,
@@ -88,7 +88,7 @@ impl KfaView {
     pub fn bone_lines(&self) -> Vec<Line3> {
         let mut lines = Vec::new();
         for k in &self.kfas {
-            for (i, bone) in self.character.bones.iter().enumerate() {
+            for (i, bone) in self.rig.bones.iter().enumerate() {
                 let parent = bone.hinge.parent;
                 if parent < 0 {
                     continue;
@@ -109,14 +109,9 @@ impl KfaView {
 }
 
 /// A synthetic two-bone rig (a body with a swinging arm) built from demiurg
-/// voxel models and **round-tripped through the engine container** — proving
-/// `VoxelModel` → `Kv6` → `Character` → `serialize`/`parse` → `to_kfa_sprite`
-/// end to end. Temporary seed until rig authoring lands.
-///
-/// # Panics
-/// If the synthetic character fails to round-trip (a bug in the container).
+/// voxel models. Temporary seed until rig authoring lands.
 #[must_use]
-pub fn demo_character() -> Character {
+pub fn demo_rig() -> Rig {
     let body = box_model(6, 4, 16, 0x8033_cc55); // green
     let arm = box_model(4, 3, 10, 0x80cc_4433); // red
 
@@ -136,14 +131,13 @@ pub fn demo_character() -> Character {
         z: 0.0,
     }; // body-side velcro, +x of body centre
 
-    let character = Character {
+    Rig {
         name: "demo".to_string(),
         root: [0.0, 0.0, 0.0],
-        meshes: vec![body.to_kv6(), arm.to_kv6()],
         bones: vec![
-            Bone {
+            RigBone {
                 name: "body".to_string(),
-                mesh: MeshRef::Static(0),
+                model: body,
                 hinge: Hinge {
                     parent: -1,
                     p: [zero, zero],
@@ -154,9 +148,9 @@ pub fn demo_character() -> Character {
                     filler: [0; 7],
                 },
             },
-            Bone {
+            RigBone {
                 name: "arm".to_string(),
-                mesh: MeshRef::Static(1),
+                model: arm,
                 hinge: Hinge {
                     parent: 0,
                     p: [zero, shoulder],
@@ -181,19 +175,14 @@ pub fn demo_character() -> Character {
                 ],
             },
         }],
-        extra_chunks: Vec::new(),
-    };
-
-    // Round-trip through the container so the demo also exercises the format.
-    let bytes = character::serialize(&character);
-    character::parse(&bytes).expect("demo character round-trips through the container")
+    }
 }
 
-/// The synthetic [`demo_character`] serialized as `.rkc` bytes — a sample
-/// rig for testing the load path (see `DEMIURG_KFA_DUMP`).
+/// The synthetic [`demo_rig`] serialized as `.rkc` bytes — a sample rig for
+/// testing the load path (see `DEMIURG_KFA_DUMP`).
 #[must_use]
 pub fn demo_rkc_bytes() -> Vec<u8> {
-    character::serialize(&demo_character())
+    demo_rig().to_rkc_bytes()
 }
 
 /// A solid box of `col`, pivot at its centre (so the sprite places it
@@ -217,11 +206,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn load_parses_a_serialized_character() {
-        // Serialize the demo rig and load it back through the `.rkc` path.
-        let bytes = character::serialize(&demo_character());
-        let view = KfaView::load(&bytes).expect("loads a valid .rkc");
-        assert_eq!(view.character.bones.len(), 2, "body + arm");
+    fn load_parses_a_serialized_rig() {
+        let view = KfaView::load(&demo_rkc_bytes()).expect("loads a valid .rkc");
+        assert_eq!(view.rig.bones.len(), 2, "body + arm");
         assert_eq!(view.kfas.len(), 1, "one assembled sprite");
     }
 

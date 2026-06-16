@@ -632,10 +632,7 @@ fn main() {
             }
         }
     } else if std::env::var_os("DEMIURG_KFA").is_some() {
-        Some(KfaView::from_character(
-            demiurg_view::demo_character(),
-            Some(0),
-        ))
+        Some(KfaView::from_rig(demiurg_view::demo_rig(), Some(0)))
     } else {
         None
     };
