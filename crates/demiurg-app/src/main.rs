@@ -217,6 +217,19 @@ enum Tool {
     Select,
 }
 
+/// Which aspect of a rigged character is being edited (the Rig panel's
+/// sub-mode). Meaningless when no rig is loaded.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RigMode {
+    /// Edit the active bone's voxel mesh with the usual tools.
+    Sculpt,
+    /// Edit the skeleton: each bone's hinge (parent, joint, axis). The rig
+    /// renders at its rest pose.
+    Skeleton,
+    /// Preview the posed rig playing its clip (read-only).
+    Animate,
+}
+
 /// How a selection gesture combines with the existing selection: replace
 /// it, add to it (Shift), or remove from it (Alt).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -441,9 +454,12 @@ struct Editor {
     /// The bone whose mesh `document` currently edits (index into
     /// `rig.bones`). Meaningless when `rig` is `None`.
     active_bone: usize,
-    /// Rig **Animate** mode: preview the posed, playing rig (read-only)
-    /// instead of editing the active bone. Meaningless when `rig` is `None`.
-    rig_animate: bool,
+    /// Which aspect of the rig is being edited (Sculpt / Skeleton /
+    /// Animate). Meaningless when `rig` is `None`.
+    rig_mode: RigMode,
+    /// The rig's skeleton changed (a hinge edit): the posed preview must be
+    /// rebuilt from `rig`.
+    rig_dirty: bool,
     /// The viewport scene needs a rebuild from the model.
     dirty: bool,
 }
@@ -506,7 +522,8 @@ impl Editor {
             ref_image_dirty: false,
             rig: None,
             active_bone: 0,
-            rig_animate: false,
+            rig_mode: RigMode::Sculpt,
+            rig_dirty: false,
             dirty: false,
         }
     }
@@ -1205,8 +1222,8 @@ impl App {
         if self.confirm_quit || self.busy() {
             return; // don't edit behind the quit / saving / dialog modal
         }
-        if self.editor.rig_animate {
-            return; // Animate preview is read-only
+        if self.editor.rig.is_some() && self.editor.rig_mode != RigMode::Sculpt {
+            return; // Skeleton / Animate previews are read-only
         }
         // "Move reference" mode: left-drag slides the reference, not the tool.
         if self.editor.ref_move_mode && self.editor.reference.is_some() {
@@ -1643,8 +1660,8 @@ impl App {
         if a.export_rkc {
             self.save_to(SaveFormat::Rkc, true);
         }
-        if a.toggle_animate {
-            self.toggle_rig_animate();
+        if let Some(mode) = a.set_rig_mode {
+            self.set_rig_mode(mode);
         }
         if let Some(i) = a.select_bone {
             self.select_bone(i);
@@ -1931,7 +1948,7 @@ impl App {
     /// palette, and reframe.
     fn load_model(&mut self, model: VoxelModel) {
         self.editor.rig = None; // leaving rig mode for a plain model
-        self.editor.rig_animate = false;
+        self.editor.rig_mode = RigMode::Sculpt;
         self.kfa = None;
         self.editor.document.replace_model(model);
         self.view
@@ -1949,38 +1966,51 @@ impl App {
         self.editor.dirty = false;
     }
 
-    /// Enter rig-edit mode: edit `rig`'s bones one at a time. `document`
-    /// holds the active bone's mesh; the Bones panel switches bones.
+    /// Enter rig-edit mode (Sculpt) on the first bone.
     fn enter_rig(&mut self, rig: Rig) {
         self.editor.rig = Some(rig);
         self.editor.active_bone = 0;
-        self.editor.rig_animate = false;
+        self.editor.rig_mode = RigMode::Sculpt;
         self.kfa = None;
         self.load_active_bone();
     }
 
-    /// Toggle the rig **Animate** preview: commit edits and show the posed,
-    /// playing rig (read-only); or drop it and return to editing the active
-    /// bone. No-op outside rig mode.
-    fn toggle_rig_animate(&mut self) {
-        if self.editor.rig.is_none() {
+    /// Switch the rig sub-mode, doing the scene swap each implies: Sculpt
+    /// edits the active bone's mesh; Skeleton and Animate show the posed
+    /// rig (rest pose / playing). No-op outside rig mode.
+    fn set_rig_mode(&mut self, mode: RigMode) {
+        if self.editor.rig.is_none() || self.editor.rig_mode == mode {
             return;
         }
-        self.editor.rig_animate = !self.editor.rig_animate;
-        if self.editor.rig_animate {
-            self.commit_active_bone();
-            let rig = self.editor.rig.clone().expect("rig present");
-            let clip = (!rig.clips.is_empty()).then_some(0);
-            let view = KfaView::from_rig(rig, clip);
-            self.camera = view.framing_camera();
-            self.kfa = Some(view);
+        if self.editor.rig_mode == RigMode::Sculpt {
+            self.commit_active_bone(); // fold the bone's edits back in
+        }
+        self.editor.rig_mode = mode;
+        if mode == RigMode::Sculpt {
+            self.kfa = None;
+            self.load_active_bone(); // restores the active bone + camera
+        } else {
+            self.rebuild_rig_preview();
+            if let Some(kfa) = &self.kfa {
+                self.camera = kfa.framing_camera();
+            }
             // Empty the static scene so only the posed rig renders.
             self.view
                 .set_model(&VoxelModel::new(1, 1, 1), self.editor.render_mode);
-        } else {
-            self.kfa = None;
-            self.load_active_bone(); // restores the active bone + camera
         }
+    }
+
+    /// (Re)build the posed-rig preview from the current rig — rest pose in
+    /// Skeleton mode, the first clip (playing) in Animate. Keeps the camera.
+    fn rebuild_rig_preview(&mut self) {
+        let Some(rig) = &self.editor.rig else {
+            return;
+        };
+        let clip = match self.editor.rig_mode {
+            RigMode::Animate => (!rig.clips.is_empty()).then_some(0),
+            _ => None, // Skeleton: rest pose
+        };
+        self.kfa = Some(KfaView::from_rig(rig.clone(), clip));
     }
 
     /// Load the active bone's mesh into the document for editing, and
@@ -2013,13 +2043,13 @@ impl App {
         }
     }
 
-    /// Switch which bone the tools edit: commit the current bone, then load
-    /// bone `i`. In Animate mode it only records the choice (no view swap).
+    /// Switch which bone is active. In Sculpt it swaps the working mesh; in
+    /// Skeleton / Animate it only records the choice (the preview is shared).
     fn select_bone(&mut self, i: usize) {
         if self.editor.rig.is_none() || i == self.editor.active_bone {
             return;
         }
-        if self.editor.rig_animate {
+        if self.editor.rig_mode != RigMode::Sculpt {
             self.editor.active_bone = i;
             return;
         }
@@ -2079,6 +2109,14 @@ impl App {
             self.editor.refresh_palette();
             self.prune_selection();
             self.editor.dirty = false;
+        }
+        // A skeleton edit (Skeleton mode) changed the rig — rebuild the
+        // posed preview so the rest pose reflects it.
+        if self.editor.rig_dirty {
+            if self.kfa.is_some() {
+                self.rebuild_rig_preview();
+            }
+            self.editor.rig_dirty = false;
         }
         self.update_title();
 

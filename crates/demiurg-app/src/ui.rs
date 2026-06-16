@@ -12,7 +12,7 @@ use demiurg_view::{AXIS_COLORS, RenderMode, ViewDir};
 use roxlap_render::egui;
 
 use crate::reference::RefAxis;
-use crate::{Editor, Tool};
+use crate::{Editor, RigMode, Tool};
 
 /// Build stamp shown at the foot of the tool panel: the crate version and
 /// the git commit it was built from (stamped by `build.rs`).
@@ -68,8 +68,8 @@ pub struct UiActions {
     pub export_rkc: bool,
     /// Switch the active rig bone (index into `rig.bones`).
     pub select_bone: Option<usize>,
-    /// Toggle the rig Edit/Animate preview mode.
-    pub toggle_animate: bool,
+    /// Switch the rig sub-mode (Sculpt / Skeleton / Animate).
+    pub set_rig_mode: Option<RigMode>,
     pub undo: bool,
     pub redo: bool,
     pub delete_sel: bool,
@@ -234,24 +234,25 @@ pub fn build(
             // short window's height.
             egui::ScrollArea::vertical().show(ui, |ui| {
                 // Panels are scoped to the editing context so each mode
-                // shows only what applies (a rig in Animate mode hides the
-                // voxel tools, a plain model hides the rig controls):
+                // shows only what applies (a posed-rig mode hides the voxel
+                // tools, a plain model hides the rig controls):
                 //   Model           — voxel tools only
                 //   Rig ▸ Sculpt    — rig header + voxel tools (edit a bone)
+                //   Rig ▸ Skeleton  — rig header + hinge editor
                 //   Rig ▸ Animate   — rig header + animation (read-only)
-                let animate = editor.rig.is_some() && editor.rig_animate;
+                let rig_mode = editor.rig.is_some().then_some(editor.rig_mode);
                 if editor.rig.is_some() {
                     rig_panel(ui, editor, actions, &t);
                 }
-                if animate {
-                    animate_panel(ui, editor, &t);
-                } else {
-                    voxel_tools_panel(ui, editor, actions, &t);
+                match rig_mode {
+                    None | Some(RigMode::Sculpt) => voxel_tools_panel(ui, editor, actions, &t),
+                    Some(RigMode::Skeleton) => skeleton_panel(ui, editor, &t),
+                    Some(RigMode::Animate) => animate_panel(ui, editor, &t),
                 }
                 views_panel(ui, actions, &t);
 
                 ui.separator();
-                if !animate {
+                if matches!(rig_mode, None | Some(RigMode::Sculpt)) {
                     if editor.tool == Tool::Select {
                         ui.small(t(Msg::HelpSelect));
                     } else {
@@ -427,22 +428,21 @@ fn rig_panel(
         rig.name.clone()
     };
     ui.heading(heading);
-    // Sculpt (edit a bone) vs Animate (posed preview): clicking the inactive
-    // tab toggles the mode (the host does the scene / camera swap).
+    // Sub-mode tabs: Sculpt (edit a bone mesh), Skeleton (edit hinges),
+    // Animate (posed preview). Clicking a tab records the target mode; the
+    // host does the scene / camera swap.
     ui.horizontal(|ui| {
-        if ui
-            .selectable_label(!editor.rig_animate, t(Msg::Sculpt))
-            .clicked()
-            && editor.rig_animate
-        {
-            actions.toggle_animate = true;
-        }
-        if ui
-            .selectable_label(editor.rig_animate, t(Msg::Animate))
-            .clicked()
-            && !editor.rig_animate
-        {
-            actions.toggle_animate = true;
+        for (mode, label) in [
+            (RigMode::Sculpt, t(Msg::Sculpt)),
+            (RigMode::Skeleton, t(Msg::Skeleton)),
+            (RigMode::Animate, t(Msg::Animate)),
+        ] {
+            if ui
+                .selectable_label(editor.rig_mode == mode, label)
+                .clicked()
+            {
+                actions.set_rig_mode = Some(mode);
+            }
         }
     });
     ui.separator();
@@ -476,6 +476,95 @@ fn animate_panel(ui: &mut egui::Ui, editor: &Editor, t: &impl Fn(Msg) -> &'stati
         for clip in &rig.clips {
             ui.small(clip.name.as_str());
         }
+    }
+}
+
+/// Walk parent links from `start` upward (using the snapshot `parents`); is
+/// `child` reachable? Used to reject a reparent that would form a cycle.
+#[allow(clippy::cast_sign_loss)] // p >= 0 is guaranteed by the loop
+fn reaches(parents: &[i32], start: i32, child: usize) -> bool {
+    let mut p = start;
+    while p >= 0 {
+        let pi = p as usize;
+        if pi == child {
+            return true;
+        }
+        p = parents[pi];
+    }
+    false
+}
+
+/// The Skeleton section (Rig ▸ Skeleton): edit the active bone's hinge —
+/// name, parent, joint position (where it attaches to its parent), and
+/// rotation axis. Mutates the rig in place and flags `rig_dirty` so the
+/// rest-pose preview rebuilds.
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation
+)] // bone counts are tiny
+fn skeleton_panel(ui: &mut egui::Ui, editor: &mut Editor, t: &impl Fn(Msg) -> &'static str) {
+    let active = editor.active_bone;
+    let Some(rig) = &mut editor.rig else {
+        return;
+    };
+    if active >= rig.bones.len() {
+        return;
+    }
+    let n = rig.bones.len() as i32;
+    let parents: Vec<i32> = rig.bones.iter().map(|b| b.hinge.parent).collect();
+    let bone = &mut rig.bones[active];
+    let mut changed = false;
+
+    ui.separator();
+    ui.label(t(Msg::Skeleton));
+    changed |= ui.text_edit_singleline(&mut bone.name).changed();
+
+    ui.horizontal(|ui| {
+        ui.label(t(Msg::Parent));
+        let mut parent = bone.hinge.parent;
+        if ui
+            .add(egui::DragValue::new(&mut parent).range(-1..=(n - 1)))
+            .changed()
+            && parent != bone.hinge.parent
+            && (parent < 0 || (parent as usize != active && !reaches(&parents, parent, active)))
+        {
+            bone.hinge.parent = parent;
+            changed = true;
+        }
+    });
+
+    // Joint: the parent-side velcro (p[1]) — where on the parent this bone
+    // attaches, so dragging it moves the bone in the rest pose.
+    ui.label(t(Msg::Joint));
+    ui.horizontal(|ui| {
+        for (axis, name) in [(0usize, "x"), (1, "y"), (2, "z")] {
+            ui.colored_label(axis_color(axis), name);
+            let f = match axis {
+                0 => &mut bone.hinge.p[1].x,
+                1 => &mut bone.hinge.p[1].y,
+                _ => &mut bone.hinge.p[1].z,
+            };
+            changed |= ui.add(egui::DragValue::new(f).speed(0.5)).changed();
+        }
+    });
+
+    // Rotation axis (applied to both sides of the hinge).
+    ui.label(t(Msg::Axis));
+    ui.horizontal(|ui| {
+        for (axis, name) in [(0usize, "x"), (1, "y"), (2, "z")] {
+            ui.colored_label(axis_color(axis), name);
+            let f = match axis {
+                0 => &mut bone.hinge.v[0].x,
+                1 => &mut bone.hinge.v[0].y,
+                _ => &mut bone.hinge.v[0].z,
+            };
+            changed |= ui.add(egui::DragValue::new(f).speed(0.1)).changed();
+        }
+    });
+    if changed {
+        bone.hinge.v[1] = bone.hinge.v[0]; // mirror the axis to the parent side
+        editor.rig_dirty = true;
     }
 }
 
