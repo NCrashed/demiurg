@@ -29,25 +29,26 @@ demiurg-core = { path = "crates/demiurg-core", version = "0.4.0" }
 demiurg-i18n = { path = "crates/demiurg-i18n", version = "0.4.0" }
 demiurg-view = { path = "crates/demiurg-view", version = "0.4.0" }
 
-# demiurg depends on roxlap ONLY (see DESIGN.md §1). Pinned to the
-# PUBLISHED crates.io 0.12.0, which carries the features demiurg needs:
-# kv6 surface normals (`Kv6::from_fn_shaded`), dense-model `.vxl` export
-# (`Vxl::from_dense`), depth-tested debug lines (`SceneRenderer::draw_lines`),
-# and the world-placed 2D image sprites used for reference images
-# (`SceneRenderer::upload_image` / `draw_images`, plus `project_point`). All
-# come from the same source so `Kv6`/`Sprite` types stay compatible; bump
-# together on the next release.
+# demiurg depends on roxlap ONLY (see DESIGN.md §1).
 #
-# roxlap-formats: kv6 read/write + shaded surface extraction, .vxl export.
-# roxlap-core:    Camera, OpticastSettings, SpriteLighting.
+# TEMPORARILY pinned to the LOCAL roxlap checkout while we co-develop the
+# KFA-animation editor: it needs the new `roxlap_formats::character` rigged-
+# character container (added on roxlap master, not yet in a published
+# release). We iterate on the engine and the editor together until the API
+# settles, then bump roxlap, publish it, and restore version pins here before
+# releasing demiurg. (Published baseline is crates.io 0.12.0 — kv6 normals,
+# .vxl export, draw_lines, image sprites.)
+#
+# roxlap-formats: kv6/character/kfa read/write + shaded surface extraction.
+# roxlap-core:    Camera, OpticastSettings, SpriteLighting, kfa_draw.
 # roxlap-scene:   Scene graph the renderer composites.
-# roxlap-render:  unified CPU/GPU facade (SceneRenderer, SpriteSet, draw_lines,
-#                 image sprites).
+# roxlap-render:  unified CPU/GPU facade (SceneRenderer, draw_lines, sprites,
+#                 image sprites, set_kfa_sprites/update_kfa_poses).
 # roxlap-voxvideo lands at M5.
-roxlap-formats = "0.12.0"
-roxlap-core = "0.12.0"
-roxlap-scene = "0.12.0"
-roxlap-render = "0.12.0"
+roxlap-formats = { path = "../roxlap/crates/roxlap-formats" }
+roxlap-core = { path = "../roxlap/crates/roxlap-core" }
+roxlap-scene = { path = "../roxlap/crates/roxlap-scene" }
+roxlap-render = { path = "../roxlap/crates/roxlap-render" }
 
 # Render-side world math (f64 orbit camera). Mirrors roxlap's pin so
 # the workspaces share one glam.

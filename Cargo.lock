@@ -2516,8 +2516,6 @@ dependencies = [
 [[package]]
 name = "roxlap-cavegen"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3c5f89806db1c110a8e5cce51dbc2925103d7ce72b712d78216e5db9ed25dd4"
 dependencies = [
  "roxlap-formats",
 ]
@@ -2525,8 +2523,6 @@ dependencies = [
 [[package]]
 name = "roxlap-core"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c47fb4baea8d1715eedb9273b96bc742bafe07671d66e43e094d4efc073e804e"
 dependencies = [
  "rayon",
  "roxlap-formats",
@@ -2535,14 +2531,10 @@ dependencies = [
 [[package]]
 name = "roxlap-formats"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dce15586f32209dcce3f442232ba4d39ced62a42bf48e3cecca5bb14f0b6a69"
 
 [[package]]
 name = "roxlap-gpu"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37c33bff129b0c49b2a9bfc5c125979ead8b731453ed0c6c60723c359610dac5"
 dependencies = [
  "bytemuck",
  "egui",
@@ -2558,8 +2550,6 @@ dependencies = [
 [[package]]
 name = "roxlap-render"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48b2fe2ab7c82346e42ab5156b45eb218ff872a4eb488e7b52f51064106d5f9a"
 dependencies = [
  "bytemuck",
  "egui",
@@ -2578,8 +2568,6 @@ dependencies = [
 [[package]]
 name = "roxlap-scene"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "490af59fa46c826a55bc46b25acea4e216173052004ca99d9197c06d3f89bc53"
 dependencies = [
  "crossbeam-channel",
  "glam",

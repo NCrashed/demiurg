@@ -44,7 +44,9 @@ use std::time::{Duration, Instant};
 
 use demiurg_core::{Document, VoxelModel, project};
 use demiurg_i18n::{Lang, Msg, tr};
-use demiurg_view::{Line3, ModelView, OrbitCamera, PickHit, RenderMode, ViewDir, pick_voxel};
+use demiurg_view::{
+    KfaView, Line3, ModelView, OrbitCamera, PickHit, RenderMode, ViewDir, pick_voxel,
+};
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::sprite::SpriteLighting;
 use roxlap_render::{
@@ -629,6 +631,10 @@ fn main() {
         force_cpu,
         force_gpu,
         ref_image: None,
+        // First slice: a synthetic rig, gated behind DEMIURG_KFA until rig
+        // authoring exists.
+        kfa: std::env::var_os("DEMIURG_KFA")
+            .map(|_| KfaView::from_character(demiurg_view::demo_character(), Some(0))),
         next_frame: Instant::now(),
     };
 
@@ -769,6 +775,10 @@ struct App {
     /// The uploaded reference-image texture (`upload_image`), drawn each
     /// frame as a world-placed sprite. `None` when no reference is loaded.
     ref_image: Option<ImageId>,
+    /// KFA rig preview (first slice of the animation editor): an animated
+    /// skeletal character drawn via `set_kfa_sprites`/`update_kfa_poses`.
+    /// Seeded with a synthetic rig when `DEMIURG_KFA` is set.
+    kfa: Option<KfaView>,
     /// When the next frame should render (drives the ~60 fps cap).
     next_frame: Instant,
 }
@@ -848,6 +858,9 @@ impl App {
             if let Some(cell) = self.hover_cell() {
                 lines.extend(demiurg_view::voxel_box_lines_3d(pivot, cell));
             }
+        }
+        if let Some(kfa) = &self.kfa {
+            lines.extend(kfa.bone_lines());
         }
         lines
     }
@@ -1808,6 +1821,7 @@ impl App {
         self.editor.dirty = false;
     }
 
+    #[allow(clippy::too_many_lines)] // the per-frame sequence reads better unsplit
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         let Some(window) = self.window.clone() else {
             return;
@@ -1888,6 +1902,13 @@ impl App {
             side_shades,
         };
 
+        // Advance the KFA rig's animation (and re-solve its bones) before
+        // building gizmo lines, so the skeleton overlay tracks the pose.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        if let Some(kfa) = &mut self.kfa {
+            kfa.advance(FRAME_DT.as_millis() as i32);
+        }
+
         // Editor lines (uses the pick ray from the last frame's
         // projection — fine at redraw cadence). Built before the mutable
         // renderer borrow.
@@ -1908,6 +1929,14 @@ impl App {
             self.editor.ref_image_dirty = false;
         }
         renderer.set_sprites(self.view.sprites());
+        // The KFA rig's limb sprites. set_sprites resets the registry each
+        // frame, so re-establish the rig after it, then apply the current
+        // pose. (Re-establishing every frame is wasteful on GPU; a later
+        // pass can do set_kfa_sprites only when the meshes change.)
+        if let Some(kfa) = &mut self.kfa {
+            renderer.set_kfa_sprites(kfa.kfas_mut());
+            renderer.update_kfa_poses(kfa.kfas_mut());
+        }
         renderer.render(self.view.scene_mut(), &camera, &frame);
         // Depth-tested editor gizmos land in the framebuffer; paint_egui
         // then draws the panels on top.
@@ -1929,6 +1958,7 @@ impl App {
                         facing: ImageFacing::World { u, v },
                         size,
                         tint: (alpha << 24) | 0x00FF_FFFF,
+                        alpha_cutoff: 0.0, // blend all texels (current reference behaviour)
                         depth_test: true,
                         double_sided: true,
                     }],
