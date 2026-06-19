@@ -458,6 +458,11 @@ struct Editor {
     /// Mirror the viewport horizontally to correct roxlap's left-handed
     /// (X-mirrored) render. On by default; pure view setting, never saved.
     flip_x: bool,
+    /// CPU ray-plane density (voxlap `anginc`): `1.0` is baseline, `< 1`
+    /// supersamples the angular fan (more ray planes, smoother thin
+    /// geometry), `> 1` coarsens it. Adjusted live with `[` / `]`. Pure
+    /// view/diagnostic setting, never saved; CPU backend only.
+    anginc: f32,
     /// Sprite vs voxel-grid render.
     render_mode: RenderMode,
     /// Target dimensions edited in the Size panel (the "Resize" button
@@ -547,6 +552,7 @@ impl Editor {
             show_grid: true,
             show_edges: true,
             flip_x: true,
+            anginc: 1.0,
             render_mode: DEFAULT_RENDER_MODE,
             resize_dims: [dx, dy, dz],
             selection: HashSet::new(),
@@ -640,6 +646,59 @@ impl Editor {
 }
 
 #[allow(clippy::similar_names, clippy::too_many_lines)] // linear startup setup
+/// Read a `--key value` / `--key=value` CLI flag as `f64`.
+fn flag_f64(key: &str) -> Option<f64> {
+    let args: Vec<String> = std::env::args().collect();
+    let eq = format!("{key}=");
+    for (i, a) in args.iter().enumerate() {
+        if let Some(v) = a.strip_prefix(&eq) {
+            return v.parse().ok();
+        }
+        if a == key {
+            return args.get(i + 1).and_then(|s| s.parse().ok());
+        }
+    }
+    None
+}
+
+/// Read a `--key value` / `--key=value` CLI flag as a string.
+fn flag_str(key: &str) -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    let eq = format!("{key}=");
+    for (i, a) in args.iter().enumerate() {
+        if let Some(v) = a.strip_prefix(&eq) {
+            return Some(v.to_string());
+        }
+        if a == key {
+            return args.get(i + 1).cloned();
+        }
+    }
+    None
+}
+
+/// Whether a bare `--key` flag is present.
+fn has_flag(key: &str) -> bool {
+    std::env::args().any(|a| a == key)
+}
+
+/// Write a packed `0x00RRGGBB` framebuffer as a PNG (RGB).
+#[allow(clippy::cast_possible_truncation)]
+fn save_png(path: &str, fb: &[u32], width: u32, height: u32) {
+    let mut img = image::RgbImage::new(width, height);
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        let v = fb[(y * width + x) as usize];
+        *px = image::Rgb([
+            ((v >> 16) & 0xff) as u8,
+            ((v >> 8) & 0xff) as u8,
+            (v & 0xff) as u8,
+        ]);
+    }
+    match img.save(path) {
+        Ok(()) => eprintln!("demiurg: wrote {path} ({width}x{height})"),
+        Err(e) => eprintln!("demiurg: save {path}: {e}"),
+    }
+}
+
 fn main() {
     // The CPU renderer is the default (it's reliable everywhere); `--gpu`
     // opts into the GPU backend, `--cpu` forces CPU. The first non-flag
@@ -658,7 +717,30 @@ fn main() {
 
     let force_cpu = args.iter().any(|a| a == "--cpu");
     let force_gpu = args.iter().any(|a| a == "--gpu");
-    let arg = args.into_iter().find(|a| !a.starts_with('-'));
+    // The first non-flag argument is the file to open. Flags that take a
+    // separate value token (`--shot out.png`, `--dist 24`) must not have
+    // that value mistaken for the file path.
+    const VALUE_FLAGS: &[&str] = &[
+        "--shot", "--cx", "--cy", "--cz", "--yaw", "--pitch", "--dist", "--width", "--height",
+        "--anginc",
+    ];
+    let arg = {
+        let mut found = None;
+        let mut i = 0;
+        while i < args.len() {
+            let a = &args[i];
+            if a.starts_with('-') {
+                if VALUE_FLAGS.contains(&a.as_str()) {
+                    i += 1; // also skip this flag's value token
+                }
+                i += 1;
+                continue;
+            }
+            found = Some(a.clone());
+            break;
+        }
+        found
+    };
     let autosave = autosave_path();
 
     // An `.rkc` argument (or DEMIURG_KFA) opens a rigged character for
@@ -711,8 +793,57 @@ fn main() {
         (new_model(), None, None, false)
     };
 
-    let view = ModelView::new(&model, DEFAULT_RENDER_MODE);
-    let camera = view.framing_camera();
+    let mut view = ModelView::new(&model, DEFAULT_RENDER_MODE);
+    let mut camera = view.framing_camera();
+
+    // Headless screenshot mode: `--shot <out.png>` renders the loaded
+    // model on the CPU from the given camera and exits (no window). The
+    // camera overrides mirror the in-app `P`-key dump exactly, so a bad
+    // angle found in the GUI can be reproduced here verbatim:
+    //   --cx/--cy/--cz (look-at), --yaw/--pitch (radians), --dist,
+    //   --width/--height (default 900x700), --no-flip (disable the X flip).
+    if let Some(path) = flag_str("--shot") {
+        if let Some(v) = flag_f64("--cx") {
+            camera.center.x = v;
+        }
+        if let Some(v) = flag_f64("--cy") {
+            camera.center.y = v;
+        }
+        if let Some(v) = flag_f64("--cz") {
+            camera.center.z = v;
+        }
+        if let Some(v) = flag_f64("--yaw") {
+            camera.yaw = v;
+        }
+        if let Some(v) = flag_f64("--pitch") {
+            camera.pitch = v;
+        }
+        if let Some(v) = flag_f64("--dist") {
+            camera.dist = v;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let w = flag_f64("--width").map_or(900u32, |v| v as u32);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let h = flag_f64("--height").map_or(700u32, |v| v as u32);
+        let flip = !has_flag("--no-flip");
+        #[allow(clippy::cast_possible_truncation)]
+        let anginc = flag_f64("--anginc").map_or(1.0f32, |v| v as f32);
+        eprintln!(
+            "demiurg: shot cam --cx {:.4} --cy {:.4} --cz {:.4} --yaw {:.5} --pitch {:.5} --dist {:.3} ({}x{}, flip_x={flip}, anginc={anginc})",
+            camera.center.x,
+            camera.center.y,
+            camera.center.z,
+            camera.yaw,
+            camera.pitch,
+            camera.dist,
+            w,
+            h
+        );
+        let fb = view.render_cpu(&camera, w, h, VOXEL_SIDE_SHADES, SKY_COLOR, flip, anginc);
+        save_png(&path, &fb, w, h);
+        return;
+    }
+
     let mut editor = Editor::new(model);
     editor.rig = startup_rig; // edits the active bone (0); None = plain model
     if recovered {
@@ -2282,7 +2413,9 @@ impl App {
         }
         self.update_title();
 
-        let settings = OpticastSettings::for_oracle_framebuffer(size.width, size.height);
+        let mut settings = OpticastSettings::for_oracle_framebuffer(size.width, size.height);
+        // Live ray-plane density (CPU backend); `[` / `]` adjust it.
+        settings.anginc = self.editor.anginc;
         // Lit (lightmode 1) by default for directional shading; the View
         // menu can switch it to flat (lightmode 0). `R==G==B` material
         // takes the cheap shading path either way.
@@ -2408,6 +2541,36 @@ impl App {
             // Ctrl+S overwrites the project file (S without Ctrl zooms out).
             KeyCode::KeyS if ctrl && pressed => self.save_project(),
             KeyCode::Delete | KeyCode::Backspace if pressed => self.delete_selection(),
+            // Diagnostic: dump the current camera as `--shot` flags so a
+            // problematic angle can be reproduced headlessly. Paste the line
+            // after `demiurg <model> --shot out.png`.
+            KeyCode::KeyP if pressed => {
+                let c = &self.camera;
+                eprintln!(
+                    "demiurg camera: --cx {:.4} --cy {:.4} --cz {:.4} --yaw {:.5} --pitch {:.5} --dist {:.3}",
+                    c.center.x, c.center.y, c.center.z, c.yaw, c.pitch, c.dist
+                );
+            }
+            // Ray-plane density (CPU backend, voxlap `anginc`). `]` adds ray
+            // planes (anginc /= sqrt2, supersamples the angular fan), `[`
+            // removes them (anginc *= sqrt2, coarsens). Clamped to a sane
+            // range; thin-geometry silhouette artifacts shrink as planes rise.
+            KeyCode::BracketRight if pressed => {
+                self.editor.anginc = (self.editor.anginc / std::f32::consts::SQRT_2).max(0.125);
+                eprintln!(
+                    "demiurg: ray planes anginc={:.4} ({:.2}x baseline)",
+                    self.editor.anginc,
+                    1.0 / self.editor.anginc
+                );
+            }
+            KeyCode::BracketLeft if pressed => {
+                self.editor.anginc = (self.editor.anginc * std::f32::consts::SQRT_2).min(16.0);
+                eprintln!(
+                    "demiurg: ray planes anginc={:.4} ({:.2}x baseline)",
+                    self.editor.anginc,
+                    1.0 / self.editor.anginc
+                );
+            }
             KeyCode::ArrowLeft => self.keys.left = pressed,
             KeyCode::ArrowRight => self.keys.right = pressed,
             KeyCode::ArrowUp => self.keys.up = pressed,

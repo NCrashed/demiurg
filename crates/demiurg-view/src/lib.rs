@@ -158,6 +158,74 @@ impl ModelView {
     pub fn framing_camera(&self) -> OrbitCamera {
         OrbitCamera::framing(DVec3::from_array([0.0, 0.0, 0.0]), self.extent * 1.6)
     }
+
+    /// Headless CPU render of the scene to a packed `0x00RRGGBB`
+    /// framebuffer (row-major, `width x height`), for offscreen
+    /// screenshots / oracle-style diagnostics with no window. This is
+    /// the voxel-grid path only — sprites and editor gizmos are not
+    /// drawn. It mirrors `roxlap_render`'s CPU `render` so a shot matches
+    /// what the live viewport draws for the same camera + `side_shades`.
+    ///
+    /// `side_shades` is voxlap's `setsideshades` (pass `[0; 6]` to
+    /// disable). `flip_x` mirrors the result horizontally to match the
+    /// viewport's "Flip X" correction.
+    #[must_use]
+    pub fn render_cpu(
+        &mut self,
+        camera: &OrbitCamera,
+        width: u32,
+        height: u32,
+        side_shades: [i8; 6],
+        sky_color: u32,
+        flip_x: bool,
+        anginc: f32,
+    ) -> Vec<u32> {
+        use roxlap_core::OpticastSettings;
+        use roxlap_core::rasterizer::ScratchPool;
+
+        let cam = camera.to_roxlap();
+        let pixels = (width as usize) * (height as usize);
+        let mut fb = vec![sky_color; pixels];
+        let mut zb = vec![f32::INFINITY; pixels];
+
+        // anginc < 1 casts ~1/anginc more rays than pixels, so the radar /
+        // angstart scratch (sized ~per-pixel) must be inflated to match, or
+        // hrend indexes out of bounds. Cap the oversample so the buffers
+        // stay a sane size.
+        let oversample = (1.0 / anginc.clamp(0.125, 1.0)).ceil() as u32;
+        let pool_xres = width.saturating_mul(oversample).saturating_add(8);
+        let mut pool = ScratchPool::new(pool_xres, height, roxlap_scene::CHUNK_SIZE_XY);
+        pool.set_skycast(i32::from_ne_bytes(sky_color.to_ne_bytes()), 0);
+        pool.set_fog(0, 0);
+        pool.set_treat_z_max_as_air(true);
+        let [top, bot, left, right, up, down] = side_shades;
+        pool.set_side_shades(top, bot, left, right, up, down);
+
+        let mut settings = OpticastSettings::for_oracle_framebuffer(width, height);
+        // Ray-plane density: anginc < 1 supersamples the angular fan
+        // (more ray planes), anginc > 1 coarsens it. 1.0 is the baseline.
+        settings.anginc = anginc.max(0.05);
+        roxlap_scene::render::render_scene_composed(
+            &mut fb,
+            &mut zb,
+            width as usize,
+            width,
+            height,
+            &mut pool,
+            &mut self.scene,
+            &cam,
+            &settings,
+            sky_color,
+            None,
+        );
+
+        if flip_x {
+            for row in fb.chunks_mut(width as usize) {
+                row.reverse();
+            }
+        }
+        fb
+    }
 }
 
 fn empty_sprite_set() -> SpriteSet {
