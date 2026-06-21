@@ -76,6 +76,14 @@ pub struct UiActions {
     pub move_bone: Option<(usize, usize)>,
     /// Delete the bone at this index (the active bone).
     pub delete_bone: Option<usize>,
+    /// A Skeleton-panel hinge edit (name / parent / joint) began this frame:
+    /// capture the pre-edit rig for undo.
+    pub rig_edit_begin: bool,
+    /// A Skeleton-panel hinge edit changed a value this frame: commit the
+    /// captured pre-edit snapshot as one undo step.
+    pub rig_edit_changed: bool,
+    /// Set the active bone's rotation axis to this principal axis (0=X,1=Y,2=Z).
+    pub set_bone_axis: Option<usize>,
     /// Switch the rig sub-mode (Sculpt / Skeleton / Animate).
     pub set_rig_mode: Option<RigMode>,
     pub undo: bool,
@@ -255,7 +263,7 @@ pub fn build(
                 }
                 match rig_mode {
                     None | Some(RigMode::Sculpt) => voxel_tools_panel(ui, editor, actions, &t),
-                    Some(RigMode::Skeleton) => skeleton_panel(ui, editor, &t),
+                    Some(RigMode::Skeleton) => skeleton_panel(ui, editor, actions, &t),
                     Some(RigMode::Animate) => animate_panel(ui, editor, &t),
                 }
                 views_panel(ui, actions, &t);
@@ -559,7 +567,12 @@ fn reaches(parents: &[i32], start: i32, child: usize) -> bool {
     clippy::cast_sign_loss,
     clippy::cast_possible_truncation
 )] // bone counts are tiny
-fn skeleton_panel(ui: &mut egui::Ui, editor: &mut Editor, t: &impl Fn(Msg) -> &'static str) {
+fn skeleton_panel(
+    ui: &mut egui::Ui,
+    editor: &mut Editor,
+    actions: &mut UiActions,
+    t: &impl Fn(Msg) -> &'static str,
+) {
     let active = editor.active_bone;
     let Some(rig) = &mut editor.rig else {
         return;
@@ -570,18 +583,24 @@ fn skeleton_panel(ui: &mut egui::Ui, editor: &mut Editor, t: &impl Fn(Msg) -> &'
     let n = rig.bones.len() as i32;
     let parents: Vec<i32> = rig.bones.iter().map(|b| b.hinge.parent).collect();
     let bone = &mut rig.bones[active];
+    // `changed`: an inline value was mutated this frame (commit the pending
+    // undo snapshot). `begin`: an interaction started this frame (capture the
+    // pre-edit snapshot). Together they make one undo step per interaction.
     let mut changed = false;
+    let mut begin = false;
 
     ui.separator();
     ui.label(t(Msg::Skeleton));
-    changed |= ui.text_edit_singleline(&mut bone.name).changed();
+    let r = ui.text_edit_singleline(&mut bone.name);
+    begin |= r.gained_focus();
+    changed |= r.changed();
 
     ui.horizontal(|ui| {
         ui.label(t(Msg::Parent));
         let mut parent = bone.hinge.parent;
-        if ui
-            .add(egui::DragValue::new(&mut parent).range(-1..=(n - 1)))
-            .changed()
+        let r = ui.add(egui::DragValue::new(&mut parent).range(-1..=(n - 1)));
+        begin |= r.drag_started() || r.gained_focus();
+        if r.changed()
             && parent != bone.hinge.parent
             && (parent < 0 || (parent as usize != active && !reaches(&parents, parent, active)))
         {
@@ -601,13 +620,15 @@ fn skeleton_panel(ui: &mut egui::Ui, editor: &mut Editor, t: &impl Fn(Msg) -> &'
                 1 => &mut bone.hinge.p[1].y,
                 _ => &mut bone.hinge.p[1].z,
             };
-            changed |= ui.add(egui::DragValue::new(f).speed(0.5)).changed();
+            let r = ui.add(egui::DragValue::new(f).speed(0.5));
+            begin |= r.drag_started() || r.gained_focus();
+            changed |= r.changed();
         }
     });
 
     // Rotation axis — pick a principal axis (always a unit vector, so the
     // pose never distorts; a free numeric axis is too easy to leave
-    // non-normalised).
+    // non-normalised). Deferred to the host so it can be one undo step.
     ui.label(t(Msg::Axis));
     let cur = [bone.hinge.v[0].x, bone.hinge.v[0].y, bone.hinge.v[0].z];
     ui.horizontal(|ui| {
@@ -615,20 +636,20 @@ fn skeleton_panel(ui: &mut egui::Ui, editor: &mut Editor, t: &impl Fn(Msg) -> &'
             let mut unit = [0.0f32; 3];
             unit[axis] = 1.0;
             #[allow(clippy::float_cmp)] // unit axes are exact 0.0 / 1.0
-            let active = cur == unit;
+            let is_active = cur == unit;
             if ui
-                .selectable_label(active, egui::RichText::new(name).color(axis_color(axis)))
+                .selectable_label(is_active, egui::RichText::new(name).color(axis_color(axis)))
                 .clicked()
             {
-                bone.hinge.v[0].x = unit[0];
-                bone.hinge.v[0].y = unit[1];
-                bone.hinge.v[0].z = unit[2];
-                changed = true;
+                actions.set_bone_axis = Some(axis);
             }
         }
     });
+    if begin {
+        actions.rig_edit_begin = true;
+    }
     if changed {
-        bone.hinge.v[1] = bone.hinge.v[0]; // mirror the axis to the parent side
+        actions.rig_edit_changed = true;
         editor.rig_dirty = true;
     }
 }

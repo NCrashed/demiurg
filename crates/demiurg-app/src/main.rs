@@ -627,6 +627,21 @@ impl Editor {
         }
     }
 
+    /// Capture a pending pre-edit snapshot at the start of an inline hinge
+    /// interaction (a Skeleton-panel drag / focus). Committed by
+    /// [`Self::rig_commit_pending`] only once a value actually changes, so a
+    /// click that edits nothing leaves no undo step.
+    fn rig_begin_edit(&mut self) {
+        self.rig_pending = self.rig_state();
+    }
+
+    /// Commit the pending inline-edit snapshot as one undo step (if any).
+    fn rig_commit_pending(&mut self) {
+        if let Some(snap) = self.rig_pending.take() {
+            self.rig_push_undo(snap);
+        }
+    }
+
     /// Whether an undo/redo is available — the rig stack in rig mode, the
     /// document history in plain model mode.
     fn can_undo(&self) -> bool {
@@ -2141,6 +2156,36 @@ impl App {
         if let Some(i) = a.delete_bone {
             self.delete_bone(i);
         }
+        // Inline Skeleton-panel hinge edits: capture the pre-edit rig when an
+        // interaction starts, commit it as one undo step when a value changes.
+        if a.rig_edit_begin {
+            self.editor.rig_begin_edit();
+        }
+        if a.rig_edit_changed {
+            self.editor.rig_commit_pending();
+        }
+        if let Some(axis) = a.set_bone_axis {
+            self.set_bone_axis(axis);
+        }
+    }
+
+    /// Set the active bone's rotation axis to a principal axis (one undo step).
+    fn set_bone_axis(&mut self, axis: usize) {
+        if self.editor.rig.is_none() || axis > 2 {
+            return;
+        }
+        self.editor.rig_checkpoint();
+        if let Some(rig) = self.editor.rig.as_mut() {
+            if let Some(b) = rig.bones.get_mut(self.editor.active_bone) {
+                let mut unit = [0.0f32; 3];
+                unit[axis] = 1.0;
+                b.hinge.v[0].x = unit[0];
+                b.hinge.v[0].y = unit[1];
+                b.hinge.v[0].z = unit[2];
+                b.hinge.v[1] = b.hinge.v[0]; // mirror the axis to the parent side
+            }
+        }
+        self.editor.rig_dirty = true;
     }
 
     /// `Ctrl+S` / Save: settle a float, then overwrite the known project
