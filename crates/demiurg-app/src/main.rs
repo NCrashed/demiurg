@@ -501,7 +501,25 @@ struct Editor {
     rig_dirty: bool,
     /// The viewport scene needs a rebuild from the model.
     dirty: bool,
+    /// Whole-rig undo / redo snapshots (rig mode only). Each entry is the
+    /// full rig + active bone *before* one edit. Plain model editing uses the
+    /// per-bone [`Document`] history instead; this stays empty there.
+    rig_undo: Vec<RigSnapshot>,
+    rig_redo: Vec<RigSnapshot>,
+    /// Pre-edit snapshot for an in-progress sculpt stroke, committed to
+    /// `rig_undo` on stroke end only if the stroke changed anything.
+    rig_pending: Option<RigSnapshot>,
 }
+
+/// One whole-rig undo entry: the rig (every bone's mesh + hinge, clips, root)
+/// and which bone was active, captured before an edit.
+struct RigSnapshot {
+    rig: Rig,
+    active_bone: usize,
+}
+
+/// Cap on the rig undo/redo depth (each entry clones the whole rig).
+const RIG_UNDO_DEPTH: usize = 100;
 
 impl Editor {
     /// The model as the viewport should show it: the document model with
@@ -566,6 +584,64 @@ impl Editor {
             rig_mode: RigMode::Sculpt,
             rig_dirty: false,
             dirty: false,
+            rig_undo: Vec::new(),
+            rig_redo: Vec::new(),
+            rig_pending: None,
+        }
+    }
+
+    /// Snapshot the current true rig state: the rig with the active bone's
+    /// *working* mesh folded in (in Sculpt the live mesh lives in `document`;
+    /// in Skeleton / Animate it's already committed into `rig`). `None`
+    /// outside rig mode.
+    fn rig_state(&self) -> Option<RigSnapshot> {
+        let mut rig = self.rig.clone()?;
+        if self.rig_mode == RigMode::Sculpt {
+            if let Some(b) = rig.bones.get_mut(self.active_bone) {
+                b.model = self.document.model().clone();
+            }
+        }
+        Some(RigSnapshot {
+            rig,
+            active_bone: self.active_bone,
+        })
+    }
+
+    /// Push a captured pre-edit snapshot onto the undo stack (clearing redo,
+    /// capping depth). Pair with [`Self::rig_state`] for ops that may turn out
+    /// to be no-ops (push only on success).
+    fn rig_push_undo(&mut self, snap: RigSnapshot) {
+        self.rig_redo.clear();
+        self.rig_undo.push(snap);
+        if self.rig_undo.len() > RIG_UNDO_DEPTH {
+            self.rig_undo.remove(0);
+        }
+    }
+
+    /// Record the pre-edit rig state for undo. Call *before* a mutation that is
+    /// certain to change the rig (structural op, bone drag, sculpt stroke).
+    /// No-op outside rig mode.
+    fn rig_checkpoint(&mut self) {
+        if let Some(snap) = self.rig_state() {
+            self.rig_push_undo(snap);
+        }
+    }
+
+    /// Whether an undo/redo is available — the rig stack in rig mode, the
+    /// document history in plain model mode.
+    fn can_undo(&self) -> bool {
+        if self.rig.is_some() {
+            !self.rig_undo.is_empty()
+        } else {
+            self.document.can_undo()
+        }
+    }
+
+    fn can_redo(&self) -> bool {
+        if self.rig.is_some() {
+            !self.rig_redo.is_empty()
+        } else {
+            self.document.can_redo()
         }
     }
 
@@ -596,7 +672,7 @@ impl Editor {
 
     /// Apply the active tool at a resolved pick.
     #[allow(clippy::cast_possible_wrap)] // voxel coords are far below i32::MAX
-    fn apply(&mut self, hit: PickHit) {
+    fn apply(&mut self, hit: PickHit) -> bool {
         let color = self.color;
         let changed = match self.tool {
             Tool::Place => match in_bounds(hit.place, self.document.dims()) {
@@ -642,6 +718,7 @@ impl Editor {
         if changed {
             self.dirty = true;
         }
+        changed
     }
 }
 
@@ -1255,6 +1332,7 @@ impl App {
             return false;
         }
         let anchor = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
+        // (The move bakes into the mesh in `commit_float`, which checkpoints.)
         // Drag an existing float directly; a model selection lifts lazily.
         let (base, lifted) = match &self.editor.float {
             Some(f) => (f.cells.clone(), true),
@@ -1456,6 +1534,8 @@ impl App {
         let Some(anchor) = ray_plane(o, d, plane_point, normal) else {
             return;
         };
+        // The drag will move the bone — record the pre-drag rig for undo.
+        self.editor.rig_checkpoint();
         self.bone_drag = Some(BoneDrag {
             bone,
             plane_point,
@@ -1555,12 +1635,20 @@ impl App {
             return;
         }
         if self.editor.tool.is_continuous() {
+            // Capture the pre-stroke rig; committed on end_paint iff the stroke
+            // changed anything (rig mode only — None in plain model editing).
+            self.editor.rig_pending = self.editor.rig_state();
             self.editor.document.begin_stroke();
             self.painting = true;
             self.last_paint = None;
             self.paint_step();
         } else if let Some(hit) = self.tool_pick() {
-            self.editor.apply(hit);
+            let snap = self.editor.rig_state();
+            if self.editor.apply(hit) {
+                if let Some(s) = snap {
+                    self.editor.rig_push_undo(s);
+                }
+            }
         }
     }
 
@@ -1671,7 +1759,14 @@ impl App {
             return;
         }
         if self.painting {
-            self.editor.document.end_stroke();
+            let changed = self.editor.document.end_stroke();
+            // Commit the pre-stroke rig snapshot only if the stroke edited
+            // something (drop it otherwise, so empty strokes add no undo step).
+            if let Some(snap) = self.editor.rig_pending.take() {
+                if changed {
+                    self.editor.rig_push_undo(snap);
+                }
+            }
             self.painting = false;
             self.last_paint = None;
         }
@@ -1742,7 +1837,11 @@ impl App {
             return;
         }
         let cells: Vec<([u32; 3], u32)> = self.editor.selection.iter().map(|&c| (c, 0)).collect();
+        let snap = self.editor.rig_state();
         if self.editor.document.set_cells(cells) {
+            if let Some(s) = snap {
+                self.editor.rig_push_undo(s);
+            }
             self.editor.dirty = true;
         }
         self.editor.selection.clear();
@@ -1809,7 +1908,14 @@ impl App {
                 .filter_map(|(p, col)| in_bounds(*p, dims).map(|v| (v, *col))),
         );
         if !cells.is_empty() {
-            self.editor.document.set_cells(cells);
+            // Baking a float (paste / moved selection) edits the mesh — record
+            // the pre-bake rig for undo (no-op outside rig mode).
+            let snap = self.editor.rig_state();
+            if self.editor.document.set_cells(cells) {
+                if let Some(s) = snap {
+                    self.editor.rig_push_undo(s);
+                }
+            }
         }
     }
 
@@ -1865,14 +1971,53 @@ impl App {
     }
 
     fn do_undo(&mut self) {
-        if self.editor.document.undo() {
+        if self.editor.rig.is_some() {
+            self.rig_undo();
+        } else if self.editor.document.undo() {
             self.editor.dirty = true;
         }
     }
 
     fn do_redo(&mut self) {
-        if self.editor.document.redo() {
+        if self.editor.rig.is_some() {
+            self.rig_redo();
+        } else if self.editor.document.redo() {
             self.editor.dirty = true;
+        }
+    }
+
+    /// Undo the last rig edit: swap the current state onto the redo stack and
+    /// restore the previous snapshot (rig + active bone), then refresh the
+    /// working bone (Sculpt) / posed preview (Skeleton, Animate).
+    fn rig_undo(&mut self) {
+        let Some(prev) = self.editor.rig_undo.pop() else {
+            return;
+        };
+        if let Some(cur) = self.editor.rig_state() {
+            self.editor.rig_redo.push(cur);
+        }
+        self.restore_rig_snapshot(prev);
+    }
+
+    /// Redo the last undone rig edit (mirror of [`Self::rig_undo`]).
+    fn rig_redo(&mut self) {
+        let Some(next) = self.editor.rig_redo.pop() else {
+            return;
+        };
+        if let Some(cur) = self.editor.rig_state() {
+            self.editor.rig_undo.push(cur);
+        }
+        self.restore_rig_snapshot(next);
+    }
+
+    /// Install a rig snapshot as the live state and resync the view. Keeps the
+    /// camera steady (an undo shouldn't jump the viewport).
+    fn restore_rig_snapshot(&mut self, snap: RigSnapshot) {
+        self.editor.rig = Some(snap.rig);
+        self.editor.active_bone = snap.active_bone;
+        self.editor.rig_dirty = true; // rebuild the posed preview if showing
+        if self.editor.rig_mode == RigMode::Sculpt {
+            self.load_active_bone(false);
         }
     }
 
@@ -2301,8 +2446,11 @@ impl App {
         self.editor.rig = Some(rig);
         self.editor.active_bone = 0;
         self.editor.rig_mode = RigMode::Sculpt;
+        self.editor.rig_undo.clear();
+        self.editor.rig_redo.clear();
+        self.editor.rig_pending = None;
         self.kfa = None;
-        self.load_active_bone();
+        self.load_active_bone(true);
     }
 
     /// Switch the rig sub-mode, doing the scene swap each implies: Sculpt
@@ -2318,7 +2466,7 @@ impl App {
         self.editor.rig_mode = mode;
         if mode == RigMode::Sculpt {
             self.kfa = None;
-            self.load_active_bone(); // restores the active bone + camera
+            self.load_active_bone(true); // restores the active bone + camera
         } else {
             self.rebuild_rig_preview();
             if let Some(kfa) = &self.kfa {
@@ -2343,10 +2491,11 @@ impl App {
         self.kfa = Some(KfaView::from_rig(rig.clone(), clip));
     }
 
-    /// Load the active bone's mesh into the document for editing, and
-    /// reframe. (Leaves `editor.rig` in place — only the working model
-    /// changes.)
-    fn load_active_bone(&mut self) {
+    /// Load the active bone's mesh into the document for editing. `reframe`
+    /// re-centres the camera (on a bone switch); undo/redo pass `false` to
+    /// keep the view steady. (Leaves `editor.rig` in place — only the working
+    /// model changes.)
+    fn load_active_bone(&mut self, reframe: bool) {
         let Some(rig) = &self.editor.rig else {
             return;
         };
@@ -2359,7 +2508,9 @@ impl App {
         self.editor.selection.clear();
         self.editor.float = None;
         self.drag = None;
-        self.camera = self.view.framing_camera();
+        if reframe {
+            self.camera = self.view.framing_camera();
+        }
         self.editor.dirty = false;
     }
 
@@ -2385,7 +2536,7 @@ impl App {
         }
         self.commit_active_bone();
         self.editor.active_bone = i;
-        self.load_active_bone();
+        self.load_active_bone(true);
     }
 
     /// Add a new bone as a child of the active bone and make it active.
@@ -2396,6 +2547,7 @@ impl App {
         if self.editor.rig.is_none() {
             return;
         }
+        self.editor.rig_checkpoint();
         if self.editor.rig_mode == RigMode::Sculpt {
             self.commit_active_bone();
         }
@@ -2405,7 +2557,7 @@ impl App {
         self.editor.active_bone = new_idx;
         self.editor.rig_dirty = true;
         if self.editor.rig_mode == RigMode::Sculpt {
-            self.load_active_bone();
+            self.load_active_bone(true);
         }
     }
 
@@ -2417,17 +2569,21 @@ impl App {
         if self.editor.rig.is_none() {
             return;
         }
+        let Some(snap) = self.editor.rig_state() else {
+            return;
+        };
         if self.editor.rig_mode == RigMode::Sculpt {
             self.commit_active_bone();
         }
         let rig = self.editor.rig.as_mut().expect("rig present");
         let Some(new_idx) = rig.duplicate_bone(i) else {
-            return;
+            return; // no-op: drop the snapshot, no checkpoint
         };
+        self.editor.rig_push_undo(snap);
         self.editor.active_bone = new_idx;
         self.editor.rig_dirty = true;
         if self.editor.rig_mode == RigMode::Sculpt {
-            self.load_active_bone();
+            self.load_active_bone(true);
         }
     }
 
@@ -2436,12 +2592,17 @@ impl App {
     /// bone, then reloads it (Sculpt) or rebuilds the preview (via
     /// `rig_dirty`).
     fn delete_bone(&mut self, i: usize) {
+        let Some(snap) = self.editor.rig_state() else {
+            return;
+        };
         let Some(rig) = self.editor.rig.as_mut() else {
             return;
         };
         if !rig.delete_bone(i) {
-            return;
+            return; // refused (root / last bone): no checkpoint
         }
+        self.editor.rig_push_undo(snap);
+        let rig = self.editor.rig.as_mut().expect("rig present");
         let last = rig.bones.len() - 1;
         if self.editor.active_bone > last {
             self.editor.active_bone = last;
@@ -2451,7 +2612,7 @@ impl App {
         }
         self.editor.rig_dirty = true;
         if self.editor.rig_mode == RigMode::Sculpt {
-            self.load_active_bone();
+            self.load_active_bone(true);
         }
     }
 
@@ -2459,12 +2620,16 @@ impl App {
     /// same bone. Only the ordering changes (not the meshes), so Sculpt needs
     /// no reload; the posed preview rebuilds via `rig_dirty`.
     fn move_bone(&mut self, from: usize, to: usize) {
+        let Some(snap) = self.editor.rig_state() else {
+            return;
+        };
         let Some(rig) = self.editor.rig.as_mut() else {
             return;
         };
         if !rig.move_bone(from, to) {
-            return;
+            return; // no-op: drop the snapshot, no checkpoint
         }
+        self.editor.rig_push_undo(snap);
         if self.editor.active_bone == from {
             self.editor.active_bone = to;
         }

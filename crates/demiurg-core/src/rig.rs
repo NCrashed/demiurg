@@ -246,8 +246,7 @@ impl Rig {
         self.bones.insert(to, b);
         // Remap parent indices through the same move.
         for bone in &mut self.bones {
-            if bone.hinge.parent >= 0 {
-                let p = bone.hinge.parent as usize;
+            if let Ok(p) = usize::try_from(bone.hinge.parent) {
                 bone.hinge.parent = i32::try_from(remap_index(p, from, to)).unwrap_or(-1);
             }
         }

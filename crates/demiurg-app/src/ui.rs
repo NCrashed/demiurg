@@ -177,14 +177,14 @@ pub fn build(
             });
             ui.menu_button(t(Msg::Edit), |ui| {
                 if ui
-                    .add_enabled(editor.document.can_undo(), egui::Button::new(t(Msg::Undo)))
+                    .add_enabled(editor.can_undo(), egui::Button::new(t(Msg::Undo)))
                     .clicked()
                 {
                     actions.undo = true;
                     ui.close();
                 }
                 if ui
-                    .add_enabled(editor.document.can_redo(), egui::Button::new(t(Msg::Redo)))
+                    .add_enabled(editor.can_redo(), egui::Button::new(t(Msg::Redo)))
                     .clicked()
                 {
                     actions.redo = true;
