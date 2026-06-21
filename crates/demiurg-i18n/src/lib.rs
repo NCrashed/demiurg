@@ -140,6 +140,8 @@ pub enum Msg {
     NextKey,
     AddKey,
     DeleteKey,
+    AddClip,
+    DeleteClip,
     Parent,
     Joint,
     Axis,
@@ -174,7 +176,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 96] = [
+    pub const ALL: [Msg; 98] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -244,6 +246,8 @@ impl Msg {
         Msg::NextKey,
         Msg::AddKey,
         Msg::DeleteKey,
+        Msg::AddClip,
+        Msg::DeleteClip,
         Msg::Parent,
         Msg::Joint,
         Msg::Axis,
@@ -355,6 +359,8 @@ const fn en(msg: Msg) -> &'static str {
         Msg::NextKey => "Next keyframe",
         Msg::AddKey => "Add key",
         Msg::DeleteKey => "Delete key",
+        Msg::AddClip => "Add clip",
+        Msg::DeleteClip => "Delete clip",
         Msg::Parent => "Parent",
         Msg::Joint => "Joint",
         Msg::Axis => "Axis",
@@ -459,6 +465,8 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::NextKey => "Следующий ключевой кадр",
         Msg::AddKey => "Добавить ключ",
         Msg::DeleteKey => "Удалить ключ",
+        Msg::AddClip => "Добавить клип",
+        Msg::DeleteClip => "Удалить клип",
         Msg::Parent => "Родитель",
         Msg::Joint => "Сустав",
         Msg::Axis => "Ось",

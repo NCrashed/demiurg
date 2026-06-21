@@ -281,6 +281,50 @@ impl Rig {
         true
     }
 
+    // --- Clip management (Animate mode) -------------------------------------
+
+    /// Append a new skeletal clip named `name` with a single rest-pose key at
+    /// t=0 (all-zero angles, one column per bone) and a loop marker at
+    /// [`DEFAULT_TAIL_MS`], and return its index. The lone key makes the clip
+    /// immediately previewable / editable rather than an empty timeline.
+    pub fn add_clip(&mut self, name: String) -> usize {
+        self.clips.push(Clip {
+            name,
+            data: ClipData::Skeletal {
+                frmval: vec![vec![0i16; self.bones.len()]],
+                seq: vec![
+                    Seq { tim: 0, frm: 0 },
+                    Seq {
+                        tim: DEFAULT_TAIL_MS,
+                        frm: !0, // loop back to entry 0
+                    },
+                ],
+            },
+        });
+        self.clips.len() - 1
+    }
+
+    /// Rename clip `i`. Returns `false` if `i` is out of range.
+    pub fn rename_clip(&mut self, i: usize, name: String) -> bool {
+        match self.clips.get_mut(i) {
+            Some(c) => {
+                c.name = name;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Delete clip `i` (the rig may end up with no clips). Returns `false` if
+    /// `i` is out of range.
+    pub fn remove_clip(&mut self, i: usize) -> bool {
+        if i >= self.clips.len() {
+            return false;
+        }
+        self.clips.remove(i);
+        true
+    }
+
     // --- Keyframe authoring (Animate mode) ----------------------------------
     //
     // These expose a skeletal clip as a sorted list of [`Keyframe`]s and
@@ -950,6 +994,41 @@ mod tests {
         // The last remaining key can't be removed.
         assert!(!rig.remove_keyframe(0, 0));
         assert_eq!(rig.clip_keyframes(0).len(), 1);
+    }
+
+    #[test]
+    fn add_clip_appends_a_one_key_rest_pose_clip() {
+        let mut rig = anim_rig(2);
+        assert_eq!(rig.clips.len(), 1);
+        let idx = rig.add_clip("walk".to_string());
+        assert_eq!(idx, 1);
+        assert_eq!(rig.clips.len(), 2);
+        assert_eq!(rig.clips[1].name, "walk");
+        // One rest-pose key (all-zero angles, one column per bone), looping.
+        let kfs = rig.clip_keyframes(1);
+        assert_eq!(kfs.len(), 1);
+        assert_eq!(kfs[0].tim, 0);
+        assert_eq!(kfs[0].angles, vec![0, 0]);
+        assert_eq!(rig.clip_loop_tim(1), 500);
+        // Round-trips (frmval columns match bones.len()).
+        let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("new clip is consistent");
+        assert_eq!(back.clips.len(), 2);
+    }
+
+    #[test]
+    fn rename_and_remove_clip() {
+        let mut rig = anim_rig(2);
+        rig.add_clip("b".to_string()); // clips: ["a", "b"]
+        assert!(rig.rename_clip(1, "renamed".to_string()));
+        assert_eq!(rig.clips[1].name, "renamed");
+        assert!(!rig.rename_clip(9, "x".to_string()));
+        // Remove down to zero; out-of-range is a no-op.
+        assert!(rig.remove_clip(0));
+        assert_eq!(rig.clips.len(), 1);
+        assert_eq!(rig.clips[0].name, "renamed");
+        assert!(rig.remove_clip(0));
+        assert!(rig.clips.is_empty());
+        assert!(!rig.remove_clip(0));
     }
 
     #[test]

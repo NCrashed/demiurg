@@ -93,6 +93,12 @@ pub struct UiActions {
     pub seek: Option<i32>,
     /// Animate timeline: preview this clip (index into `rig.clips`).
     pub select_clip: Option<usize>,
+    /// Animate: append a new clip.
+    pub add_clip: bool,
+    /// Animate: rename clip `.0` to `.1`.
+    pub rename_clip: Option<(usize, String)>,
+    /// Animate: delete the clip at this index.
+    pub delete_clip: Option<usize>,
     /// Animate timeline: select this keyframe (index into the clip's sorted
     /// keys).
     pub select_key: Option<usize>,
@@ -304,9 +310,9 @@ pub fn build(
                 match rig_mode {
                     None | Some(RigMode::Sculpt) => voxel_tools_panel(ui, editor, actions, &t),
                     Some(RigMode::Skeleton) => skeleton_panel(ui, editor, actions, &t),
-                    // Animate's controls live in the bottom timeline bar, not
-                    // the left panel — nothing extra here.
-                    Some(RigMode::Animate) => {}
+                    // Animate: the clip library lives in the left panel; the
+                    // timeline for the active clip is the bottom bar.
+                    Some(RigMode::Animate) => clips_panel(ui, editor, actions, &t),
                 }
                 views_panel(ui, actions, &t);
 
@@ -568,11 +574,62 @@ fn rig_panel(
     });
 }
 
+/// The clip library (Rig ▸ Animate), in the left panel: a selectable list of
+/// the rig's clips plus add / delete / rename. Selecting drives the bottom
+/// timeline bar (which animates the active clip). Emits [`UiActions`]; the
+/// rename field edits a per-frame copy of the name (the host applies it, so the
+/// round-trip is invisible) under the inline begin/commit-pending undo step.
+fn clips_panel(
+    ui: &mut egui::Ui,
+    editor: &Editor,
+    actions: &mut UiActions,
+    t: &impl Fn(Msg) -> &'static str,
+) {
+    let Some(rig) = &editor.rig else {
+        return;
+    };
+    ui.separator();
+    ui.label(t(Msg::Clips));
+    if rig.clips.is_empty() {
+        ui.small("—");
+    } else {
+        let active = editor.active_clip.min(rig.clips.len() - 1);
+        for (i, clip) in rig.clips.iter().enumerate() {
+            if ui
+                .selectable_label(i == active, clip.name.as_str())
+                .clicked()
+            {
+                actions.select_clip = Some(i);
+            }
+        }
+        // Rename the active clip in place.
+        let mut name = rig.clips[active].name.clone();
+        let resp = ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY));
+        if resp.gained_focus() {
+            actions.rig_edit_begin = true;
+        }
+        if resp.changed() {
+            actions.rename_clip = Some((active, name));
+            actions.rig_edit_changed = true;
+        }
+    }
+    ui.horizontal(|ui| {
+        if ui.button(t(Msg::AddClip)).clicked() {
+            actions.add_clip = true;
+        }
+        ui.add_enabled_ui(!rig.clips.is_empty(), |ui| {
+            if ui.button(t(Msg::DeleteClip)).clicked() {
+                actions.delete_clip = Some(editor.active_clip.min(rig.clips.len() - 1));
+            }
+        });
+    });
+}
+
 /// The Animation timeline bar (Rig ▸ Animate), drawn full-width along the
-/// bottom: a clip picker, transport (play/pause, prev/next keyframe), a
-/// custom-painted scrub track with keyframe ticks + a draggable playhead, and
-/// a time readout. Read-only with respect to the rig — it emits [`UiActions`]
-/// the host applies to the live `KfaView`; it never mutates the document.
+/// bottom: the active clip name, transport (play/pause, prev/next keyframe),
+/// Add/Delete key, an inline angle editor, a custom-painted scrub track with
+/// keyframe ticks + a draggable playhead, and a time readout. Read-only with
+/// respect to the rig — it emits [`UiActions`]; it never mutates the document.
 fn timeline_bar(
     ui: &mut egui::Ui,
     editor: &Editor,
@@ -598,22 +655,8 @@ fn timeline_bar(
     // Top row: clip picker + transport + key ops + (selected) angle editor +
     // a right-aligned time readout.
     ui.horizontal(|ui| {
-        if rig.clips.len() > 1 {
-            egui::ComboBox::from_id_salt("clip_picker")
-                .selected_text(rig.clips[active].name.as_str())
-                .show_ui(ui, |ui| {
-                    for (i, clip) in rig.clips.iter().enumerate() {
-                        if ui
-                            .selectable_label(i == active, clip.name.as_str())
-                            .clicked()
-                        {
-                            actions.select_clip = Some(i);
-                        }
-                    }
-                });
-        } else {
-            ui.label(rig.clips[active].name.as_str());
-        }
+        // The active clip name (selection / management is the left clip panel).
+        ui.strong(rig.clips[active].name.as_str());
         ui.separator();
 
         ui.add_enabled_ui(has_anim, |ui| {

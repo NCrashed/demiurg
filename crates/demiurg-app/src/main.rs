@@ -2171,6 +2171,12 @@ impl App {
         if let Some(i) = a.select_clip {
             self.select_clip(i);
         }
+        if a.add_clip {
+            self.add_clip();
+        }
+        if let Some(i) = a.delete_clip {
+            self.delete_clip(i);
+        }
         if let Some(sel) = a.select_key {
             self.set_selected_key(Some(sel));
         }
@@ -2202,6 +2208,9 @@ impl App {
         }
         if a.rig_edit_changed {
             self.editor.rig_commit_pending();
+        }
+        if let Some((i, name)) = &a.rename_clip {
+            self.rename_clip(*i, name.clone());
         }
         // Timeline drags (tick retime / angle edit). Undo is handled by the
         // begin/commit-pending pair above (one drag = one step), so these only
@@ -2589,6 +2598,53 @@ impl App {
         self.editor.selected_key = None; // selection is per-clip
         if self.editor.rig_mode == RigMode::Animate {
             self.rebuild_rig_preview(); // fresh sprite starts at time 0
+        }
+    }
+
+    /// Append a new clip, make it active, and preview it. One undo step.
+    fn add_clip(&mut self) {
+        let snap = self.editor.rig_state();
+        let idx = self.editor.rig.as_mut().map(|r| {
+            let name = format!("clip {}", r.clips.len() + 1);
+            r.add_clip(name)
+        });
+        if let Some(idx) = idx {
+            if let Some(snap) = snap {
+                self.editor.rig_push_undo(snap);
+            }
+            self.editor.active_clip = idx;
+            self.editor.selected_key = None;
+            if self.editor.rig_mode == RigMode::Animate {
+                self.rebuild_rig_preview();
+            }
+        }
+    }
+
+    /// Rename clip `i`. Undo is the active begin/commit-pending step (a text
+    /// edit); the rename doesn't change the baked pose, so no re-bake.
+    fn rename_clip(&mut self, i: usize, name: String) {
+        if let Some(r) = self.editor.rig.as_mut() {
+            r.rename_clip(i, name);
+        }
+    }
+
+    /// Delete clip `i`, clamping the active clip / clearing the selection. One
+    /// undo step (on success).
+    fn delete_clip(&mut self, i: usize) {
+        let snap = self.editor.rig_state();
+        let removed = self.editor.rig.as_mut().is_some_and(|r| r.remove_clip(i));
+        if removed {
+            if let Some(snap) = snap {
+                self.editor.rig_push_undo(snap);
+            }
+            let n = self.editor.rig.as_ref().map_or(0, |r| r.clips.len());
+            if self.editor.active_clip >= n {
+                self.editor.active_clip = n.saturating_sub(1);
+            }
+            self.editor.selected_key = None;
+            if self.editor.rig_mode == RigMode::Animate {
+                self.rebuild_rig_preview();
+            }
         }
     }
 
