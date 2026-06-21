@@ -496,6 +496,13 @@ struct Editor {
     /// Which aspect of the rig is being edited (Sculpt / Skeleton /
     /// Animate). Meaningless when `rig` is `None`.
     rig_mode: RigMode,
+    /// Animate mode: whether the timeline is playing (advancing time each
+    /// frame) or paused (holding the current pose). Default `true` to match
+    /// the historic auto-play behaviour.
+    anim_playing: bool,
+    /// Animate mode: which clip the timeline previews (index into
+    /// `rig.clips`). Clamped to the clip count on use.
+    active_clip: usize,
     /// The rig's skeleton changed (a hinge edit): the posed preview must be
     /// rebuilt from `rig`.
     rig_dirty: bool,
@@ -582,6 +589,8 @@ impl Editor {
             rig: None,
             active_bone: 0,
             rig_mode: RigMode::Sculpt,
+            anim_playing: true,
+            active_clip: 0,
             rig_dirty: false,
             dirty: false,
             rig_undo: Vec::new(),
@@ -2059,10 +2068,18 @@ impl App {
             saving: self.saving(),
             recovered: self.recovered,
         };
+        let timeline = self
+            .kfa
+            .as_ref()
+            .map_or_else(ui::Timeline::default, |k| ui::Timeline {
+                time: k.time(),
+                duration: k.duration(),
+                ticks: k.seq_times(),
+            });
         let editor = &mut self.editor;
         let mut actions = UiActions::default();
         let out = ctx.run_ui(raw, |ui| {
-            ui::build(ui, editor, &mut actions, modals, marquee);
+            ui::build(ui, editor, &mut actions, modals, marquee, &timeline);
         });
         self.egui_state
             .as_mut()
@@ -2140,6 +2157,19 @@ impl App {
         }
         if let Some(mode) = a.set_rig_mode {
             self.set_rig_mode(mode);
+        }
+        if a.toggle_play {
+            self.editor.anim_playing = !self.editor.anim_playing;
+        }
+        if let Some(ms) = a.seek {
+            // Scrubbing implies pause; the next redraw re-poses at the new time.
+            self.editor.anim_playing = false;
+            if let Some(kfa) = &mut self.kfa {
+                kfa.set_time(ms);
+            }
+        }
+        if let Some(i) = a.select_clip {
+            self.select_clip(i);
         }
         if let Some(i) = a.select_bone {
             self.select_bone(i);
@@ -2491,6 +2521,8 @@ impl App {
         self.editor.rig = Some(rig);
         self.editor.active_bone = 0;
         self.editor.rig_mode = RigMode::Sculpt;
+        self.editor.anim_playing = true;
+        self.editor.active_clip = 0;
         self.editor.rig_undo.clear();
         self.editor.rig_redo.clear();
         self.editor.rig_pending = None;
@@ -2523,15 +2555,35 @@ impl App {
         }
     }
 
+    /// Switch the previewed Animate clip. Re-bakes the new clip's `seq` /
+    /// `frmval` into a fresh sprite (playhead reset to 0). No-op outside a
+    /// rig or for an out-of-range index.
+    fn select_clip(&mut self, i: usize) {
+        let Some(rig) = &self.editor.rig else {
+            return;
+        };
+        if i >= rig.clips.len() || i == self.editor.active_clip {
+            return;
+        }
+        self.editor.active_clip = i;
+        if self.editor.rig_mode == RigMode::Animate {
+            self.rebuild_rig_preview(); // fresh sprite starts at time 0
+        }
+    }
+
     /// (Re)build the posed-rig preview from the current rig — rest pose in
-    /// Skeleton mode, the first clip (playing) in Animate. Keeps the camera.
+    /// Skeleton mode, the active clip in Animate. Keeps the camera.
     fn rebuild_rig_preview(&mut self) {
         let Some(rig) = &self.editor.rig else {
             return;
         };
         let clip = match self.editor.rig_mode {
-            RigMode::Animate => (!rig.clips.is_empty()).then_some(0),
-            _ => None, // Skeleton: rest pose
+            // Clamp the chosen clip to the current count (deletes / reorders
+            // elsewhere can leave `active_clip` stale).
+            RigMode::Animate if !rig.clips.is_empty() => {
+                Some(self.editor.active_clip.min(rig.clips.len() - 1))
+            }
+            _ => None, // Skeleton (or no clips): rest pose
         };
         self.kfa = Some(KfaView::from_rig(rig.clone(), clip));
     }
@@ -2775,9 +2827,19 @@ impl App {
 
         // Advance the KFA rig's animation (and re-solve its bones) before
         // building gizmo lines, so the skeleton overlay tracks the pose.
+        // Gate the *time delta*, not the call: the per-frame solve must keep
+        // running every frame (it poses the limbs + skeleton gizmo), but time
+        // only advances while playing in Animate mode. With `dt == 0`,
+        // `advance` re-poses in place at the current playhead — so a paused or
+        // freshly-scrubbed frame still renders correctly.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         if let Some(kfa) = &mut self.kfa {
-            kfa.advance(FRAME_DT.as_millis() as i32);
+            let dt = if self.editor.rig_mode == RigMode::Animate && self.editor.anim_playing {
+                FRAME_DT.as_millis() as i32
+            } else {
+                0
+            };
+            kfa.advance(dt);
         }
 
         // Editor lines (uses the pick ray from the last frame's

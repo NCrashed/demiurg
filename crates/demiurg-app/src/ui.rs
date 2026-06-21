@@ -86,6 +86,13 @@ pub struct UiActions {
     pub set_bone_axis: Option<usize>,
     /// Switch the rig sub-mode (Sculpt / Skeleton / Animate).
     pub set_rig_mode: Option<RigMode>,
+    /// Animate timeline: toggle play / pause.
+    pub toggle_play: bool,
+    /// Animate timeline: seek the playhead to this absolute time (ms). Implies
+    /// pause.
+    pub seek: Option<i32>,
+    /// Animate timeline: preview this clip (index into `rig.clips`).
+    pub select_clip: Option<usize>,
     pub undo: bool,
     pub redo: bool,
     pub delete_sel: bool,
@@ -98,6 +105,20 @@ pub struct UiActions {
     pub quit_cancel: bool,
     /// The autosave-recovery banner was dismissed.
     pub recovered_ok: bool,
+}
+
+/// A snapshot of the posed rig's playback state for the Animate timeline.
+/// Read from the host's `KfaView` before the UI frame (the view itself isn't
+/// reachable from the panel, which only borrows the [`Editor`]).
+#[derive(Clone, Default)]
+pub struct Timeline {
+    /// Current playhead position (ms).
+    pub time: i32,
+    /// Clip loop length (ms); `0` when the clip has no animation.
+    pub duration: i32,
+    /// Keyframe timestamps (ms) — the sequence entries, drawn as ticks on the
+    /// scrub track. Includes the final loop-marker entry.
+    pub ticks: Vec<i32>,
 }
 
 /// Which overlay modals to draw this frame.
@@ -121,6 +142,7 @@ pub fn build(
     actions: &mut UiActions,
     modals: Modals,
     marquee: Option<[(f64, f64); 2]>,
+    timeline: &Timeline,
 ) {
     let lang = editor.lang;
     let t = |m: Msg| tr(lang, m);
@@ -244,6 +266,17 @@ pub fn build(
         });
     });
 
+    // The animation timeline lives in a full-width bar along the bottom (like
+    // a video/animation editor), declared before the left panel so it spans
+    // the whole window width. Only in Animate mode.
+    if editor.rig.is_some() && editor.rig_mode == RigMode::Animate {
+        egui::Panel::bottom("timeline")
+            .exact_size(64.0)
+            .show_inside(ui, |ui| {
+                timeline_bar(ui, editor, actions, timeline, &t);
+            });
+    }
+
     egui::Panel::left("tools")
         .default_size(200.0)
         .show_inside(ui, |ui| {
@@ -264,7 +297,9 @@ pub fn build(
                 match rig_mode {
                     None | Some(RigMode::Sculpt) => voxel_tools_panel(ui, editor, actions, &t),
                     Some(RigMode::Skeleton) => skeleton_panel(ui, editor, actions, &t),
-                    Some(RigMode::Animate) => animate_panel(ui, editor, &t),
+                    // Animate's controls live in the bottom timeline bar, not
+                    // the left panel — nothing extra here.
+                    Some(RigMode::Animate) => {}
                 }
                 views_panel(ui, actions, &t);
 
@@ -526,20 +561,138 @@ fn rig_panel(
     });
 }
 
-/// The Animation section (Rig ▸ Animate): the rig's clips. Read-only for
-/// now — playback runs automatically; a scrubbing timeline comes later.
-fn animate_panel(ui: &mut egui::Ui, editor: &Editor, t: &impl Fn(Msg) -> &'static str) {
+/// The Animation timeline bar (Rig ▸ Animate), drawn full-width along the
+/// bottom: a clip picker, transport (play/pause, prev/next keyframe), a
+/// custom-painted scrub track with keyframe ticks + a draggable playhead, and
+/// a time readout. Read-only with respect to the rig — it emits [`UiActions`]
+/// the host applies to the live `KfaView`; it never mutates the document.
+fn timeline_bar(
+    ui: &mut egui::Ui,
+    editor: &Editor,
+    actions: &mut UiActions,
+    timeline: &Timeline,
+    t: &impl Fn(Msg) -> &'static str,
+) {
     let Some(rig) = &editor.rig else {
         return;
     };
-    ui.separator();
-    ui.label(t(Msg::Clips));
     if rig.clips.is_empty() {
-        ui.small("—");
-    } else {
-        for clip in &rig.clips {
-            ui.small(clip.name.as_str());
+        ui.centered_and_justified(|ui| ui.weak(format!("{} —", t(Msg::Clips))));
+        return;
+    }
+    let active = editor.active_clip.min(rig.clips.len() - 1);
+    let has_anim = timeline.duration > 0;
+
+    // Top row: clip picker (when there's a choice) + transport + readout.
+    ui.horizontal(|ui| {
+        if rig.clips.len() > 1 {
+            egui::ComboBox::from_id_salt("clip_picker")
+                .selected_text(rig.clips[active].name.as_str())
+                .show_ui(ui, |ui| {
+                    for (i, clip) in rig.clips.iter().enumerate() {
+                        if ui
+                            .selectable_label(i == active, clip.name.as_str())
+                            .clicked()
+                        {
+                            actions.select_clip = Some(i);
+                        }
+                    }
+                });
+        } else {
+            ui.label(rig.clips[active].name.as_str());
         }
+        ui.separator();
+
+        ui.add_enabled_ui(has_anim, |ui| {
+            let label = if editor.anim_playing {
+                t(Msg::Pause)
+            } else {
+                t(Msg::Play)
+            };
+            if ui.button(label).clicked() {
+                actions.toggle_play = true;
+            }
+            // Prev / next keyframe: jump the playhead to the adjacent tick.
+            if ui.button("|◀").on_hover_text(t(Msg::PrevKey)).clicked() {
+                if let Some(&p) = timeline.ticks.iter().rev().find(|&&x| x < timeline.time) {
+                    actions.seek = Some(p);
+                }
+            }
+            if ui.button("▶|").on_hover_text(t(Msg::NextKey)).clicked() {
+                if let Some(&n) = timeline.ticks.iter().find(|&&x| x > timeline.time) {
+                    actions.seek = Some(n);
+                }
+            }
+        });
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.monospace(format!("{} / {} ms", timeline.time, timeline.duration));
+        });
+    });
+
+    // The scrub track fills the remaining bar width.
+    ui.add_enabled_ui(has_anim, |ui| timeline_track(ui, timeline, actions));
+}
+
+/// Draw and handle the custom scrub track: a baseline, a tick for every
+/// keyframe, and a draggable playhead. Click or drag anywhere seeks; the ticks
+/// are the future home for keyframe selection / drag in the authoring slice.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)] // ms/px are tiny
+fn timeline_track(ui: &mut egui::Ui, timeline: &Timeline, actions: &mut UiActions) {
+    let height = 22.0;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click_and_drag(),
+    );
+    if timeline.duration <= 0 {
+        return;
+    }
+    let painter = ui.painter_at(rect);
+    let visuals = ui.visuals();
+
+    // Inset so ticks at t=0 / t=duration aren't clipped at the edges.
+    let margin = 6.0;
+    let x0 = rect.left() + margin;
+    let span = (rect.width() - 2.0 * margin).max(1.0);
+    let dur = timeline.duration as f32;
+    let x_of = |ms: i32| x0 + (ms as f32 / dur) * span;
+    let mid_y = rect.center().y;
+
+    // Baseline.
+    painter.line_segment(
+        [egui::pos2(x0, mid_y), egui::pos2(x0 + span, mid_y)],
+        egui::Stroke::new(1.0, visuals.weak_text_color()),
+    );
+    // Keyframe ticks.
+    for &ms in &timeline.ticks {
+        let x = x_of(ms);
+        painter.line_segment(
+            [
+                egui::pos2(x, rect.top() + 3.0),
+                egui::pos2(x, rect.bottom() - 3.0),
+            ],
+            egui::Stroke::new(1.5, visuals.strong_text_color()),
+        );
+    }
+    // Playhead.
+    let px = x_of(timeline.time);
+    painter.line_segment(
+        [egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())],
+        egui::Stroke::new(2.0, visuals.selection.bg_fill),
+    );
+    painter.circle_filled(
+        egui::pos2(px, rect.top() + 3.0),
+        3.5,
+        visuals.selection.bg_fill,
+    );
+
+    // Click / drag anywhere on the track seeks to that time.
+    if let Some(pos) = response
+        .interact_pointer_pos()
+        .filter(|_| response.clicked() || response.dragged())
+    {
+        let ratio = ((pos.x - x0) / span).clamp(0.0, 1.0);
+        actions.seek = Some((ratio * dur).round() as i32);
     }
 }
 

@@ -81,6 +81,41 @@ impl KfaView {
         OrbitCamera::framing(center, f64::from(extent) * 3.0)
     }
 
+    /// The playhead position (ms) of the baked clip. `0` with no sprite.
+    #[must_use]
+    pub fn time(&self) -> i32 {
+        self.kfas.first().map_or(0, |k| k.kfatim)
+    }
+
+    /// Seek the playhead to `ms` (clamped to `≥ 0`). The pose updates on the
+    /// next [`Self::advance`] (which re-resolves from `kfatim`); pass `0` as
+    /// the delta there to re-pose in place without advancing time.
+    pub fn set_time(&mut self, ms: i32) {
+        if let Some(k) = self.kfas.first_mut() {
+            k.kfatim = ms.max(0);
+        }
+    }
+
+    /// The clip's loop length (ms): the last sequence entry's timestamp (the
+    /// `!target` loop marker). `0` when there is no animation.
+    #[must_use]
+    pub fn duration(&self) -> i32 {
+        self.kfas
+            .first()
+            .and_then(|k| k.seq.iter().map(|s| s.tim).max())
+            .unwrap_or(0)
+    }
+
+    /// Timestamps (ms) of every sequence entry — the keyframe ticks for the
+    /// timeline. Empty when there is no animation.
+    #[must_use]
+    pub fn seq_times(&self) -> Vec<i32> {
+        self.kfas
+            .first()
+            .map(|k| k.seq.iter().map(|s| s.tim).collect())
+            .unwrap_or_default()
+    }
+
     /// Advance the baked animation by `dt_ms` and re-solve bone transforms,
     /// so [`Self::bone_lines`] reads the current pose.
     pub fn advance(&mut self, dt_ms: i32) {
@@ -225,5 +260,28 @@ mod tests {
     #[test]
     fn load_rejects_garbage() {
         assert!(KfaView::load(b"not an rkc file").is_err());
+    }
+
+    #[test]
+    fn timeline_reads_the_baked_clip() {
+        let mut view = KfaView::from_rig(demo_rig(), Some(0));
+        assert_eq!(view.duration(), 2000, "loop length = last seq tim");
+        assert_eq!(view.seq_times(), vec![0, 500, 1000, 1500, 2000]);
+
+        // Seek, then re-pose in place (dt == 0): the playhead holds at 750.
+        view.set_time(750);
+        view.advance(0);
+        assert_eq!(view.time(), 750);
+
+        // set_time clamps below zero.
+        view.set_time(-100);
+        assert_eq!(view.time(), 0);
+    }
+
+    #[test]
+    fn timeline_is_empty_for_the_rest_pose() {
+        let view = KfaView::from_rig(demo_rig(), None);
+        assert_eq!(view.duration(), 0);
+        assert!(view.seq_times().is_empty());
     }
 }

@@ -134,6 +134,10 @@ pub enum Msg {
     Skeleton,
     Animate,
     Clips,
+    Play,
+    Pause,
+    PrevKey,
+    NextKey,
     Parent,
     Joint,
     Axis,
@@ -168,7 +172,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 90] = [
+    pub const ALL: [Msg; 94] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -232,6 +236,10 @@ impl Msg {
         Msg::Skeleton,
         Msg::Animate,
         Msg::Clips,
+        Msg::Play,
+        Msg::Pause,
+        Msg::PrevKey,
+        Msg::NextKey,
         Msg::Parent,
         Msg::Joint,
         Msg::Axis,
@@ -336,6 +344,10 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Skeleton => "Skeleton",
         Msg::Animate => "Animate",
         Msg::Clips => "Clips",
+        Msg::Play => "Play",
+        Msg::Pause => "Pause",
+        Msg::PrevKey => "Previous keyframe",
+        Msg::NextKey => "Next keyframe",
         Msg::Parent => "Parent",
         Msg::Joint => "Joint",
         Msg::Axis => "Axis",
@@ -433,6 +445,10 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Skeleton => "Скелет",
         Msg::Animate => "Анимация",
         Msg::Clips => "Клипы",
+        Msg::Play => "Воспроизвести",
+        Msg::Pause => "Пауза",
+        Msg::PrevKey => "Предыдущий ключевой кадр",
+        Msg::NextKey => "Следующий ключевой кадр",
         Msg::Parent => "Родитель",
         Msg::Joint => "Сустав",
         Msg::Axis => "Ось",
