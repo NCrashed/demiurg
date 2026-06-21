@@ -229,6 +229,57 @@ impl Rig {
         }
         Some(new)
     }
+
+    /// Move bone `from` to index `to`, keeping the rig consistent: every
+    /// `hinge.parent` index is remapped through the permutation, and each
+    /// clip's `frmval` columns are reordered the same way. Bone order is
+    /// purely organisational (the limb solver topologically sorts hinges
+    /// itself), so any permutation is valid as long as the indices follow.
+    ///
+    /// No-op (returns `false`) if either index is out of range or `from == to`.
+    pub fn move_bone(&mut self, from: usize, to: usize) -> bool {
+        let n = self.bones.len();
+        if from >= n || to >= n || from == to {
+            return false;
+        }
+        let b = self.bones.remove(from);
+        self.bones.insert(to, b);
+        // Remap parent indices through the same move.
+        for bone in &mut self.bones {
+            if bone.hinge.parent >= 0 {
+                let p = bone.hinge.parent as usize;
+                bone.hinge.parent = i32::try_from(remap_index(p, from, to)).unwrap_or(-1);
+            }
+        }
+        // Reorder every clip's per-bone columns identically.
+        for clip in &mut self.clips {
+            if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
+                for row in frmval {
+                    if from < row.len() && to < row.len() {
+                        let v = row.remove(from);
+                        row.insert(to, v);
+                    }
+                }
+            }
+        }
+        true
+    }
+}
+
+/// New index of an element originally at `old` after the element at `from` is
+/// removed and re-inserted at `to` (a `Vec::remove` + `Vec::insert`). The
+/// moved element lands on `to`; the span between `from` and `to` shifts by one
+/// toward the vacated slot; everything else is unchanged.
+fn remap_index(old: usize, from: usize, to: usize) -> usize {
+    if old == from {
+        to
+    } else if from < to && old > from && old <= to {
+        old - 1
+    } else if from > to && old >= to && old < from {
+        old + 1
+    } else {
+        old
+    }
 }
 
 /// The origin point, reused for default hinge endpoints.
@@ -430,6 +481,47 @@ mod tests {
         assert_eq!(rig.bones[2].hinge.p[0].x, 0.0);
         // Still exactly one root.
         assert_eq!(rig.bones.iter().filter(|b| b.hinge.parent < 0).count(), 1);
+    }
+
+    #[test]
+    fn move_bone_remaps_parents_and_reorders_clip_columns() {
+        // 0:root -> 1:child -> 2:grandchild.
+        let mut rig = Rig {
+            name: "t".to_string(),
+            root: [0.0; 3],
+            bones: vec![
+                bone("root", -1, 1),
+                bone("child", 0, 2),
+                bone("grand", 1, 3),
+            ],
+            clips: vec![clip(3)],
+        };
+        // Move the grandchild (2) to the front (0): order becomes grand, root,
+        // child — old indices [0,1,2] map to new [1,2,0].
+        assert!(rig.move_bone(2, 0));
+        assert_eq!(
+            rig.bones
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>(),
+            ["grand", "root", "child"]
+        );
+        // Parents follow the permutation: root stays -1; child's parent (old 0)
+        // -> 1; grand's parent (old 1) -> 2.
+        assert_eq!(rig.bones[0].hinge.parent, 2); // grand -> child (now at 2)
+        assert_eq!(rig.bones[1].hinge.parent, -1); // root
+        assert_eq!(rig.bones[2].hinge.parent, 1); // child -> root (now at 1)
+        // Clip columns reordered the same way: old col 2 now leads.
+        let frmval = skeletal(&rig.clips[0]);
+        assert!(frmval.iter().all(|row| row.len() == 3));
+        assert_eq!(frmval[0], vec![2, 0, 1]); // was [0,1,2]
+        assert_eq!(frmval[1], vec![12, 10, 11]); // was [10,11,12]
+        // Round-trips (columns stay consistent with bones.len()).
+        let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("consistent");
+        assert_eq!(back.bones.len(), 3);
+        // No-ops.
+        assert!(!rig.move_bone(1, 1));
+        assert!(!rig.move_bone(0, 9));
     }
 
     #[test]

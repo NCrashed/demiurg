@@ -72,6 +72,8 @@ pub struct UiActions {
     pub add_bone: bool,
     /// Duplicate the bone at this index (the active bone) as a sibling.
     pub duplicate_bone: Option<usize>,
+    /// Reorder the active bone: move it from `.0` to index `.1`.
+    pub move_bone: Option<(usize, usize)>,
     /// Delete the bone at this index (the active bone).
     pub delete_bone: Option<usize>,
     /// Switch the rig sub-mode (Sculpt / Skeleton / Animate).
@@ -473,9 +475,9 @@ fn rig_panel(
     // need at least one column.
     ui.separator();
     let active = editor.active_bone;
+    let count = rig.bones.len();
     let has_active = rig.bones.get(active).is_some();
-    let can_delete =
-        rig.bones.len() > 1 && rig.bones.get(active).is_some_and(|b| b.hinge.parent >= 0);
+    let can_delete = count > 1 && rig.bones.get(active).is_some_and(|b| b.hinge.parent >= 0);
     ui.horizontal(|ui| {
         if ui.button(t(Msg::AddBone)).clicked() {
             actions.add_bone = true;
@@ -491,6 +493,27 @@ fn rig_panel(
             .clicked()
         {
             actions.delete_bone = Some(active);
+        }
+    });
+    // Reorder the active bone in the list (purely organisational). Compact
+    // arrows: up toward index 0, down toward the end.
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(has_active && active > 0, egui::Button::new("⏶").small())
+            .on_hover_text(t(Msg::MoveBoneUp))
+            .clicked()
+        {
+            actions.move_bone = Some((active, active - 1));
+        }
+        if ui
+            .add_enabled(
+                has_active && active + 1 < count,
+                egui::Button::new("⏷").small(),
+            )
+            .on_hover_text(t(Msg::MoveBoneDown))
+            .clicked()
+        {
+            actions.move_bone = Some((active, active + 1));
         }
     });
 }

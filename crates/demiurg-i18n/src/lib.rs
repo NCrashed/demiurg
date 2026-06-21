@@ -128,6 +128,8 @@ pub enum Msg {
     AddBone,
     DuplicateBone,
     DeleteBone,
+    MoveBoneUp,
+    MoveBoneDown,
     Sculpt,
     Skeleton,
     Animate,
@@ -166,7 +168,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 88] = [
+    pub const ALL: [Msg; 90] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -224,6 +226,8 @@ impl Msg {
         Msg::AddBone,
         Msg::DuplicateBone,
         Msg::DeleteBone,
+        Msg::MoveBoneUp,
+        Msg::MoveBoneDown,
         Msg::Sculpt,
         Msg::Skeleton,
         Msg::Animate,
@@ -326,6 +330,8 @@ const fn en(msg: Msg) -> &'static str {
         Msg::AddBone => "Add bone",
         Msg::DuplicateBone => "Duplicate bone",
         Msg::DeleteBone => "Delete bone",
+        Msg::MoveBoneUp => "Move bone up",
+        Msg::MoveBoneDown => "Move bone down",
         Msg::Sculpt => "Sculpt",
         Msg::Skeleton => "Skeleton",
         Msg::Animate => "Animate",
@@ -421,6 +427,8 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::AddBone => "Добавить кость",
         Msg::DuplicateBone => "Дублировать кость",
         Msg::DeleteBone => "Удалить кость",
+        Msg::MoveBoneUp => "Переместить кость вверх",
+        Msg::MoveBoneDown => "Переместить кость вниз",
         Msg::Sculpt => "Лепка",
         Msg::Skeleton => "Скелет",
         Msg::Animate => "Анимация",

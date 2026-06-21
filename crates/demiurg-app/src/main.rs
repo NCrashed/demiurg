@@ -1990,6 +1990,9 @@ impl App {
         if let Some(i) = a.duplicate_bone {
             self.duplicate_bone(i);
         }
+        if let Some((from, to)) = a.move_bone {
+            self.move_bone(from, to);
+        }
         if let Some(i) = a.delete_bone {
             self.delete_bone(i);
         }
@@ -2450,6 +2453,22 @@ impl App {
         if self.editor.rig_mode == RigMode::Sculpt {
             self.load_active_bone();
         }
+    }
+
+    /// Move bone `from` to index `to` and keep `active_bone` pointing at the
+    /// same bone. Only the ordering changes (not the meshes), so Sculpt needs
+    /// no reload; the posed preview rebuilds via `rig_dirty`.
+    fn move_bone(&mut self, from: usize, to: usize) {
+        let Some(rig) = self.editor.rig.as_mut() else {
+            return;
+        };
+        if !rig.move_bone(from, to) {
+            return;
+        }
+        if self.editor.active_bone == from {
+            self.editor.active_bone = to;
+        }
+        self.editor.rig_dirty = true;
     }
 
     #[allow(clippy::too_many_lines)] // the per-frame sequence reads better unsplit
