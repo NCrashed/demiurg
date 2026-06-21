@@ -180,6 +180,40 @@ impl Rig {
         }
         true
     }
+
+    /// Duplicate bone `i` as a sibling (same parent), cloning its mesh and
+    /// hinge, and return the new index. The copy's joint is nudged along +X
+    /// by the mesh width so it sits beside the original instead of exactly on
+    /// top of it. Each clip gains a new column copied from bone `i`'s, so the
+    /// duplicate animates identically (and `frmval[*].len()` stays correct).
+    ///
+    /// Returns `None` if `i` is out of range.
+    pub fn duplicate_bone(&mut self, i: usize) -> Option<usize> {
+        let src = self.bones.get(i)?;
+        let model = src.model.clone();
+        let mut hinge = src.hinge;
+        let name = format!("{} copy", src.name);
+        // Nudge the copy off the original: a child uses the parent-side joint
+        // `p[1]`, a root uses the velcro `p[0]` (it has no parent joint).
+        #[allow(clippy::cast_precision_loss)] // mesh dims are tiny
+        let dx = model.dims().0 as f32;
+        if hinge.parent >= 0 {
+            hinge.p[1].x += dx;
+        } else {
+            hinge.p[0].x += dx;
+        }
+        let new = self.bones.len();
+        self.bones.push(RigBone { name, model, hinge });
+        for clip in &mut self.clips {
+            if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
+                for row in frmval {
+                    let v = row.get(i).copied().unwrap_or(0);
+                    row.push(v);
+                }
+            }
+        }
+        Some(new)
+    }
 }
 
 /// The origin point, reused for default hinge endpoints.
@@ -334,6 +368,32 @@ mod tests {
         assert!(frmval.iter().all(|row| row.len() == 3));
         assert_eq!(frmval[0], vec![0, 1, 0]);
         assert_eq!(frmval[1], vec![10, 11, 0]);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact offset by the integer mesh width
+    fn duplicate_bone_clones_as_sibling_and_copies_clip_column() {
+        let mut rig = Rig {
+            name: "t".to_string(),
+            root: [0.0; 3],
+            bones: vec![bone("body", -1, 0x80ff_0000), bone("arm", 0, 0x8000_ff00)],
+            clips: vec![clip(2)],
+        };
+        let idx = rig.duplicate_bone(1).expect("in range");
+        assert_eq!(idx, 2);
+        assert_eq!(rig.bones.len(), 3);
+        // Same parent as the source (a sibling), name marked as a copy.
+        assert_eq!(rig.bones[2].hinge.parent, 0);
+        assert_eq!(rig.bones[2].name, "arm copy");
+        // Joint nudged off the original (source mesh is 3 wide) so it's visible.
+        assert_eq!(rig.bones[2].hinge.p[1].x, 3.0);
+        // The new clip column copies the source bone's values (identical motion).
+        let frmval = skeletal(&rig.clips[0]);
+        assert!(frmval.iter().all(|row| row.len() == 3));
+        assert_eq!(frmval[0], vec![0, 1, 1]);
+        assert_eq!(frmval[1], vec![10, 11, 11]);
+        // Out-of-range is a no-op.
+        assert!(rig.duplicate_bone(99).is_none());
     }
 
     #[test]

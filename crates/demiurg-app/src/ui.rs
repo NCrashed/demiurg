@@ -70,6 +70,8 @@ pub struct UiActions {
     pub select_bone: Option<usize>,
     /// Append a new bone as a child of the active bone.
     pub add_bone: bool,
+    /// Duplicate the bone at this index (the active bone) as a sibling.
+    pub duplicate_bone: Option<usize>,
     /// Delete the bone at this index (the active bone).
     pub delete_bone: Option<usize>,
     /// Switch the rig sub-mode (Sculpt / Skeleton / Animate).
@@ -465,16 +467,24 @@ fn rig_panel(
             actions.select_bone = Some(i);
         }
     }
-    // Add (appends a child of the active bone) / Delete (removes the active
-    // bone). Delete is disabled for the last bone or a root — the rig must
-    // always keep a root, and clips need at least one column.
+    // Add (appends a child of the active bone) / Duplicate (sibling copy of
+    // the active bone) / Delete (removes the active bone). Delete is disabled
+    // for the last bone or a root — the rig must always keep a root, and clips
+    // need at least one column.
     ui.separator();
     let active = editor.active_bone;
+    let has_active = rig.bones.get(active).is_some();
     let can_delete =
         rig.bones.len() > 1 && rig.bones.get(active).is_some_and(|b| b.hinge.parent >= 0);
     ui.horizontal(|ui| {
         if ui.button(t(Msg::AddBone)).clicked() {
             actions.add_bone = true;
+        }
+        if ui
+            .add_enabled(has_active, egui::Button::new(t(Msg::DuplicateBone)))
+            .clicked()
+        {
+            actions.duplicate_bone = Some(active);
         }
         if ui
             .add_enabled(can_delete, egui::Button::new(t(Msg::DeleteBone)))

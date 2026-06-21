@@ -1987,6 +1987,9 @@ impl App {
         if a.add_bone {
             self.add_bone();
         }
+        if let Some(i) = a.duplicate_bone {
+            self.duplicate_bone(i);
+        }
         if let Some(i) = a.delete_bone {
             self.delete_bone(i);
         }
@@ -2403,6 +2406,28 @@ impl App {
         }
     }
 
+    /// Duplicate bone `i` (sibling copy of its mesh + hinge) and make the
+    /// copy active. Mirrors [`Self::add_bone`]'s mode handling: commit the
+    /// active mesh first in Sculpt, then load the copy for editing; otherwise
+    /// the posed preview rebuilds via `rig_dirty`.
+    fn duplicate_bone(&mut self, i: usize) {
+        if self.editor.rig.is_none() {
+            return;
+        }
+        if self.editor.rig_mode == RigMode::Sculpt {
+            self.commit_active_bone();
+        }
+        let rig = self.editor.rig.as_mut().expect("rig present");
+        let Some(new_idx) = rig.duplicate_bone(i) else {
+            return;
+        };
+        self.editor.active_bone = new_idx;
+        self.editor.rig_dirty = true;
+        if self.editor.rig_mode == RigMode::Sculpt {
+            self.load_active_bone();
+        }
+    }
+
     /// Delete bone `i`, keeping clips and parent indices consistent. No-op
     /// when the rig refuses it (last bone, or a root). Clamps the active
     /// bone, then reloads it (Sculpt) or rebuilds the preview (via
@@ -2437,6 +2462,24 @@ impl App {
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 {
             return;
+        }
+        // TEMP DEBUG: duplicate the ROOT bone, inspect parent + offset.
+        if std::env::var_os("DEMIURG_KFA_DUPROOT").is_some()
+            && self.editor.rig.as_ref().is_some_and(|r| r.bones.len() == 2)
+        {
+            self.set_rig_mode(RigMode::Skeleton);
+            self.editor.active_bone = 0;
+            self.duplicate_bone(0);
+            if let Some(r) = self.editor.rig.as_ref() {
+                let b = &r.bones[2];
+                eprintln!(
+                    "DUPROOT bones={} copy.parent={} copy.p0={:?} copy.p1={:?}",
+                    r.bones.len(),
+                    b.hinge.parent,
+                    b.hinge.p[0],
+                    b.hinge.p[1]
+                );
+            }
         }
         let camera = self.camera.to_roxlap();
 
