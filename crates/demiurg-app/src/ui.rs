@@ -68,6 +68,10 @@ pub struct UiActions {
     pub export_rkc: bool,
     /// Switch the active rig bone (index into `rig.bones`).
     pub select_bone: Option<usize>,
+    /// Append a new bone as a child of the active bone.
+    pub add_bone: bool,
+    /// Delete the bone at this index (the active bone).
+    pub delete_bone: Option<usize>,
     /// Switch the rig sub-mode (Sculpt / Skeleton / Animate).
     pub set_rig_mode: Option<RigMode>,
     pub undo: bool,
@@ -461,6 +465,24 @@ fn rig_panel(
             actions.select_bone = Some(i);
         }
     }
+    // Add (appends a child of the active bone) / Delete (removes the active
+    // bone). Delete is disabled for the last bone or a root — the rig must
+    // always keep a root, and clips need at least one column.
+    ui.separator();
+    let active = editor.active_bone;
+    let can_delete =
+        rig.bones.len() > 1 && rig.bones.get(active).is_some_and(|b| b.hinge.parent >= 0);
+    ui.horizontal(|ui| {
+        if ui.button(t(Msg::AddBone)).clicked() {
+            actions.add_bone = true;
+        }
+        if ui
+            .add_enabled(can_delete, egui::Button::new(t(Msg::DeleteBone)))
+            .clicked()
+        {
+            actions.delete_bone = Some(active);
+        }
+    });
 }
 
 /// The Animation section (Rig ▸ Animate): the rig's clips. Read-only for

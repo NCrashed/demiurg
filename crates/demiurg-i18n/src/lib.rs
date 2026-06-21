@@ -125,6 +125,8 @@ pub enum Msg {
     ExportCharacter,
     Rig,
     Bones,
+    AddBone,
+    DeleteBone,
     Sculpt,
     Skeleton,
     Animate,
@@ -163,7 +165,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 85] = [
+    pub const ALL: [Msg; 87] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -218,6 +220,8 @@ impl Msg {
         Msg::ExportCharacter,
         Msg::Rig,
         Msg::Bones,
+        Msg::AddBone,
+        Msg::DeleteBone,
         Msg::Sculpt,
         Msg::Skeleton,
         Msg::Animate,
@@ -317,6 +321,8 @@ const fn en(msg: Msg) -> &'static str {
         Msg::ExportCharacter => "Export character…",
         Msg::Rig => "Rig",
         Msg::Bones => "Bones",
+        Msg::AddBone => "Add bone",
+        Msg::DeleteBone => "Delete bone",
         Msg::Sculpt => "Sculpt",
         Msg::Skeleton => "Skeleton",
         Msg::Animate => "Animate",
@@ -409,6 +415,8 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::ExportCharacter => "Экспорт персонажа…",
         Msg::Rig => "Риг",
         Msg::Bones => "Кости",
+        Msg::AddBone => "Добавить кость",
+        Msg::DeleteBone => "Удалить кость",
         Msg::Sculpt => "Лепка",
         Msg::Skeleton => "Скелет",
         Msg::Animate => "Анимация",

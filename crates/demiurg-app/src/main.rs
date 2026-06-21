@@ -1156,6 +1156,31 @@ impl App {
         ))
     }
 
+    /// The cursor ray for the **KFA sprite** scene (posed rig / bones), as
+    /// world `(origin, dir)`. The sprite render path is a 180° rotation of
+    /// the voxel-grid convention that [`Self::ray_cursor`] is calibrated for
+    /// — *both* screen axes are inverted — so a bone drag built on the plain
+    /// pointer ray tracks the wrong way on X and Y. Compensate by mirroring
+    /// the cursor in both axes:
+    /// - X: opposite of `ray_cursor` (mirror when flip is **off**), since
+    ///   `flip_x` already mirrors the displayed X.
+    /// - Y: always (flip never touches Y).
+    fn bone_pointer_ray(&self) -> Option<([f64; 3], [f64; 3])> {
+        let cam = self.camera.to_roxlap();
+        let w = self.window.as_ref()?.inner_size();
+        let cx = if self.editor.flip_x {
+            self.cursor.0
+        } else {
+            f64::from(w.width) - self.cursor.0
+        };
+        let cy = f64::from(w.height) - self.cursor.1;
+        let r = self.renderer.as_ref()?.view_ray(&cam, cx, cy)?;
+        Some((
+            [r.origin.x, r.origin.y, r.origin.z],
+            [r.dir.x, r.dir.y, r.dir.z],
+        ))
+    }
+
     /// A synthetic hit on the model's floor under the cursor (see
     /// [`floor_cell`]): its `place` is the bottom-layer cell, so the Place
     /// tool can seed voxels on the floor when there's nothing solid to
@@ -1397,7 +1422,7 @@ impl App {
     /// a child bone, `rig.root` for the root) and the parent's basis.
     fn begin_bone_drag(&mut self) {
         let bone = self.editor.active_bone;
-        let Some((o, d)) = self.pointer_ray() else {
+        let Some((o, d)) = self.bone_pointer_ray() else {
             return;
         };
         let normal = self.camera.to_roxlap().forward;
@@ -1456,7 +1481,7 @@ impl App {
             drag.base,
             drag.parent_basis,
         );
-        let Some((o, d)) = self.pointer_ray() else {
+        let Some((o, d)) = self.bone_pointer_ray() else {
             return;
         };
         let Some(cur) = ray_plane(o, d, plane_point, normal) else {
@@ -1959,6 +1984,12 @@ impl App {
         if let Some(i) = a.select_bone {
             self.select_bone(i);
         }
+        if a.add_bone {
+            self.add_bone();
+        }
+        if let Some(i) = a.delete_bone {
+            self.delete_bone(i);
+        }
     }
 
     /// `Ctrl+S` / Save: settle a float, then overwrite the known project
@@ -2351,6 +2382,51 @@ impl App {
         self.load_active_bone();
     }
 
+    /// Add a new bone as a child of the active bone and make it active.
+    /// No-op outside rig mode. In Sculpt the active bone's edits are folded
+    /// back first, then the new (blank) bone is loaded for editing; in
+    /// Skeleton / Animate the posed preview is rebuilt (via `rig_dirty`).
+    fn add_bone(&mut self) {
+        if self.editor.rig.is_none() {
+            return;
+        }
+        if self.editor.rig_mode == RigMode::Sculpt {
+            self.commit_active_bone();
+        }
+        let parent = i32::try_from(self.editor.active_bone).unwrap_or(-1);
+        let rig = self.editor.rig.as_mut().expect("rig present");
+        let new_idx = rig.add_bone(parent);
+        self.editor.active_bone = new_idx;
+        self.editor.rig_dirty = true;
+        if self.editor.rig_mode == RigMode::Sculpt {
+            self.load_active_bone();
+        }
+    }
+
+    /// Delete bone `i`, keeping clips and parent indices consistent. No-op
+    /// when the rig refuses it (last bone, or a root). Clamps the active
+    /// bone, then reloads it (Sculpt) or rebuilds the preview (via
+    /// `rig_dirty`).
+    fn delete_bone(&mut self, i: usize) {
+        let Some(rig) = self.editor.rig.as_mut() else {
+            return;
+        };
+        if !rig.delete_bone(i) {
+            return;
+        }
+        let last = rig.bones.len() - 1;
+        if self.editor.active_bone > last {
+            self.editor.active_bone = last;
+        } else if self.editor.active_bone > i {
+            // A bone before the active one was removed — indices shifted down.
+            self.editor.active_bone -= 1;
+        }
+        self.editor.rig_dirty = true;
+        if self.editor.rig_mode == RigMode::Sculpt {
+            self.load_active_bone();
+        }
+    }
+
     #[allow(clippy::too_many_lines)] // the per-frame sequence reads better unsplit
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         let Some(window) = self.window.clone() else {
@@ -2362,7 +2438,6 @@ impl App {
         if size.width == 0 || size.height == 0 {
             return;
         }
-
         let camera = self.camera.to_roxlap();
 
         // While dragging a marquee, the live screen rectangle (anchor ->
