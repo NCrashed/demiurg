@@ -181,11 +181,17 @@ impl Rig {
         true
     }
 
-    /// Duplicate bone `i` as a sibling (same parent), cloning its mesh and
-    /// hinge, and return the new index. The copy's joint is nudged along +X
-    /// by the mesh width so it sits beside the original instead of exactly on
-    /// top of it. Each clip gains a new column copied from bone `i`'s, so the
-    /// duplicate animates identically (and `frmval[*].len()` stays correct).
+    /// Duplicate bone `i`, cloning its mesh and hinge, and return the new
+    /// index. The copy's joint is offset along +X by the mesh width so it
+    /// sits beside the original instead of exactly on top of it. Each clip
+    /// gains a new column copied from bone `i`'s, so the duplicate animates
+    /// identically (and `frmval[*].len()` stays correct).
+    ///
+    /// A **child** bone is copied as a sibling (same parent), offsetting its
+    /// parent-side joint `p[1]`. A **root** can't be offset that way (roots
+    /// ignore `p[1]`) and a second root just confuses the rig, so a root's
+    /// copy is parented to the original root as a child — a visible, editable
+    /// copy rather than an overlapping duplicate root.
     ///
     /// Returns `None` if `i` is out of range.
     pub fn duplicate_bone(&mut self, i: usize) -> Option<usize> {
@@ -193,14 +199,23 @@ impl Rig {
         let model = src.model.clone();
         let mut hinge = src.hinge;
         let name = format!("{} copy", src.name);
-        // Nudge the copy off the original: a child uses the parent-side joint
-        // `p[1]`, a root uses the velcro `p[0]` (it has no parent joint).
         #[allow(clippy::cast_precision_loss)] // mesh dims are tiny
         let dx = model.dims().0 as f32;
         if hinge.parent >= 0 {
+            // Child: sibling copy, parent-side joint nudged off the original.
             hinge.p[1].x += dx;
         } else {
-            hinge.p[0].x += dx;
+            // Root: re-parent the copy under the original root and offset it
+            // like any child (p[0] = own pivot, p[1] = joint in root space).
+            hinge.parent = i32::try_from(i).unwrap_or(-1);
+            hinge.p = [
+                ZERO,
+                Point3 {
+                    x: dx,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            ];
         }
         let new = self.bones.len();
         self.bones.push(RigBone { name, model, hinge });
@@ -394,6 +409,27 @@ mod tests {
         assert_eq!(frmval[1], vec![10, 11, 11]);
         // Out-of-range is a no-op.
         assert!(rig.duplicate_bone(99).is_none());
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact offset by the integer mesh width
+    fn duplicate_root_becomes_an_offset_child_not_a_second_root() {
+        let mut rig = Rig {
+            name: "t".to_string(),
+            root: [0.0; 3],
+            bones: vec![bone("body", -1, 0x80ff_0000), bone("arm", 0, 0x8000_ff00)],
+            clips: Vec::new(),
+        };
+        let idx = rig.duplicate_bone(0).expect("in range");
+        assert_eq!(idx, 2);
+        // The copy is a child of the original root (index 0), not a new root.
+        assert_eq!(rig.bones[2].hinge.parent, 0);
+        assert_eq!(rig.bones[2].name, "body copy");
+        // Offset via the parent-side joint (root mesh is 3 wide), pivot at zero.
+        assert_eq!(rig.bones[2].hinge.p[1].x, 3.0);
+        assert_eq!(rig.bones[2].hinge.p[0].x, 0.0);
+        // Still exactly one root.
+        assert_eq!(rig.bones.iter().filter(|b| b.hinge.parent < 0).count(), 1);
     }
 
     #[test]

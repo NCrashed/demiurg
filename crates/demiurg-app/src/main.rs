@@ -2463,24 +2463,6 @@ impl App {
         if size.width == 0 || size.height == 0 {
             return;
         }
-        // TEMP DEBUG: duplicate the ROOT bone, inspect parent + offset.
-        if std::env::var_os("DEMIURG_KFA_DUPROOT").is_some()
-            && self.editor.rig.as_ref().is_some_and(|r| r.bones.len() == 2)
-        {
-            self.set_rig_mode(RigMode::Skeleton);
-            self.editor.active_bone = 0;
-            self.duplicate_bone(0);
-            if let Some(r) = self.editor.rig.as_ref() {
-                let b = &r.bones[2];
-                eprintln!(
-                    "DUPROOT bones={} copy.parent={} copy.p0={:?} copy.p1={:?}",
-                    r.bones.len(),
-                    b.hinge.parent,
-                    b.hinge.p[0],
-                    b.hinge.p[1]
-                );
-            }
-        }
         let camera = self.camera.to_roxlap();
 
         // While dragging a marquee, the live screen rectangle (anchor ->
