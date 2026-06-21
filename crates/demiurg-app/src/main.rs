@@ -2073,18 +2073,13 @@ impl App {
             saving: self.saving(),
             recovered: self.recovered,
         };
-        let timeline = self
-            .kfa
-            .as_ref()
-            .map_or_else(ui::Timeline::default, |k| ui::Timeline {
-                time: k.time(),
-                duration: k.duration(),
-                ticks: k.seq_times(),
-            });
+        let timeline = ui::Timeline {
+            time: self.kfa.as_ref().map_or(0, KfaView::time),
+        };
         let editor = &mut self.editor;
         let mut actions = UiActions::default();
         let out = ctx.run_ui(raw, |ui| {
-            ui::build(ui, editor, &mut actions, modals, marquee, &timeline);
+            ui::build(ui, editor, &mut actions, modals, marquee, timeline);
         });
         self.egui_state
             .as_mut()

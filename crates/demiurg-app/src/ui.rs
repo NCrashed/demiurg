@@ -118,18 +118,14 @@ pub struct UiActions {
     pub recovered_ok: bool,
 }
 
-/// A snapshot of the posed rig's playback state for the Animate timeline.
-/// Read from the host's `KfaView` before the UI frame (the view itself isn't
-/// reachable from the panel, which only borrows the [`Editor`]).
-#[derive(Clone, Default)]
+/// The one piece of timeline state the panel can't read from the [`Editor`]:
+/// the live playhead position. It lives in the host's `KfaView` (the baked
+/// sprite's `kfatim`), so it's snapshotted before the UI frame. Keyframe times,
+/// the loop length, and the selection all come from the rig / editor directly.
+#[derive(Clone, Copy, Default)]
 pub struct Timeline {
     /// Current playhead position (ms).
     pub time: i32,
-    /// Clip loop length (ms); `0` when the clip has no animation.
-    pub duration: i32,
-    /// Keyframe timestamps (ms) — the sequence entries, drawn as ticks on the
-    /// scrub track. Includes the final loop-marker entry.
-    pub ticks: Vec<i32>,
 }
 
 /// Which overlay modals to draw this frame.
@@ -153,7 +149,7 @@ pub fn build(
     actions: &mut UiActions,
     modals: Modals,
     marquee: Option<[(f64, f64); 2]>,
-    timeline: &Timeline,
+    timeline: Timeline,
 ) {
     let lang = editor.lang;
     let t = |m: Msg| tr(lang, m);
@@ -581,7 +577,7 @@ fn timeline_bar(
     ui: &mut egui::Ui,
     editor: &Editor,
     actions: &mut UiActions,
-    timeline: &Timeline,
+    timeline: Timeline,
     t: &impl Fn(Msg) -> &'static str,
 ) {
     let Some(rig) = &editor.rig else {
@@ -592,9 +588,15 @@ fn timeline_bar(
         return;
     }
     let active = editor.active_clip.min(rig.clips.len() - 1);
-    let has_anim = timeline.duration > 0;
+    let keys = rig.clip_keyframes(active);
+    let key_times: Vec<i32> = keys.iter().map(|k| k.tim).collect();
+    let duration = rig.clip_loop_tim(active);
+    let has_anim = duration > 0;
+    // The selection, validated against the current key count.
+    let selected = editor.selected_key.filter(|&k| k < keys.len());
 
-    // Top row: clip picker (when there's a choice) + transport + readout.
+    // Top row: clip picker + transport + key ops + (selected) angle editor +
+    // a right-aligned time readout.
     ui.horizontal(|ui| {
         if rig.clips.len() > 1 {
             egui::ComboBox::from_id_salt("clip_picker")
@@ -623,87 +625,190 @@ fn timeline_bar(
             if ui.button(label).clicked() {
                 actions.toggle_play = true;
             }
-            // Prev / next keyframe: jump the playhead to the adjacent tick.
+            // Prev / next keyframe: jump the playhead to the adjacent key.
             if ui.button("|◀").on_hover_text(t(Msg::PrevKey)).clicked() {
-                if let Some(&p) = timeline.ticks.iter().rev().find(|&&x| x < timeline.time) {
+                if let Some(&p) = key_times.iter().rev().find(|&&x| x < timeline.time) {
                     actions.seek = Some(p);
                 }
             }
             if ui.button("▶|").on_hover_text(t(Msg::NextKey)).clicked() {
-                if let Some(&n) = timeline.ticks.iter().find(|&&x| x > timeline.time) {
+                if let Some(&n) = key_times.iter().find(|&&x| x > timeline.time) {
                     actions.seek = Some(n);
                 }
             }
         });
+        ui.separator();
+
+        // Key ops: add at the playhead; delete the selected key.
+        if ui.button(t(Msg::AddKey)).clicked() {
+            actions.add_key = true;
+        }
+        ui.add_enabled_ui(selected.is_some(), |ui| {
+            if ui.button(t(Msg::DeleteKey)).clicked() {
+                actions.delete_key = true;
+            }
+        });
+
+        // Angle editor for the active bone of the selected key.
+        if let Some(k) = selected {
+            angle_editor(ui, editor, &keys, k, actions);
+        }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.monospace(format!("{} / {} ms", timeline.time, timeline.duration));
+            ui.monospace(format!("{} / {duration} ms", timeline.time));
         });
     });
 
     // The scrub track fills the remaining bar width.
-    ui.add_enabled_ui(has_anim, |ui| timeline_track(ui, timeline, actions));
+    ui.add_enabled_ui(has_anim, |ui| {
+        timeline_track(ui, timeline.time, duration, &key_times, selected, actions);
+    });
 }
 
-/// Draw and handle the custom scrub track: a baseline, a tick for every
-/// keyframe, and a draggable playhead. Click or drag anywhere seeks; the ticks
-/// are the future home for keyframe selection / drag in the authoring slice.
+/// Inline angle editor: a slider over the active bone's `vmin..=vmax` bound to
+/// its angle in keyframe `k`, shown in degrees. Disabled for a root bone (its
+/// column is ignored by the solver) or a locked bone (`vmin == vmax`). Uses the
+/// inline begin/commit-pending undo pair so one drag is one step.
+#[allow(clippy::cast_precision_loss)] // angle units -> degrees, tiny values
+fn angle_editor(
+    ui: &mut egui::Ui,
+    editor: &Editor,
+    keys: &[demiurg_core::Keyframe],
+    k: usize,
+    actions: &mut UiActions,
+) {
+    let bone = editor.active_bone;
+    let Some(b) = editor.rig.as_ref().and_then(|r| r.bones.get(bone)) else {
+        return;
+    };
+    let is_root = b.hinge.parent < 0;
+    let (lo, hi) = (
+        b.hinge.vmin.min(b.hinge.vmax),
+        b.hinge.vmin.max(b.hinge.vmax),
+    );
+    let mut val = keys[k].angles.get(bone).copied().unwrap_or(0);
+    ui.separator();
+    ui.add_enabled_ui(!is_root && lo < hi, |ui| {
+        ui.label(format!("{}:", b.name));
+        let resp = ui.add(
+            egui::Slider::new(&mut val, lo..=hi)
+                // i16 hinge units -> degrees (full circle = 65536).
+                .custom_formatter(|n, _| format!("{:.0}°", n * 360.0 / 65536.0)),
+        );
+        if resp.drag_started() || resp.gained_focus() {
+            actions.rig_edit_begin = true;
+        }
+        if resp.changed() {
+            actions.set_key_angle = Some((k, bone, val));
+            actions.rig_edit_changed = true;
+        }
+    });
+}
+
+/// Draw and handle the custom scrub track: a baseline, a tick per keyframe
+/// (the selected one highlighted), and a draggable playhead. Clicking a tick
+/// selects it; clicking elsewhere seeks; dragging a tick retimes it (bounded by
+/// its neighbours so it can't reorder); dragging elsewhere scrubs.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)] // ms/px are tiny
-fn timeline_track(ui: &mut egui::Ui, timeline: &Timeline, actions: &mut UiActions) {
-    let height = 22.0;
+fn timeline_track(
+    ui: &mut egui::Ui,
+    time: i32,
+    duration: i32,
+    key_times: &[i32],
+    selected: Option<usize>,
+    actions: &mut UiActions,
+) {
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height),
+        egui::vec2(ui.available_width(), 22.0),
         egui::Sense::click_and_drag(),
     );
-    if timeline.duration <= 0 {
+    if duration <= 0 {
         return;
     }
-    let painter = ui.painter_at(rect);
-    let visuals = ui.visuals();
+
+    // Colours copied out so the immutable visuals borrow ends before the
+    // interaction code touches `ui` mutably (egui memory).
+    let (col_base, col_tick, col_sel, col_head) = {
+        let v = ui.visuals();
+        (
+            v.weak_text_color(),
+            v.strong_text_color(),
+            egui::Color32::from_rgb(0xff, 0x9f, 0x1c), // amber: the selected key
+            v.selection.bg_fill,                       // the playhead
+        )
+    };
 
     // Inset so ticks at t=0 / t=duration aren't clipped at the edges.
     let margin = 6.0;
     let x0 = rect.left() + margin;
     let span = (rect.width() - 2.0 * margin).max(1.0);
-    let dur = timeline.duration as f32;
+    let dur = duration as f32;
     let x_of = |ms: i32| x0 + (ms as f32 / dur) * span;
-    let mid_y = rect.center().y;
+    let time_at = |x: f32| (((x - x0) / span).clamp(0.0, 1.0) * dur).round() as i32;
+    let tick_at = |x: f32| key_times.iter().position(|&ms| (x_of(ms) - x).abs() <= 5.0);
 
-    // Baseline.
+    let painter = ui.painter_at(rect);
+    let mid_y = rect.center().y;
     painter.line_segment(
         [egui::pos2(x0, mid_y), egui::pos2(x0 + span, mid_y)],
-        egui::Stroke::new(1.0, visuals.weak_text_color()),
+        egui::Stroke::new(1.0, col_base),
     );
-    // Keyframe ticks.
-    for &ms in &timeline.ticks {
+    for (i, &ms) in key_times.iter().enumerate() {
         let x = x_of(ms);
+        let sel = selected == Some(i);
+        let color = if sel { col_sel } else { col_tick };
         painter.line_segment(
             [
                 egui::pos2(x, rect.top() + 3.0),
                 egui::pos2(x, rect.bottom() - 3.0),
             ],
-            egui::Stroke::new(1.5, visuals.strong_text_color()),
+            egui::Stroke::new(if sel { 2.5 } else { 1.5 }, color),
         );
+        if sel {
+            painter.circle_filled(egui::pos2(x, rect.bottom() - 3.0), 3.0, color);
+        }
     }
-    // Playhead.
-    let px = x_of(timeline.time);
+    let px = x_of(time);
     painter.line_segment(
         [egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())],
-        egui::Stroke::new(2.0, visuals.selection.bg_fill),
+        egui::Stroke::new(2.0, col_head),
     );
-    painter.circle_filled(
-        egui::pos2(px, rect.top() + 3.0),
-        3.5,
-        visuals.selection.bg_fill,
-    );
+    painter.circle_filled(egui::pos2(px, rect.top() + 3.0), 3.5, col_head);
 
-    // Click / drag anywhere on the track seeks to that time.
-    if let Some(pos) = response
-        .interact_pointer_pos()
-        .filter(|_| response.clicked() || response.dragged())
-    {
-        let ratio = ((pos.x - x0) / span).clamp(0.0, 1.0);
-        actions.seek = Some((ratio * dur).round() as i32);
+    // Interaction. A drag's mode (retime key `k` vs scrub) is decided at press
+    // time from what's under the cursor and kept in egui temp memory for the
+    // drag's duration.
+    let id = response.id;
+    if response.drag_started() {
+        let grabbed = response.interact_pointer_pos().and_then(|p| tick_at(p.x));
+        ui.data_mut(|d| d.insert_temp(id, grabbed));
+        if let Some(k) = grabbed {
+            actions.select_key = Some(k);
+            actions.rig_edit_begin = true; // open one undo step for the retime
+        }
+    }
+    if response.dragged() {
+        if let Some(p) = response.interact_pointer_pos() {
+            let grabbed: Option<usize> = ui.data(|d| d.get_temp(id)).flatten();
+            if let Some(k) = grabbed {
+                // Bound the retime to between the neighbours so the key keeps
+                // its index (no reorder mid-drag).
+                let lo = if k > 0 { key_times[k - 1] + 1 } else { 0 };
+                let hi = key_times.get(k + 1).map_or(i32::MAX, |&n| n - 1);
+                actions.move_key = Some((k, time_at(p.x).clamp(lo, hi)));
+                actions.rig_edit_changed = true;
+            } else {
+                actions.seek = Some(time_at(p.x));
+            }
+        }
+    }
+    if response.clicked() {
+        if let Some(p) = response.interact_pointer_pos() {
+            match tick_at(p.x) {
+                Some(k) => actions.select_key = Some(k),
+                None => actions.seek = Some(time_at(p.x)),
+            }
+        }
     }
 }
 

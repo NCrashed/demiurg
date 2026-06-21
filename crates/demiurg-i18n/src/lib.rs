@@ -138,6 +138,8 @@ pub enum Msg {
     Pause,
     PrevKey,
     NextKey,
+    AddKey,
+    DeleteKey,
     Parent,
     Joint,
     Axis,
@@ -172,7 +174,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 94] = [
+    pub const ALL: [Msg; 96] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -240,6 +242,8 @@ impl Msg {
         Msg::Pause,
         Msg::PrevKey,
         Msg::NextKey,
+        Msg::AddKey,
+        Msg::DeleteKey,
         Msg::Parent,
         Msg::Joint,
         Msg::Axis,
@@ -279,6 +283,7 @@ pub const fn tr(lang: Lang, msg: Msg) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_lines)] // an exhaustive string catalogue, one arm per Msg
 const fn en(msg: Msg) -> &'static str {
     match msg {
         Msg::Tools => "Tools",
@@ -348,6 +353,8 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Pause => "Pause",
         Msg::PrevKey => "Previous keyframe",
         Msg::NextKey => "Next keyframe",
+        Msg::AddKey => "Add key",
+        Msg::DeleteKey => "Delete key",
         Msg::Parent => "Parent",
         Msg::Joint => "Joint",
         Msg::Axis => "Axis",
@@ -380,6 +387,7 @@ const fn en(msg: Msg) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_lines)] // an exhaustive string catalogue, one arm per Msg
 const fn ru(msg: Msg) -> &'static str {
     match msg {
         Msg::Tools => "Инструменты",
@@ -449,6 +457,8 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Pause => "Пауза",
         Msg::PrevKey => "Предыдущий ключевой кадр",
         Msg::NextKey => "Следующий ключевой кадр",
+        Msg::AddKey => "Добавить ключ",
+        Msg::DeleteKey => "Удалить ключ",
         Msg::Parent => "Родитель",
         Msg::Joint => "Сустав",
         Msg::Axis => "Ось",
