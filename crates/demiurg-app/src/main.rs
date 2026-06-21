@@ -503,6 +503,10 @@ struct Editor {
     /// Animate mode: which clip the timeline previews (index into
     /// `rig.clips`). Clamped to the clip count on use.
     active_clip: usize,
+    /// Animate mode: the selected keyframe (index into the active clip's
+    /// sorted keyframes), or `None`. Transient view state, not part of the rig
+    /// or its undo; clamped / reset when the clip changes or a key is removed.
+    selected_key: Option<usize>,
     /// The rig's skeleton changed (a hinge edit): the posed preview must be
     /// rebuilt from `rig`.
     rig_dirty: bool,
@@ -591,6 +595,7 @@ impl Editor {
             rig_mode: RigMode::Sculpt,
             anim_playing: true,
             active_clip: 0,
+            selected_key: None,
             rig_dirty: false,
             dirty: false,
             rig_undo: Vec::new(),
@@ -2171,6 +2176,15 @@ impl App {
         if let Some(i) = a.select_clip {
             self.select_clip(i);
         }
+        if let Some(sel) = a.select_key {
+            self.set_selected_key(Some(sel));
+        }
+        if a.add_key {
+            self.add_key();
+        }
+        if a.delete_key {
+            self.delete_key();
+        }
         if let Some(i) = a.select_bone {
             self.select_bone(i);
         }
@@ -2193,6 +2207,16 @@ impl App {
         }
         if a.rig_edit_changed {
             self.editor.rig_commit_pending();
+        }
+        // Timeline drags (tick retime / angle edit). Undo is handled by the
+        // begin/commit-pending pair above (one drag = one step), so these only
+        // mutate; they must run *after* the commit so the captured snapshot is
+        // the pre-edit rig.
+        if let Some((k, ms)) = a.move_key {
+            self.move_key(k, ms);
+        }
+        if let Some((k, bone, v)) = a.set_key_angle {
+            self.set_key_angle(k, bone, v);
         }
         if let Some(axis) = a.set_bone_axis {
             self.set_bone_axis(axis);
@@ -2523,6 +2547,7 @@ impl App {
         self.editor.rig_mode = RigMode::Sculpt;
         self.editor.anim_playing = true;
         self.editor.active_clip = 0;
+        self.editor.selected_key = None;
         self.editor.rig_undo.clear();
         self.editor.rig_redo.clear();
         self.editor.rig_pending = None;
@@ -2566,6 +2591,7 @@ impl App {
             return;
         }
         self.editor.active_clip = i;
+        self.editor.selected_key = None; // selection is per-clip
         if self.editor.rig_mode == RigMode::Animate {
             self.rebuild_rig_preview(); // fresh sprite starts at time 0
         }
@@ -2586,6 +2612,118 @@ impl App {
             _ => None, // Skeleton (or no clips): rest pose
         };
         self.kfa = Some(KfaView::from_rig(rig.clone(), clip));
+    }
+
+    /// Re-bake the posed preview but keep the playhead where it was (a fresh
+    /// sprite otherwise restarts at time 0). Used after an authoring edit / undo
+    /// so the user stays parked on the key/time they were editing. In Skeleton
+    /// mode (rest pose, time 0) this is a no-op beyond the rebuild.
+    fn rebuild_rig_preview_keep_time(&mut self) {
+        let t = self.kfa.as_ref().map(KfaView::time);
+        self.rebuild_rig_preview();
+        if let (Some(t), Some(kfa)) = (t, self.kfa.as_mut()) {
+            kfa.set_time(t);
+            kfa.advance(0); // re-pose in place at the preserved time
+        }
+    }
+
+    /// Select a keyframe in the active clip (clamped to its key count; a stale
+    /// index clears the selection). Pure view state, no rig change / undo.
+    fn set_selected_key(&mut self, sel: Option<usize>) {
+        let clip = self.editor.active_clip;
+        self.editor.selected_key = sel.filter(|&k| {
+            self.editor
+                .rig
+                .as_ref()
+                .is_some_and(|r| k < r.clip_keyframes(clip).len())
+        });
+    }
+
+    /// Add a keyframe at the playhead from the currently displayed pose
+    /// ("key the current pose"), select it, and pause. One undo step (pushed
+    /// only on success). Animate mode only.
+    fn add_key(&mut self) {
+        let Some(kfa) = self.kfa.as_ref() else {
+            return;
+        };
+        if self.editor.rig_mode != RigMode::Animate {
+            return;
+        }
+        let pose = kfa.pose_angles();
+        let t = kfa.time();
+        let clip = self.editor.active_clip;
+        let snap = self.editor.rig_state();
+        let idx = self
+            .editor
+            .rig
+            .as_mut()
+            .and_then(|r| r.add_keyframe(clip, t, pose));
+        if let Some(idx) = idx {
+            if let Some(snap) = snap {
+                self.editor.rig_push_undo(snap);
+            }
+            self.editor.selected_key = Some(idx);
+            self.editor.anim_playing = false;
+            self.editor.rig_dirty = true;
+        }
+    }
+
+    /// Delete the selected keyframe (one undo step, on success). Keeps the
+    /// selection within the new key count (or clears it).
+    fn delete_key(&mut self) {
+        let Some(k) = self.editor.selected_key else {
+            return;
+        };
+        let clip = self.editor.active_clip;
+        let snap = self.editor.rig_state();
+        let removed = self
+            .editor
+            .rig
+            .as_mut()
+            .is_some_and(|r| r.remove_keyframe(clip, k));
+        if removed {
+            if let Some(snap) = snap {
+                self.editor.rig_push_undo(snap);
+            }
+            let n = self
+                .editor
+                .rig
+                .as_ref()
+                .map_or(0, |r| r.clip_keyframes(clip).len());
+            self.editor.selected_key = (n > 0).then(|| k.min(n - 1));
+            self.editor.rig_dirty = true;
+        }
+    }
+
+    /// Retime keyframe `k` to `ms` (a tick drag). Undo is the active
+    /// begin/commit-pending step, so this only mutates + follows the selection
+    /// to the key's new index.
+    fn move_key(&mut self, k: usize, ms: i32) {
+        let clip = self.editor.active_clip;
+        let new_idx = self
+            .editor
+            .rig
+            .as_mut()
+            .and_then(|r| r.move_keyframe(clip, k, ms));
+        if let Some(new_idx) = new_idx {
+            self.editor.selected_key = Some(new_idx);
+            self.editor.anim_playing = false;
+            self.editor.rig_dirty = true;
+        }
+    }
+
+    /// Set bone `bone`'s angle in keyframe `k` (an angle-editor drag). Undo is
+    /// the active begin/commit-pending step; this only mutates.
+    fn set_key_angle(&mut self, k: usize, bone: usize, v: i16) {
+        let clip = self.editor.active_clip;
+        let changed = self
+            .editor
+            .rig
+            .as_mut()
+            .is_some_and(|r| r.set_keyframe_angle(clip, k, bone, v));
+        if changed {
+            self.editor.rig_dirty = true;
+        }
     }
 
     /// Load the active bone's mesh into the document for editing. `reframe`
@@ -2788,7 +2926,7 @@ impl App {
         // posed preview so the rest pose reflects it.
         if self.editor.rig_dirty {
             if self.kfa.is_some() {
-                self.rebuild_rig_preview();
+                self.rebuild_rig_preview_keep_time();
             }
             self.editor.rig_dirty = false;
         }

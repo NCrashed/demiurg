@@ -93,6 +93,17 @@ pub struct UiActions {
     pub seek: Option<i32>,
     /// Animate timeline: preview this clip (index into `rig.clips`).
     pub select_clip: Option<usize>,
+    /// Animate timeline: select this keyframe (index into the clip's sorted
+    /// keys).
+    pub select_key: Option<usize>,
+    /// Animate timeline: add a keyframe at the playhead from the current pose.
+    pub add_key: bool,
+    /// Animate timeline: delete the selected keyframe.
+    pub delete_key: bool,
+    /// Animate timeline: retime key `.0` to absolute ms `.1` (a tick drag).
+    pub move_key: Option<(usize, i32)>,
+    /// Animate timeline: set key `.0`'s bone `.1` angle to `.2` (angle editor).
+    pub set_key_angle: Option<(usize, usize, i16)>,
     pub undo: bool,
     pub redo: bool,
     pub delete_sel: bool,
