@@ -116,6 +116,19 @@ impl KfaView {
             .unwrap_or_default()
     }
 
+    /// The pose currently displayed: the per-bone hinge angles
+    /// (`KfaSprite::kfaval`) resolved at the playhead by the last
+    /// [`Self::advance`]. This is what "key the current pose" snapshots into a
+    /// new keyframe — the values the viewport is showing, not the rest pose.
+    /// Empty if there is no sprite.
+    #[must_use]
+    pub fn pose_angles(&self) -> Vec<i16> {
+        self.kfas
+            .first()
+            .map(|k| k.kfaval.clone())
+            .unwrap_or_default()
+    }
+
     /// Advance the baked animation by `dt_ms` and re-solve bone transforms,
     /// so [`Self::bone_lines`] reads the current pose.
     pub fn advance(&mut self, dt_ms: i32) {
@@ -283,5 +296,16 @@ mod tests {
         let view = KfaView::from_rig(demo_rig(), None);
         assert_eq!(view.duration(), 0);
         assert!(view.seq_times().is_empty());
+    }
+
+    #[test]
+    fn pose_angles_read_the_resolved_pose_at_the_playhead() {
+        let mut view = KfaView::from_rig(demo_rig(), Some(0));
+        // Seek to t=500 (demo frame 1) and re-pose in place; the arm hinge
+        // (bone 1) should resolve to that frame's value, the root (bone 0)
+        // stays untouched at 0.
+        view.set_time(500);
+        view.advance(0);
+        assert_eq!(view.pose_angles(), vec![0, 16000]);
     }
 }
