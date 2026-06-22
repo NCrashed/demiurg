@@ -48,6 +48,9 @@ const PRESETS: [u32; 8] = [
 #[allow(clippy::struct_excessive_bools)] // a set of one-shot menu flags, not state
 pub struct UiActions {
     pub new_model: bool,
+    /// Start a fresh rig (one root bone), or wrap the current model as a rig.
+    pub new_rig: bool,
+    pub convert_to_rig: bool,
     /// Open any supported document (`.demiurg` / `.rkc` / `.kv6` / `.vox`) — a
     /// single file dialog; the loader detects the format from the extension.
     pub open: bool,
@@ -178,6 +181,18 @@ pub fn build(
                     actions.new_model = true;
                     ui.close();
                 }
+                if ui.button(t(Msg::NewRig)).clicked() {
+                    actions.new_rig = true;
+                    ui.close();
+                }
+                // Wrap the current model as a one-bone rig (only when not
+                // already a rig).
+                ui.add_enabled_ui(editor.rig.is_none(), |ui| {
+                    if ui.button(t(Msg::ConvertToRig)).clicked() {
+                        actions.convert_to_rig = true;
+                        ui.close();
+                    }
+                });
                 ui.separator();
                 if ui.button(t(Msg::Open)).clicked() {
                     actions.open = true;
@@ -802,7 +817,13 @@ fn angle_editor(
         b.hinge.vmin.min(b.hinge.vmax),
         b.hinge.vmin.max(b.hinge.vmax),
     );
-    let mut val = keys[k].angles.get(bone).copied().unwrap_or(0);
+    // The slider edits the 1-DOF hinge angle; read it out of the key's stored
+    // transform (about this bone's axis).
+    let v = b.hinge.v[0];
+    let mut val = keys[k]
+        .xforms
+        .get(bone)
+        .map_or(0, |x| x.hinge_angle([v.x, v.y, v.z]));
     ui.separator();
     ui.add_enabled_ui(!is_root && lo < hi, |ui| {
         ui.label(format!("{}:", b.name));

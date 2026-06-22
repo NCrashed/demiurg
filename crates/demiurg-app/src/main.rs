@@ -42,7 +42,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use demiurg_core::{Document, Rig, VoxelModel, project};
+use demiurg_core::{Document, KeyXform, Rig, VoxelModel, project};
 use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{
     KfaView, Line3, ModelView, OrbitCamera, PickHit, RenderMode, ViewDir, pick_voxel,
@@ -577,7 +577,7 @@ struct Editor {
     /// the playhead. Lets a key be duplicated (copy + paste) or moved (cut +
     /// paste elsewhere). Survives clip switches (angles are resized/clamped on
     /// paste). `None` until something is copied.
-    key_clipboard: Option<Vec<i16>>,
+    key_clipboard: Option<Vec<KeyXform>>,
     /// The rig's skeleton changed (a hinge edit): the posed preview must be
     /// rebuilt from `rig`.
     rig_dirty: bool,
@@ -1901,14 +1901,17 @@ impl App {
             return;
         };
         let ref0 = [anchor[0] - piv[0], anchor[1] - piv[1], anchor[2] - piv[2]];
+        // The drag sweeps a 1-DOF hinge angle, so read the key's current angle
+        // about this bone's axis out of its stored transform.
         let base = self
             .editor
             .rig
             .as_ref()
             .and_then(|rig| {
+                let v = rig.bones.get(bone)?.hinge.v[0];
                 rig.clip_keyframes(clip)
                     .get(key)
-                    .and_then(|kf| kf.angles.get(bone).copied())
+                    .map(|kf| kf.xforms[bone].hinge_angle([v.x, v.y, v.z]))
             })
             .unwrap_or(0);
         // Posing pauses; undo is captured lazily (begin_edit now, commit on the
@@ -1959,9 +1962,10 @@ impl App {
         // commits no undo step and writes nothing (set_keyframe_angle clamps, so
         // compare against the post-clamp stored angle).
         let stored = self.editor.rig.as_ref().and_then(|rg| {
+            let v = rg.bones.get(bone)?.hinge.v[0];
             rg.clip_keyframes(clip)
                 .get(key)
-                .and_then(|k| k.angles.get(bone).copied())
+                .map(|k| k.xforms[bone].hinge_angle([v.x, v.y, v.z]))
         });
         if stored == Some(new) {
             return;
@@ -2488,6 +2492,12 @@ impl App {
             self.load_model(new_model());
             self.doc_name = None;
         }
+        if a.new_rig {
+            self.new_rig();
+        }
+        if a.convert_to_rig {
+            self.convert_to_rig();
+        }
         if a.open {
             self.open_dialog(DialogKind::Open);
         }
@@ -2927,6 +2937,24 @@ impl App {
     }
 
     /// Enter rig-edit mode (Sculpt) on the first bone.
+    /// Start a fresh rig: one root bone with a default mesh, no clips. Enters
+    /// rig mode (Sculpt) on a clean document.
+    fn new_rig(&mut self) {
+        self.enter_rig(Rig::single_bone("rig", None));
+        self.doc_name = None;
+        self.project_path = None;
+    }
+
+    /// Wrap the current voxel model as a one-bone rig and enter rig mode, so a
+    /// model sculpted in plain mode can be rigged. No-op if already a rig.
+    fn convert_to_rig(&mut self) {
+        if self.editor.rig.is_some() {
+            return;
+        }
+        let model = self.editor.document.model().clone();
+        self.enter_rig(Rig::single_bone("rig", Some(model)));
+    }
+
     fn enter_rig(&mut self, rig: Rig) {
         self.editor.rig = Some(rig);
         self.editor.active_bone = 0;
@@ -3107,7 +3135,7 @@ impl App {
         if self.editor.rig_mode != RigMode::Animate {
             return;
         }
-        let pose = kfa.pose_angles();
+        let pose = kfa.pose_xforms();
         let t = kfa.time();
         let clip = self.editor.active_clip;
         let snap = self.editor.rig_state();
@@ -3164,7 +3192,7 @@ impl App {
             .editor
             .rig
             .as_ref()
-            .and_then(|r| r.clip_keyframes(clip).get(k).map(|kf| kf.angles.clone()))
+            .and_then(|r| r.clip_keyframes(clip).get(k).map(|kf| kf.xforms.clone()))
         {
             self.editor.key_clipboard = Some(angles);
         }

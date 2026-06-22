@@ -12,6 +12,7 @@ use glam::DVec3;
 use roxlap_core::kfa_draw::solve_kfa_limbs;
 use roxlap_formats::character::{Clip, ClipData};
 use roxlap_formats::kfa::{Hinge, KfaSprite, Point3, Seq};
+use roxlap_formats::xform::BoneXform;
 
 use crate::{Line3, OrbitCamera};
 
@@ -119,28 +120,16 @@ impl KfaView {
             .unwrap_or_default()
     }
 
-    /// The pose currently displayed: the per-bone hinge angles
+    /// The pose currently displayed: the per-bone local transforms
     /// (`KfaSprite::kfaval`) resolved at the playhead by the last
     /// [`Self::advance`]. This is what "key the current pose" snapshots into a
     /// new keyframe — the values the viewport is showing, not the rest pose.
     /// Empty if there is no sprite.
     #[must_use]
-    pub fn pose_angles(&self) -> Vec<i16> {
-        // `kfaval` is now a per-bone TRS; recover the legacy hinge angle about
-        // each bone's axis to feed the still-i16 keyframe store (a later slice
-        // stores TRS directly).
+    pub fn pose_xforms(&self) -> Vec<BoneXform> {
         self.kfas
             .first()
-            .map(|k| {
-                k.kfaval
-                    .iter()
-                    .zip(&self.rig.bones)
-                    .map(|(x, b)| {
-                        let v = b.hinge.v[0];
-                        x.hinge_angle([v.x, v.y, v.z])
-                    })
-                    .collect()
-            })
+            .map(|k| k.kfaval.clone())
             .unwrap_or_default()
     }
 
@@ -241,7 +230,14 @@ pub fn demo_rig() -> Rig {
         clips: vec![Clip {
             name: "swing".to_string(),
             data: ClipData::Skeletal {
-                frmval: vec![vec![0, 0], vec![0, 16000], vec![0, 0], vec![0, -16000]],
+                // The arm (bone 1) swings about +z; the body (root) stays put.
+                frmval: [0i16, 16000, 0, -16000]
+                    .iter()
+                    .map(|&a| {
+                        let z = [0.0, 0.0, 1.0];
+                        vec![BoneXform::IDENTITY, BoneXform::from_hinge_angle(z, a)]
+                    })
+                    .collect(),
                 seq: vec![
                     Seq { tim: 0, frm: 0 },
                     Seq { tim: 500, frm: 1 },
@@ -353,8 +349,13 @@ mod tests {
             clips: vec![Clip {
                 name: "c".to_string(),
                 data: ClipData::Skeletal {
-                    // ~44 deg on each rotator axis.
-                    frmval: vec![vec![0, 8000, 8000, 8000]],
+                    // ~44 deg on each rotator's own axis (X, Y, Z).
+                    frmval: vec![vec![
+                        BoneXform::IDENTITY,
+                        BoneXform::from_hinge_angle([1.0, 0.0, 0.0], 8000),
+                        BoneXform::from_hinge_angle([0.0, 1.0, 0.0], 8000),
+                        BoneXform::from_hinge_angle([0.0, 0.0, 1.0], 8000),
+                    ]],
                     seq: vec![Seq { tim: 0, frm: 0 }, Seq { tim: 500, frm: !0 }],
                 },
             }],
@@ -390,13 +391,20 @@ mod tests {
     }
 
     #[test]
-    fn pose_angles_read_the_resolved_pose_at_the_playhead() {
+    fn pose_xforms_read_the_resolved_pose_at_the_playhead() {
         let mut view = KfaView::from_rig(demo_rig(), Some(0));
         // Seek to t=500 (demo frame 1) and re-pose in place; the arm hinge
-        // (bone 1) should resolve to that frame's value, the root (bone 0)
-        // stays untouched at 0.
+        // (bone 1) should resolve to that frame's value (16000 about +z), the
+        // root (bone 0) stays at identity.
         view.set_time(500);
         view.advance(0);
-        assert_eq!(view.pose_angles(), vec![0, 16000]);
+        let z = [0.0, 0.0, 1.0];
+        let angles: Vec<i16> = view
+            .pose_xforms()
+            .iter()
+            .map(|x| x.hinge_angle(z))
+            .collect();
+        assert_eq!(angles[0], 0, "root untouched");
+        assert!((i32::from(angles[1]) - 16000).abs() <= 1, "arm at frame 1");
     }
 }

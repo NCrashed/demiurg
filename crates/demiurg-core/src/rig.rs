@@ -8,8 +8,12 @@
 
 use roxlap_formats::character::{self, Bone as CharBone, Character, Clip, ClipData, MeshRef};
 use roxlap_formats::kfa::{Hinge, Point3, Seq};
+use roxlap_formats::xform::BoneXform;
 
 use crate::VoxelModel;
+
+/// Re-export so editor code can name the keyframe transform type.
+pub use roxlap_formats::xform::{BoneXform as KeyXform, Quat};
 
 /// An editable rig: an ordered list of bones (each an editable mesh + a
 /// hinge) and named animation clips.
@@ -35,7 +39,8 @@ pub struct RigBone {
 }
 
 /// One animation keyframe in **normalized** form: an absolute timestamp and a
-/// full-skeleton pose (one i16 hinge angle per bone, full circle = 65536).
+/// full-skeleton pose (one [`BoneXform`] per bone — translation, quaternion
+/// rotation, scale).
 ///
 /// This is the editor-facing view of a skeletal clip. The on-disk clip is
 /// denormalized into two index-joined tables (`frmval` rows + a `seq` of
@@ -43,12 +48,12 @@ pub struct RigBone {
 /// `clip_*` / `*_keyframe*` methods on [`Rig`] read and re-bake those tables
 /// from a sorted list of `Keyframe`s, so callers never touch the indices or
 /// the loop marker directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Keyframe {
     /// Absolute time of the key, in milliseconds.
     pub tim: i32,
-    /// Per-bone hinge angle (length `== bones.len()`).
-    pub angles: Vec<i16>,
+    /// Per-bone local transform (length `== bones.len()`).
+    pub xforms: Vec<BoneXform>,
 }
 
 impl Rig {
@@ -123,6 +128,24 @@ impl Rig {
         Self::from_character(&c)
     }
 
+    /// A fresh rig with a single root bone carrying `model` (or a default cube
+    /// when `model` is `None`) and no animation clips — the starting point for
+    /// "New rig" / "Convert model to rig". Add child bones (or a dummy root)
+    /// and a clip to animate it.
+    #[must_use]
+    pub fn single_bone(name: impl Into<String>, model: Option<VoxelModel>) -> Self {
+        Self {
+            name: name.into(),
+            root: [0.0, 0.0, 0.0],
+            bones: vec![RigBone {
+                name: "root".to_string(),
+                model: model.unwrap_or_else(default_bone_model),
+                hinge: free_hinge(-1, Z_AXIS, ZERO),
+            }],
+            clips: Vec::new(),
+        }
+    }
+
     /// Append a new bone (parented to `parent`, `-1` = root) and return its
     /// index. The new bone gets a small visible box mesh, a default hinge,
     /// and a fresh `0` animation column in every skeletal clip so that
@@ -148,7 +171,7 @@ impl Rig {
         for clip in &mut self.clips {
             if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
                 for row in frmval {
-                    row.push(0);
+                    row.push(BoneXform::IDENTITY);
                 }
             }
         }
@@ -239,7 +262,7 @@ impl Rig {
         for clip in &mut self.clips {
             if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
                 for row in frmval {
-                    let v = row.get(i).copied().unwrap_or(0);
+                    let v = row.get(i).copied().unwrap_or(BoneXform::IDENTITY);
                     row.push(v);
                 }
             }
@@ -327,7 +350,7 @@ impl Rig {
         for clip in &mut self.clips {
             if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
                 for row in frmval {
-                    row.extend_from_slice(&[0, 0, 0]);
+                    row.extend_from_slice(&[BoneXform::IDENTITY; 3]);
                 }
             }
         }
@@ -358,7 +381,7 @@ impl Rig {
         for clip in &mut self.clips {
             if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
                 for row in frmval {
-                    row.push(0);
+                    row.push(BoneXform::IDENTITY);
                 }
             }
         }
@@ -375,7 +398,7 @@ impl Rig {
         self.clips.push(Clip {
             name,
             data: ClipData::Skeletal {
-                frmval: vec![vec![0i16; self.bones.len()]],
+                frmval: vec![vec![BoneXform::IDENTITY; self.bones.len()]],
                 seq: vec![
                     Seq { tim: 0, frm: 0 },
                     Seq {
@@ -445,20 +468,23 @@ impl Rig {
         self.read_clip(clip).map_or(0, |(_, lt, _)| lt)
     }
 
-    /// Insert a key at `tim` (clamped `>= 0`) with `angles` as the pose
-    /// (resized to `bones.len()`, each angle clamped to its bone's
-    /// `vmin..=vmax`), and return its index in the sorted key list. A key
-    /// already at exactly `tim` is overwritten in place. `None` if `clip` is
-    /// out of range / not skeletal.
-    pub fn add_keyframe(&mut self, clip: usize, tim: i32, mut angles: Vec<i16>) -> Option<usize> {
+    /// Insert a key at `tim` (clamped `>= 0`) with `xforms` as the pose
+    /// (resized to `bones.len()` with identity transforms), and return its
+    /// index in the sorted key list. A key already at exactly `tim` is
+    /// overwritten in place. `None` if `clip` is out of range / not skeletal.
+    pub fn add_keyframe(
+        &mut self,
+        clip: usize,
+        tim: i32,
+        mut xforms: Vec<BoneXform>,
+    ) -> Option<usize> {
         let (mut kfs, loop_tim, loops) = self.read_clip(clip)?;
         let tim = tim.max(0);
-        angles.resize(self.bones.len(), 0);
-        self.clamp_pose(&mut angles);
+        xforms.resize(self.bones.len(), BoneXform::IDENTITY);
         if let Some(existing) = kfs.iter().position(|k| k.tim == tim) {
-            kfs[existing].angles = angles;
+            kfs[existing].xforms = xforms;
         } else {
-            kfs.push(Keyframe { tim, angles });
+            kfs.push(Keyframe { tim, xforms });
         }
         kfs.sort_by_key(|k| k.tim);
         let idx = kfs.iter().position(|k| k.tim == tim)?;
@@ -466,36 +492,39 @@ impl Rig {
         Some(idx)
     }
 
-    /// Overwrite key `k`'s entire pose (resized + clamped like
-    /// [`Self::add_keyframe`]). Returns `false` if the clip / key is out of
-    /// range.
-    pub fn set_keyframe_pose(&mut self, clip: usize, k: usize, mut angles: Vec<i16>) -> bool {
+    /// Overwrite key `k`'s entire pose (resized like [`Self::add_keyframe`]).
+    /// Returns `false` if the clip / key is out of range.
+    pub fn set_keyframe_pose(&mut self, clip: usize, k: usize, mut xforms: Vec<BoneXform>) -> bool {
         let Some((mut kfs, loop_tim, loops)) = self.read_clip(clip) else {
             return false;
         };
         if k >= kfs.len() {
             return false;
         }
-        angles.resize(self.bones.len(), 0);
-        self.clamp_pose(&mut angles);
-        kfs[k].angles = angles;
+        xforms.resize(self.bones.len(), BoneXform::IDENTITY);
+        kfs[k].xforms = xforms;
         self.write_clip(clip, kfs, loop_tim, loops);
         true
     }
 
-    /// Set one bone's angle in key `k` (clamped to the bone's `vmin..=vmax`).
-    /// Returns `false` if the clip / key / bone is out of range.
+    /// Set one bone's **rotation** in key `k` to a pure hinge rotation about
+    /// its axis by `v` (Q15, clamped to `vmin..=vmax`), keeping the bone's
+    /// translation and scale. This is the 1-DOF angle control (slider / tick
+    /// drag); free rotation comes from the viewport pose gesture. Returns
+    /// `false` if the clip / key / bone is out of range.
     pub fn set_keyframe_angle(&mut self, clip: usize, k: usize, bone: usize, v: i16) -> bool {
         let Some((mut kfs, loop_tim, loops)) = self.read_clip(clip) else {
             return false;
         };
-        let Some(kf) = kfs.get_mut(k) else {
+        let clamped = clamp_angle(v, self.bones.get(bone));
+        let axis = self.bones.get(bone).map(|b| b.hinge.v[0]);
+        let (Some(kf), Some(axis)) = (kfs.get_mut(k), axis) else {
             return false;
         };
-        let Some(slot) = kf.angles.get_mut(bone) else {
+        let Some(slot) = kf.xforms.get_mut(bone) else {
             return false;
         };
-        *slot = clamp_angle(v, self.bones.get(bone));
+        slot.r = BoneXform::from_hinge_angle([axis.x, axis.y, axis.z], clamped).r;
         self.write_clip(clip, kfs, loop_tim, loops);
         true
     }
@@ -570,13 +599,6 @@ impl Rig {
         true
     }
 
-    /// Clamp every angle in a pose to its bone's rotation range, in place.
-    fn clamp_pose(&self, angles: &mut [i16]) {
-        for (b, a) in angles.iter_mut().enumerate() {
-            *a = clamp_angle(*a, self.bones.get(b));
-        }
-    }
-
     /// Read a skeletal clip as `(sorted keyframes, loop_tim, loops)`. The loop
     /// marker (`frm < 0`) is dropped from the key list; only real frames
     /// (`frm >= 0`) become keys. `loops` is whether the trailing marker loops
@@ -593,7 +615,7 @@ impl Rig {
                 let row = frmval.get(usize::try_from(s.frm).ok()?)?;
                 Some(Keyframe {
                     tim: s.tim,
-                    angles: row.clone(),
+                    xforms: row.clone(),
                 })
             })
             .collect();
@@ -628,7 +650,7 @@ impl Rig {
         } else {
             max_tim + DEFAULT_TAIL_MS
         };
-        let frmval: Vec<Vec<i16>> = kfs.iter().map(|k| k.angles.clone()).collect();
+        let frmval: Vec<Vec<BoneXform>> = kfs.iter().map(|k| k.xforms.clone()).collect();
         let mut seq: Vec<Seq> = kfs
             .iter()
             .enumerate()
@@ -797,13 +819,22 @@ mod tests {
     use roxlap_formats::character::{Clip, ClipData};
     use roxlap_formats::kfa::Seq;
 
-    /// A 2-frame skeletal clip with `nbones` columns, each cell set to a
-    /// recognisable `frame*10 + bone` marker.
+    /// A `BoneXform` carrying a recognisable `i16` marker in its translation `x`,
+    /// so column reshuffles (add / delete / reorder bone) stay checkable.
+    fn mark(v: i16) -> BoneXform {
+        BoneXform {
+            t: [f32::from(v), 0.0, 0.0],
+            ..BoneXform::IDENTITY
+        }
+    }
+
+    /// A 2-frame skeletal clip with `nbones` columns, each cell marked
+    /// `frame*10 + bone` (in the xform's translation `x`).
     fn clip(nbones: usize) -> Clip {
         let frmval = (0..2)
             .map(|f| {
                 (0..nbones)
-                    .map(|b| i16::try_from(f * 10 + b).unwrap())
+                    .map(|b| mark(i16::try_from(f * 10 + b).unwrap()))
                     .collect()
             })
             .collect();
@@ -816,9 +847,15 @@ mod tests {
         }
     }
 
-    fn skeletal(clip: &Clip) -> &Vec<Vec<i16>> {
+    /// The clip's column markers as a plain `i16` grid (extracts each cell's
+    /// translation `x`), so the bone-management tests can assert on values.
+    #[allow(clippy::cast_possible_truncation)]
+    fn skeletal(clip: &Clip) -> Vec<Vec<i16>> {
         match &clip.data {
-            ClipData::Skeletal { frmval, .. } => frmval,
+            ClipData::Skeletal { frmval, .. } => frmval
+                .iter()
+                .map(|row| row.iter().map(|x| x.t[0] as i16).collect())
+                .collect(),
             ClipData::Unknown { .. } => panic!("expected skeletal clip"),
         }
     }
@@ -1026,7 +1063,20 @@ mod tests {
         let mut b = bone(name, parent, 0);
         b.hinge.vmin = i16::MIN;
         b.hinge.vmax = i16::MAX;
+        b.hinge.v = [Z_AXIS, Z_AXIS]; // a real axis so angle edits resolve
         b
+    }
+
+    /// The Q15 hinge angle a keyframe stores for `bone` (about +z, the axis
+    /// `free_bone` uses) — the inverse of `set_keyframe_angle`.
+    fn key_angle(rig: &Rig, clip: usize, k: usize, bone: usize) -> i16 {
+        rig.clip_keyframes(clip)[k].xforms[bone].hinge_angle([0.0, 0.0, 1.0])
+    }
+
+    /// Column markers of a keyframe's pose (translation `x` per bone).
+    #[allow(clippy::cast_possible_truncation)]
+    fn xf_marks(xforms: &[BoneXform]) -> Vec<i16> {
+        xforms.iter().map(|x| x.t[0] as i16).collect()
     }
 
     /// A demo-shaped skeletal clip: two real keys (t=0, t=1000) plus a loop
@@ -1035,7 +1085,7 @@ mod tests {
         let frmval = (0..2)
             .map(|f| {
                 (0..nbones)
-                    .map(|b| i16::try_from(f * 1000 + b * 100).unwrap())
+                    .map(|b| mark(i16::try_from(f * 1000 + b * 100).unwrap()))
                     .collect()
             })
             .collect();
@@ -1078,7 +1128,7 @@ mod tests {
         assert_eq!(kfs.len(), 2, "two real keys, marker excluded");
         assert_eq!(kfs[0].tim, 0);
         assert_eq!(kfs[1].tim, 1000);
-        assert_eq!(kfs[1].angles, vec![1000, 1100]);
+        assert_eq!(xf_marks(&kfs[1].xforms), vec![1000, 1100]);
         assert_eq!(rig.clip_loop_tim(0), 1500);
         // Out-of-range / non-skeletal clips read as empty.
         assert!(rig.clip_keyframes(9).is_empty());
@@ -1087,14 +1137,16 @@ mod tests {
     #[test]
     fn add_keyframe_inserts_sorted_and_rebakes_marker_last() {
         let mut rig = anim_rig(2);
-        let idx = rig.add_keyframe(0, 500, vec![0, 42]).expect("skeletal");
+        let idx = rig
+            .add_keyframe(0, 500, vec![mark(0), mark(42)])
+            .expect("skeletal");
         assert_eq!(idx, 1, "sorts between t=0 and t=1000");
         let kfs = rig.clip_keyframes(0);
         assert_eq!(
             kfs.iter().map(|k| k.tim).collect::<Vec<_>>(),
             [0, 500, 1000]
         );
-        assert_eq!(kfs[1].angles, vec![0, 42]);
+        assert_eq!(xf_marks(&kfs[1].xforms), vec![0, 42]);
         // Baked tables: frmval rows line up 1:1 with keys; the single trailing
         // seq entry is the loop marker (frm < 0) at the loop time.
         let seq = seq_of(&rig.clips[0]);
@@ -1110,17 +1162,20 @@ mod tests {
     #[test]
     fn add_keyframe_at_existing_time_overwrites() {
         let mut rig = anim_rig(2);
-        let idx = rig.add_keyframe(0, 1000, vec![7, 9]).expect("skeletal");
+        let idx = rig
+            .add_keyframe(0, 1000, vec![mark(7), mark(9)])
+            .expect("skeletal");
         assert_eq!(idx, 1);
         let kfs = rig.clip_keyframes(0);
         assert_eq!(kfs.len(), 2, "no duplicate timestamp");
-        assert_eq!(kfs[1].angles, vec![7, 9]);
+        assert_eq!(xf_marks(&kfs[1].xforms), vec![7, 9]);
     }
 
     #[test]
     fn add_keyframe_past_loop_extends_the_marker() {
         let mut rig = anim_rig(2);
-        rig.add_keyframe(0, 2000, vec![0, 1]).expect("skeletal");
+        rig.add_keyframe(0, 2000, vec![mark(0), mark(1)])
+            .expect("skeletal");
         // The marker must stay strictly after the last key.
         assert_eq!(rig.clip_loop_tim(0), 2000 + 500);
     }
@@ -1132,9 +1187,9 @@ mod tests {
         rig.bones[1].hinge.vmin = -100;
         rig.bones[1].hinge.vmax = 100;
         assert!(rig.set_keyframe_angle(0, 0, 1, 5000));
-        assert_eq!(rig.clip_keyframes(0)[0].angles[1], 100, "clamped to vmax");
+        assert_eq!(key_angle(&rig, 0, 0, 1), 100, "clamped to vmax");
         assert!(rig.set_keyframe_angle(0, 0, 1, -5000));
-        assert_eq!(rig.clip_keyframes(0)[0].angles[1], -100, "clamped to vmin");
+        assert_eq!(key_angle(&rig, 0, 0, 1), -100, "clamped to vmin");
         // Out-of-range key / bone is a no-op.
         assert!(!rig.set_keyframe_angle(0, 9, 1, 0));
         assert!(!rig.set_keyframe_angle(0, 0, 9, 0));
@@ -1148,8 +1203,8 @@ mod tests {
         assert_eq!(idx, 1);
         let kfs = rig.clip_keyframes(0);
         assert_eq!(kfs.iter().map(|k| k.tim).collect::<Vec<_>>(), [1000, 1200]);
-        // The moved key kept its pose (frame 0 = [bone0=0, bone1=100]).
-        assert_eq!(kfs[1].angles, vec![0, 100]);
+        // The moved key kept its pose (frame 0 markers = [bone0=0, bone1=100]).
+        assert_eq!(xf_marks(&kfs[1].xforms), vec![0, 100]);
         // Colliding with an existing key is refused.
         assert!(rig.move_keyframe(0, 0, 1200).is_none());
     }
@@ -1174,11 +1229,14 @@ mod tests {
         assert_eq!(idx, 1);
         assert_eq!(rig.clips.len(), 2);
         assert_eq!(rig.clips[1].name, "walk");
-        // One rest-pose key (all-zero angles, one column per bone), looping.
+        // One rest-pose key (identity transforms, one column per bone), looping.
         let kfs = rig.clip_keyframes(1);
         assert_eq!(kfs.len(), 1);
         assert_eq!(kfs[0].tim, 0);
-        assert_eq!(kfs[0].angles, vec![0, 0]);
+        assert_eq!(
+            kfs[0].xforms,
+            vec![BoneXform::IDENTITY, BoneXform::IDENTITY]
+        );
         assert_eq!(rig.clip_loop_tim(1), 500);
         // Round-trips (frmval columns match bones.len()).
         let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("new clip is consistent");
@@ -1292,9 +1350,21 @@ mod tests {
     }
 
     #[test]
+    fn single_bone_builds_a_minimal_animatable_rig() {
+        let rig = Rig::single_bone("hero", None);
+        assert_eq!(rig.bones.len(), 1);
+        assert_eq!(rig.bones[0].hinge.parent, -1, "the lone bone is the root");
+        assert!(rig.clips.is_empty(), "no clips until one is added");
+        // It round-trips through .rkc, and a clip can be added on top.
+        let mut rig = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("consistent");
+        rig.add_clip("idle".to_string());
+        assert_eq!(rig.clips.len(), 1);
+    }
+
+    #[test]
     fn keyframe_edits_round_trip_through_rkc() {
         let mut rig = anim_rig(2);
-        rig.add_keyframe(0, 500, vec![0, 42]);
+        rig.add_keyframe(0, 500, vec![mark(0), mark(42)]);
         rig.set_keyframe_angle(0, 1, 1, 1234);
         rig.move_keyframe(0, 2, 1800);
         let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("edits stay consistent");

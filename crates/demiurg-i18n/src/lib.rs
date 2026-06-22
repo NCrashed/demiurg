@@ -113,6 +113,8 @@ pub enum Msg {
     // Menus
     File,
     New,
+    NewRig,
+    ConvertToRig,
     Open,
     OpenReference,
     Save,
@@ -183,7 +185,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 103] = [
+    pub const ALL: [Msg; 105] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -226,6 +228,8 @@ impl Msg {
         Msg::Bottom,
         Msg::File,
         Msg::New,
+        Msg::NewRig,
+        Msg::ConvertToRig,
         Msg::Open,
         Msg::OpenReference,
         Msg::Save,
@@ -344,6 +348,8 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Bottom => "Bottom",
         Msg::File => "File",
         Msg::New => "New",
+        Msg::NewRig => "New rig",
+        Msg::ConvertToRig => "Convert to rig",
         Msg::Open => "Open…",
         Msg::OpenReference => "Open reference image…",
         Msg::Save => "Save",
@@ -455,6 +461,8 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Bottom => "Снизу",
         Msg::File => "Файл",
         Msg::New => "Создать",
+        Msg::NewRig => "Новый риг",
+        Msg::ConvertToRig => "Преобразовать в риг",
         Msg::Open => "Открыть…",
         Msg::OpenReference => "Открыть опорное изображение…",
         Msg::Save => "Сохранить",
