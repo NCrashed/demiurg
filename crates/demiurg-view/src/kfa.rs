@@ -126,9 +126,21 @@ impl KfaView {
     /// Empty if there is no sprite.
     #[must_use]
     pub fn pose_angles(&self) -> Vec<i16> {
+        // `kfaval` is now a per-bone TRS; recover the legacy hinge angle about
+        // each bone's axis to feed the still-i16 keyframe store (a later slice
+        // stores TRS directly).
         self.kfas
             .first()
-            .map(|k| k.kfaval.clone())
+            .map(|k| {
+                k.kfaval
+                    .iter()
+                    .zip(&self.rig.bones)
+                    .map(|(x, b)| {
+                        let v = b.hinge.v[0];
+                        x.hinge_angle([v.x, v.y, v.z])
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
