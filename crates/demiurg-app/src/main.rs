@@ -82,6 +82,10 @@ const FRAME_DT: Duration = Duration::from_micros(16_667);
 /// faces — where boundaries otherwise vanish — while staying subtle on
 /// already-readable lit faces.
 const VOXEL_EDGE_COLOR: u32 = 0x66d4_d8e0;
+/// Rotation-axis gizmo (Animate posing): an opaque orange line through the
+/// pivot, and a translucent orange ring in the rotation plane.
+const GIZMO_AXIS_COLOR: u32 = 0xffff_8c1a;
+const GIZMO_RING_COLOR: u32 = 0x99ff_8c1a;
 /// How often a background autosave is written while there are unsaved
 /// changes — a crash-recovery snapshot, not "the save".
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(20);
@@ -357,6 +361,22 @@ fn ray_plane(o: [f64; 3], d: [f64; 3], point: [f64; 3], n: [f64; 3]) -> Option<[
     }
     let t = dot3([point[0] - o[0], point[1] - o[1], point[2] - o[2]], n) / denom;
     (t > 0.0).then(|| [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t])
+}
+
+/// Two orthonormal vectors spanning the plane perpendicular to unit `n`
+/// (for drawing a ring / spokes in that plane). `n` is assumed normalized.
+fn plane_basis(n: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    // Cross `n` with whichever world axis is least parallel to it, so `u` is
+    // well-conditioned; `w = n × u` completes the right-handed frame.
+    let seed = if n[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let mut u = cross3(n, seed);
+    let len = dot3(u, u).sqrt().max(1e-9);
+    u = [u[0] / len, u[1] / len, u[2] / len];
+    (u, cross3(n, u))
 }
 
 fn point_dist_2d(p: [f64; 2], a: [f64; 2]) -> f64 {
@@ -1276,6 +1296,7 @@ impl App {
         }
         if let Some(kfa) = &self.kfa {
             lines.extend(kfa.bone_lines(Some(self.editor.active_bone)));
+            lines.extend(self.pose_gizmo_lines());
         }
         lines
     }
@@ -1728,42 +1749,26 @@ impl App {
     /// gesture falls through to nothing) unless we're in Animate with a key
     /// selected and the active bone is poseable — a child (`parent >= 0`, roots
     /// aren't keyframed) with a non-empty range (`vmin < vmax`, locked bones
-    /// can't move). The pivot, world axis and base angle are captured once here.
-    #[allow(clippy::cast_sign_loss)] // parent / key indices are >= 0 by the guards
-    fn begin_pose_drag(&mut self) {
-        if self.editor.rig_mode != RigMode::Animate {
-            return;
-        }
-        let Some(key) = self.editor.selected_key else {
-            return;
-        };
-        let clip = self.editor.active_clip;
-        let bone = self.editor.active_bone;
-        let Some((o, d)) = self.bone_pointer_ray() else {
-            return;
-        };
-        let Some(kfa) = &self.kfa else {
-            return;
-        };
-        let Some((pivot, _)) = kfa.limb_pose(bone) else {
-            return;
-        };
-        let Some(rig) = &self.editor.rig else {
-            return;
-        };
-        let Some(b) = rig.bones.get(bone) else {
-            return;
-        };
-        // Roots aren't keyframed; a zero range (vmin == vmax) is locked.
+    /// The active world pivot and (unit) rotation axis of bone `bone` — the
+    /// fixed point and axis a viewport pose rotates it about. The pivot is the
+    /// bone's solved joint position; the axis is the parent-side velcro axis
+    /// `hinge.v[1]` mapped to world by the **parent's** solved basis (the hinge
+    /// axis is fixed in the parent's frame). `None` if the bone isn't poseable
+    /// (root / locked), isn't solved, or the axis degenerates. Shared by the
+    /// posing gesture and the axis gizmo.
+    #[allow(clippy::cast_sign_loss)] // parent >= 0 once is_poseable passed
+    fn bone_pose_axis(&self, bone: usize) -> Option<([f64; 3], [f64; 3])> {
+        let kfa = self.kfa.as_ref()?;
+        let rig = self.editor.rig.as_ref()?;
         if !rig.is_poseable(bone) {
-            return;
+            return None;
         }
+        let b = rig.bones.get(bone)?;
+        let (pivot, _) = kfa.limb_pose(bone)?;
         // The hinge axis is fixed in the parent's frame; map it to world by the
         // parent's solved basis. A child of the (dummy) root uses the sprite
         // basis (≈ identity), which limb_pose returns for the root too.
-        let Some((_, pb)) = kfa.limb_pose(b.hinge.parent as usize) else {
-            return;
-        };
+        let (_, pb) = kfa.limb_pose(b.hinge.parent as usize)?;
         let va = b.hinge.v[1];
         let world = [
             f64::from(va.x) * f64::from(pb[0][0])
@@ -1778,7 +1783,7 @@ impl App {
         ];
         let len = dot3(world, world).sqrt();
         if len < 1e-9 {
-            return; // degenerate axis
+            return None; // degenerate axis
         }
         let axis = [world[0] / len, world[1] / len, world[2] / len];
         let piv = [
@@ -1786,14 +1791,98 @@ impl App {
             f64::from(pivot[1]),
             f64::from(pivot[2]),
         ];
+        Some((piv, axis))
+    }
+
+    /// Gizmo lines for the active bone's rotation axis (Animate mode): a line
+    /// through the pivot along the hinge axis plus a ring in the rotation
+    /// plane, so the user can see which axis a viewport pose rotates about
+    /// before grabbing. Empty unless Animate + the active bone is poseable.
+    /// Sized to the bone's mesh so the ring tracks the limb it rotates.
+    fn pose_gizmo_lines(&self) -> Vec<Line3> {
+        let mut lines = Vec::new();
+        if self.editor.rig_mode != RigMode::Animate {
+            return lines;
+        }
+        let bone = self.editor.active_bone;
+        let Some((p, n)) = self.bone_pose_axis(bone) else {
+            return lines;
+        };
+        // Radius ~ the bone's mesh size, with a floor so a tiny / empty mesh
+        // still shows a visible gizmo.
+        let r = self
+            .editor
+            .rig
+            .as_ref()
+            .and_then(|rig| rig.bones.get(bone))
+            .map_or(8.0, |b| {
+                let (x, y, z) = b.model.dims();
+                f64::from(x.max(y).max(z)).max(4.0)
+            });
+        let (u, w) = plane_basis(n);
+        // Axis line through the pivot (both directions), full diameter.
+        lines.push(Line3 {
+            a: [p[0] - n[0] * r, p[1] - n[1] * r, p[2] - n[2] * r],
+            b: [p[0] + n[0] * r, p[1] + n[1] * r, p[2] + n[2] * r],
+            color: GIZMO_AXIS_COLOR,
+            width_px: 2.0,
+            depth_test: false,
+        });
+        // Ring in the rotation plane, as a closed polyline.
+        const SEG: usize = 32;
+        let pt = |ang: f64| {
+            let (s, c) = ang.sin_cos();
+            [
+                p[0] + (u[0] * c + w[0] * s) * r,
+                p[1] + (u[1] * c + w[1] * s) * r,
+                p[2] + (u[2] * c + w[2] * s) * r,
+            ]
+        };
+        for i in 0..SEG {
+            #[allow(clippy::cast_precision_loss)] // i <= 32
+            let a0 = (i as f64) / (SEG as f64) * std::f64::consts::TAU;
+            #[allow(clippy::cast_precision_loss)]
+            let a1 = ((i + 1) as f64) / (SEG as f64) * std::f64::consts::TAU;
+            lines.push(Line3 {
+                a: pt(a0),
+                b: pt(a1),
+                color: GIZMO_RING_COLOR,
+                width_px: 1.5,
+                depth_test: false,
+            });
+        }
+        lines
+    }
+
+    /// can't move). The pivot, world axis and base angle are captured once here.
+    fn begin_pose_drag(&mut self) {
+        if self.editor.rig_mode != RigMode::Animate {
+            return;
+        }
+        let Some(key) = self.editor.selected_key else {
+            return;
+        };
+        let clip = self.editor.active_clip;
+        let bone = self.editor.active_bone;
+        let Some((o, d)) = self.bone_pointer_ray() else {
+            return;
+        };
+        let Some((piv, axis)) = self.bone_pose_axis(bone) else {
+            return;
+        };
         let Some(anchor) = ray_plane(o, d, piv, axis) else {
             return;
         };
         let ref0 = [anchor[0] - piv[0], anchor[1] - piv[1], anchor[2] - piv[2]];
-        let base = rig
-            .clip_keyframes(clip)
-            .get(key)
-            .and_then(|kf| kf.angles.get(bone).copied())
+        let base = self
+            .editor
+            .rig
+            .as_ref()
+            .and_then(|rig| {
+                rig.clip_keyframes(clip)
+                    .get(key)
+                    .and_then(|kf| kf.angles.get(bone).copied())
+            })
             .unwrap_or(0);
         // Posing pauses; undo is captured lazily (begin_edit now, commit on the
         // first real change) so a click that doesn't move adds no step.
@@ -3752,6 +3841,18 @@ mod tests {
             plane_drag_delta([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 2, -3.0, [0.0; 3]),
             None
         );
+    }
+
+    #[test]
+    fn plane_basis_is_orthonormal_and_perpendicular_to_the_axis() {
+        for n in [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.6, -0.8, 0.0]] {
+            let (u, w) = plane_basis(n);
+            assert!((dot3(u, u) - 1.0).abs() < 1e-9, "u is unit");
+            assert!((dot3(w, w) - 1.0).abs() < 1e-9, "w is unit");
+            assert!(dot3(u, n).abs() < 1e-9, "u ⟂ n");
+            assert!(dot3(w, n).abs() < 1e-9, "w ⟂ n");
+            assert!(dot3(u, w).abs() < 1e-9, "u ⟂ w");
+        }
     }
 
     #[test]
