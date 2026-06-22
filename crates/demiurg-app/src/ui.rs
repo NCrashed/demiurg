@@ -48,13 +48,11 @@ const PRESETS: [u32; 8] = [
 #[allow(clippy::struct_excessive_bools)] // a set of one-shot menu flags, not state
 pub struct UiActions {
     pub new_model: bool,
-    pub open_kv6: bool,
-    pub open_vox: bool,
-    pub open_project: bool,
+    /// Open any supported document (`.demiurg` / `.rkc` / `.kv6` / `.vox`) — a
+    /// single file dialog; the loader detects the format from the extension.
+    pub open: bool,
     /// Open a reference image (file dialog).
     pub open_reference: bool,
-    /// Open a `.rkc` rigged character (file dialog).
-    pub open_character: bool,
     /// Remove the current reference image.
     pub remove_reference: bool,
     /// Save the project (Ctrl+S): overwrite the known path or prompt.
@@ -181,24 +179,12 @@ pub fn build(
                     ui.close();
                 }
                 ui.separator();
-                if ui.button(t(Msg::OpenKv6)).clicked() {
-                    actions.open_kv6 = true;
-                    ui.close();
-                }
-                if ui.button(t(Msg::OpenVox)).clicked() {
-                    actions.open_vox = true;
-                    ui.close();
-                }
-                if ui.button(t(Msg::OpenProject)).clicked() {
-                    actions.open_project = true;
+                if ui.button(t(Msg::Open)).clicked() {
+                    actions.open = true;
                     ui.close();
                 }
                 if ui.button(t(Msg::OpenReference)).clicked() {
                     actions.open_reference = true;
-                    ui.close();
-                }
-                if ui.button(t(Msg::OpenCharacter)).clicked() {
-                    actions.open_character = true;
                     ui.close();
                 }
                 ui.separator();

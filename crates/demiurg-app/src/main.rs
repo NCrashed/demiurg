@@ -142,11 +142,10 @@ struct PendingSave {
 /// What a pending file dialog will do with the path it returns.
 #[derive(Clone, Copy)]
 enum DialogKind {
-    OpenKv6,
-    OpenVox,
-    OpenProject,
+    /// Open any supported document (`.demiurg` / `.rkc` / `.kv6` / `.vox`);
+    /// the loader picks the format from the extension.
+    Open,
     OpenReference,
-    OpenCharacter,
     Save(SaveFormat),
 }
 
@@ -164,23 +163,21 @@ struct PendingDialog {
 /// panels must run on the main thread).
 fn run_dialog(kind: DialogKind, dir: Option<PathBuf>, name: Option<&str>) -> Option<PathBuf> {
     match kind {
-        DialogKind::OpenKv6 => rfd::FileDialog::new()
-            .add_filter("kv6", &["kv6"])
-            .pick_file(),
-        DialogKind::OpenVox => rfd::FileDialog::new()
-            .add_filter("vox", &["vox"])
-            .pick_file(),
-        DialogKind::OpenProject => rfd::FileDialog::new()
-            .add_filter("demiurg", &["demiurg"])
+        // One "Open" for every document format — the loader dispatches on the
+        // extension. A combined filter (shown first) lists them all; the
+        // per-format filters let the user narrow if they want.
+        DialogKind::Open => rfd::FileDialog::new()
+            .add_filter("voxel files", &["demiurg", "rkc", "kv6", "vox"])
+            .add_filter("demiurg project", &["demiurg"])
+            .add_filter("rigged character", &["rkc"])
+            .add_filter("kv6 model", &["kv6"])
+            .add_filter("MagicaVoxel", &["vox"])
             .pick_file(),
         DialogKind::OpenReference => rfd::FileDialog::new()
             .add_filter(
                 "image",
                 &["png", "jpg", "jpeg", "bmp", "gif", "tga", "webp"],
             )
-            .pick_file(),
-        DialogKind::OpenCharacter => rfd::FileDialog::new()
-            .add_filter("character", &["rkc"])
             .pick_file(),
         DialogKind::Save(format) => {
             let (filter, ext, default) = format.dialog_spec();
@@ -2491,20 +2488,11 @@ impl App {
             self.load_model(new_model());
             self.doc_name = None;
         }
-        if a.open_kv6 {
-            self.open_dialog(DialogKind::OpenKv6);
-        }
-        if a.open_vox {
-            self.open_dialog(DialogKind::OpenVox);
-        }
-        if a.open_project {
-            self.open_dialog(DialogKind::OpenProject);
+        if a.open {
+            self.open_dialog(DialogKind::Open);
         }
         if a.open_reference {
             self.open_dialog(DialogKind::OpenReference);
-        }
-        if a.open_character {
-            self.open_dialog(DialogKind::OpenCharacter);
         }
         if a.remove_reference {
             self.editor.reference = None;
@@ -2705,40 +2693,53 @@ impl App {
             return; // cancelled
         };
         match kind {
-            DialogKind::OpenKv6 => {
-                match std::fs::read(&path).map(|b| VoxelModel::from_kv6_bytes(&b)) {
-                    Ok(Ok(m)) => {
-                        self.load_model(m); // a .kv6 has no project path
-                        self.doc_name = stem_of(&path);
-                    }
-                    Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
-                    Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
-                }
-            }
-            DialogKind::OpenVox => {
-                match std::fs::read(&path).map(|b| VoxelModel::from_vox_bytes(&b)) {
-                    Ok(Ok(m)) => {
-                        self.load_model(m); // imported .vox has no project path
-                        self.doc_name = stem_of(&path);
-                    }
-                    Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
-                    Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
-                }
-            }
-            DialogKind::OpenProject => {
-                match std::fs::read(&path).map(|b| project::from_bytes(&b)) {
-                    Ok(Ok(m)) => {
-                        self.load_model(m);
-                        self.doc_name = stem_of(&path);
-                        self.project_path = Some(path); // Ctrl+S overwrites it
-                    }
-                    Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
-                    Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
-                }
-            }
+            DialogKind::Open => self.open_path(path),
             DialogKind::OpenReference => self.load_reference(&path),
-            DialogKind::OpenCharacter => self.load_character(&path),
             DialogKind::Save(format) => self.start_save(path, format, true),
+        }
+    }
+
+    /// Open any supported document, dispatching on the file extension: a
+    /// `.demiurg` project, a `.rkc` rigged character, a `.kv6` model, or a
+    /// `.vox` import. An unknown extension is reported. (The reference image is
+    /// a separate "open" — it's a tracing overlay, not a document.)
+    fn open_path(&mut self, path: PathBuf) {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        match ext.as_str() {
+            "demiurg" => match std::fs::read(&path).map(|b| project::from_bytes(&b)) {
+                Ok(Ok(m)) => {
+                    self.load_model(m);
+                    self.doc_name = stem_of(&path);
+                    self.project_path = Some(path); // Ctrl+S overwrites it
+                }
+                Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
+                Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
+            },
+            "rkc" => self.load_character(&path),
+            "kv6" => match std::fs::read(&path).map(|b| VoxelModel::from_kv6_bytes(&b)) {
+                Ok(Ok(m)) => {
+                    self.load_model(m); // a .kv6 has no project path
+                    self.doc_name = stem_of(&path);
+                }
+                Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
+                Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
+            },
+            "vox" => match std::fs::read(&path).map(|b| VoxelModel::from_vox_bytes(&b)) {
+                Ok(Ok(m)) => {
+                    self.load_model(m); // imported .vox has no project path
+                    self.doc_name = stem_of(&path);
+                }
+                Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
+                Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
+            },
+            other => eprintln!(
+                "demiurg: {}: unsupported format {other:?} (open .demiurg / .rkc / .kv6 / .vox)",
+                path.display()
+            ),
         }
     }
 
