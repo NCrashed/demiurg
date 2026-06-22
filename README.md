@@ -12,11 +12,14 @@ designed but not yet shipped (one codebase, see [DESIGN.md](./DESIGN.md)).
 
 ## Status
 
-**v0.1.0 — first release for artists.** A working native model editor
-(DESIGN.md milestone M2): tools, selection + move, palette, mirror, pivot,
-resizing, undo/redo, project save and engine-format export. Animation (`.kfa`,
-M4) and voxel-video (`.vvid`, M5) are next. See the
-[CHANGELOG](./CHANGELOG.md).
+**v0.4.0 — native model editor for artists.** Tools, selection + move, palette,
+mirror, pivot, resizing, undo/redo, reference-image tracing, project save and
+engine-format export all work (DESIGN.md milestone M2 plus reference images).
+
+A **skeletal-animation editor** (rig mode, `.rkc` rigged characters, keyframes,
+clips, viewport posing — DESIGN.md M4) is in **active development on `master`**
+and not yet in a tagged release; see [Skeletal animation](#skeletal-animation-preview)
+below. Voxel-video (`.vvid`, M5) follows. See the [CHANGELOG](./CHANGELOG.md).
 
 ## Install
 
@@ -47,7 +50,7 @@ On Linux the viewport needs the usual windowing/render libs (`libxkbcommon`,
 ## Usage
 
 ```
-demiurg [path.kv6 | path.demiurg]    # no path -> a blank canvas
+demiurg [path.kv6 | path.vox | path.demiurg | path.rkc]    # no path -> a blank canvas
 ```
 
 - **Tools** `1`–`8`: place, erase, paint, eyedropper, box, sphere, flood fill,
@@ -62,12 +65,39 @@ demiurg [path.kv6 | path.demiurg]    # no path -> a blank canvas
 - **Reference image**: File ▸ Open reference image, or drag a PNG/BMP/JPG/GIF/
   TGA/WEBP onto the window — pixel art becomes a flat 1-voxel-thick guide to
   trace from (non-destructive; place/flip/hide it in the Reference panel).
-  Dropping a `.kv6`/`.vox`/`.demiurg` opens it as the model.
+  Dropping a `.kv6`/`.vox`/`.demiurg` opens it as the model (and a `.rkc` as a
+  rig).
 - **Render**: CPU renderer by default (reliable everywhere); `--gpu` (or
   `ROXLAP_GPU=1`) opts into the faster GPU backend, whose device creation can
   hang on some Windows GPUs/drivers (white frozen window). Switch sprite/voxel
   preview in the View menu.
+- **Open / recent**: File ▸ Open loads any `.demiurg` / `.rkc` / `.kv6` / `.vox`;
+  File ▸ Open recent reopens a recently used file, and the file dialog remembers
+  the last folder you used.
 - **Language**: `DEMIURG_LANG=ru`, or the Language menu (English / Русский).
+
+### Skeletal animation (preview)
+
+In active development on `master` — the formats and UI may still change. You
+build a **rigged character** (a skeleton of bones, each carrying its own voxel
+mesh), pose it across keyframes, and export to roxlap's `.rkc` format.
+
+- **Start a rig**: File ▸ New rig (one root bone) or Convert to rig (wrap the
+  current model as a one-bone rig). Opening a `.rkc` continues editing one.
+- **Rig sub-modes** (Rig panel): **Sculpt** edits the active bone's mesh with the
+  normal voxel tools; **Skeleton** sets each bone's joint, parent and rotation
+  axis (drag a bone in the viewport to position it); **Animate** previews and
+  poses the clip.
+- **Posing** (Animate mode): click a bone to select it, then left-drag in the
+  viewport to transform it on the selected keyframe. `R` / `G` / `S` switch the
+  gizmo between **rotate** (trackball / ring), **move** and **scale**.
+- **Timeline** (bottom bar): `Space` plays / pauses; `,` and `.` step to the
+  previous / next keyframe; buttons add, delete, copy, cut and paste keyframes;
+  drag a tick to retime it.
+- **Clips** (left panel): add, rename and delete animation clips, and set each
+  clip's length and whether it loops.
+- **Export**: File ▸ Export character writes a `.rkc`; a `.demiurg` project also
+  stores the full rig.
 
 ## Layout
 
@@ -80,8 +110,11 @@ demiurg-app     native binary (winit + egui over the roxlap framebuffer)
 
 ## Formats
 
-- `.demiurg` — lossless editor project (the source of truth).
+- `.demiurg` — lossless editor project (the source of truth; stores a plain
+  model or a full rig).
 - `.kv6` — engine sprite export (surface voxels; how monada draws pieces).
+- `.rkc` — rigged-character export (skeleton + per-bone meshes + animation
+  clips; roxlap's animated-character container). *Preview — see above.*
 - `.vxl` — voxlap world export.
 - `.vox` — MagicaVoxel import/export (single model; no pivot, so import
   centres it).
@@ -89,7 +122,7 @@ demiurg-app     native binary (winit + egui over the roxlap framebuffer)
 ## Dependencies
 
 roxlap only — `roxlap-formats`, `roxlap-render`, `roxlap-scene`, `roxlap-core`
-(crates.io 0.12.0). No monada dependency. See [DESIGN.md](./DESIGN.md) for the
+(crates.io 0.13.0). No monada dependency. See [DESIGN.md](./DESIGN.md) for the
 architecture and roadmap.
 
 ## License
