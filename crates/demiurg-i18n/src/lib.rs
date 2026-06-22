@@ -100,6 +100,7 @@ pub enum Msg {
     Selected,
     Delete,
     Copy,
+    Cut,
     Paste,
     // Camera view presets
     Views,
@@ -185,7 +186,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 105] = [
+    pub const ALL: [Msg; 106] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -217,6 +218,7 @@ impl Msg {
         Msg::Selected,
         Msg::Delete,
         Msg::Copy,
+        Msg::Cut,
         Msg::Paste,
         Msg::Views,
         Msg::Front,
@@ -337,6 +339,7 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Selected => "Selected",
         Msg::Delete => "Delete",
         Msg::Copy => "Copy",
+        Msg::Cut => "Cut",
         Msg::Paste => "Paste",
         Msg::Views => "Views",
         Msg::Front => "Front",
@@ -450,6 +453,7 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Selected => "Выделено",
         Msg::Delete => "Удалить",
         Msg::Copy => "Копировать",
+        Msg::Cut => "Вырезать",
         Msg::Paste => "Вставить",
         Msg::Views => "Виды",
         Msg::Front => "Спереди",

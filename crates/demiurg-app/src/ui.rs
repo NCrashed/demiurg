@@ -110,6 +110,11 @@ pub struct UiActions {
     pub add_key: bool,
     /// Animate timeline: delete the selected keyframe.
     pub delete_key: bool,
+    /// Animate timeline: copy / cut the selected key's pose to the key
+    /// clipboard; paste it as a key at the playhead.
+    pub copy_key: bool,
+    pub cut_key: bool,
+    pub paste_key: bool,
     /// Animate timeline: retime key `.0` to absolute ms `.1` (a tick drag).
     pub move_key: Option<(usize, i32)>,
     /// Animate timeline: set key `.0`'s bone `.1` angle to `.2` (angle editor).
@@ -731,6 +736,22 @@ fn timeline_bar(
         ui.add_enabled_ui(selected.is_some(), |ui| {
             if ui.button(t(Msg::DeleteKey)).clicked() {
                 actions.delete_key = true;
+            }
+        });
+        // Copy / cut the selected key's pose; paste it as a key at the playhead
+        // (paste enabled once something's on the key clipboard). Cut + paste
+        // elsewhere moves a key; copy + paste duplicates a pose.
+        ui.add_enabled_ui(selected.is_some(), |ui| {
+            if ui.button(t(Msg::Copy)).clicked() {
+                actions.copy_key = true;
+            }
+            if ui.button(t(Msg::Cut)).clicked() {
+                actions.cut_key = true;
+            }
+        });
+        ui.add_enabled_ui(editor.key_clipboard.is_some(), |ui| {
+            if ui.button(t(Msg::Paste)).clicked() {
+                actions.paste_key = true;
             }
         });
 

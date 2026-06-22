@@ -576,6 +576,11 @@ struct Editor {
     /// sorted keyframes), or `None`. Transient view state, not part of the rig
     /// or its undo; clamped / reset when the clip changes or a key is removed.
     selected_key: Option<usize>,
+    /// Animate mode: a copied/cut keyframe pose (per-bone angles), pasted at
+    /// the playhead. Lets a key be duplicated (copy + paste) or moved (cut +
+    /// paste elsewhere). Survives clip switches (angles are resized/clamped on
+    /// paste). `None` until something is copied.
+    key_clipboard: Option<Vec<i16>>,
     /// The rig's skeleton changed (a hinge edit): the posed preview must be
     /// rebuilt from `rig`.
     rig_dirty: bool,
@@ -665,6 +670,7 @@ impl Editor {
             anim_playing: true,
             active_clip: 0,
             selected_key: None,
+            key_clipboard: None,
             rig_dirty: false,
             dirty: false,
             rig_undo: Vec::new(),
@@ -2554,6 +2560,15 @@ impl App {
         if a.delete_key {
             self.delete_key();
         }
+        if a.copy_key {
+            self.copy_key();
+        }
+        if a.cut_key {
+            self.cut_key();
+        }
+        if a.paste_key {
+            self.paste_key();
+        }
         if let Some(i) = a.select_bone {
             self.select_bone(i);
         }
@@ -3154,6 +3169,62 @@ impl App {
         }
     }
 
+    /// Copy the selected keyframe's pose into the key clipboard (no rig change /
+    /// undo). No-op without a selection.
+    fn copy_key(&mut self) {
+        let Some(k) = self.editor.selected_key else {
+            return;
+        };
+        let clip = self.editor.active_clip;
+        if let Some(angles) = self
+            .editor
+            .rig
+            .as_ref()
+            .and_then(|r| r.clip_keyframes(clip).get(k).map(|kf| kf.angles.clone()))
+        {
+            self.editor.key_clipboard = Some(angles);
+        }
+    }
+
+    /// Cut the selected keyframe: copy its pose to the clipboard, then delete it
+    /// (one undo step — the delete). No-op without a selection.
+    fn cut_key(&mut self) {
+        self.copy_key();
+        self.delete_key();
+    }
+
+    /// Paste the clipboard pose as a keyframe at the playhead (overwriting any
+    /// key already at that exact time), select it, and pause. One undo step (on
+    /// success). No-op without a clipboard pose / outside Animate. Combined with
+    /// cut this moves a key; with copy it duplicates a pose to another time.
+    fn paste_key(&mut self) {
+        let Some(angles) = self.editor.key_clipboard.clone() else {
+            return;
+        };
+        let Some(kfa) = self.kfa.as_ref() else {
+            return;
+        };
+        if self.editor.rig_mode != RigMode::Animate {
+            return;
+        }
+        let t = kfa.time();
+        let clip = self.editor.active_clip;
+        let snap = self.editor.rig_state();
+        let idx = self
+            .editor
+            .rig
+            .as_mut()
+            .and_then(|r| r.add_keyframe(clip, t, angles));
+        if let Some(idx) = idx {
+            if let Some(snap) = snap {
+                self.editor.rig_push_undo(snap);
+            }
+            self.editor.selected_key = Some(idx);
+            self.editor.anim_playing = false;
+            self.editor.rig_dirty = true;
+        }
+    }
+
     /// Retime keyframe `k` to `ms` (a tick drag). Undo is the active
     /// begin/commit-pending step, so this only mutates + follows the selection
     /// to the key's new index.
@@ -3583,6 +3654,13 @@ impl App {
         // Next redraw is scheduled by `about_to_wait` at the frame cap.
     }
 
+    /// Whether the editor is on the Animate tab of a rig — the context in
+    /// which the keyframe clipboard hotkeys (Ctrl+C/X/V) act on keys rather
+    /// than the voxel selection.
+    fn in_animate(&self) -> bool {
+        self.editor.rig.is_some() && self.editor.rig_mode == RigMode::Animate
+    }
+
     /// Dispatch a key press/release (camera holds, tool hotkeys, undo).
     fn on_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, pressed: bool) {
         let ctrl = self.modifiers.control_key();
@@ -3602,8 +3680,26 @@ impl App {
             KeyCode::KeyZ if pressed && ctrl && !shift => self.do_undo(),
             KeyCode::KeyZ if pressed && ctrl && shift => self.do_redo(),
             KeyCode::KeyY if pressed && ctrl => self.do_redo(),
-            KeyCode::KeyC if pressed && ctrl => self.copy_selection(),
-            KeyCode::KeyV if pressed && ctrl => self.paste_clipboard(),
+            // Ctrl+C/X/V are context-sensitive: in Animate they copy / cut /
+            // paste the selected keyframe's pose; elsewhere they copy / paste
+            // the voxel selection (there's no voxel "cut", so Ctrl+X is
+            // Animate-only). egui consumes these first when a text field has
+            // focus, so typing in a rename box isn't hijacked.
+            KeyCode::KeyC if pressed && ctrl => {
+                if self.in_animate() {
+                    self.copy_key();
+                } else {
+                    self.copy_selection();
+                }
+            }
+            KeyCode::KeyX if pressed && ctrl && self.in_animate() => self.cut_key(),
+            KeyCode::KeyV if pressed && ctrl => {
+                if self.in_animate() {
+                    self.paste_key();
+                } else {
+                    self.paste_clipboard();
+                }
+            }
             // Ctrl+S overwrites the project file (S without Ctrl zooms out).
             KeyCode::KeyS if ctrl && pressed => self.save_project(),
             KeyCode::Delete | KeyCode::Backspace if pressed => self.delete_selection(),
