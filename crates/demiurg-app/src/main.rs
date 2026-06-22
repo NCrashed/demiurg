@@ -313,6 +313,28 @@ struct BoneDrag {
     parent_basis: Option<[[f64; 3]; 3]>,
 }
 
+/// An in-progress viewport pose (Animate mode): rotates the active bone about
+/// its (fixed) hinge axis to follow the cursor, writing the resulting angle
+/// into the selected keyframe (`frmval[key][bone]`). The pivot, axis and base
+/// angle are frozen at grab time — recomputing them from the moving pose would
+/// make the drag wander.
+struct PoseDrag {
+    /// Bone being rotated (index into `rig.bones`).
+    bone: usize,
+    /// Keyframe receiving the angle, and its clip.
+    key: usize,
+    clip: usize,
+    /// World pivot (the bone's solved joint position) — the rotation centre.
+    pivot: [f64; 3],
+    /// World rotation axis (the hinge axis in the parent's frame), unit length.
+    axis: [f64; 3],
+    /// Reference vector `anchor - pivot` (in the drag plane) at grab time, the
+    /// zero of the swept angle.
+    ref0: [f64; 3],
+    /// The key's angle at grab time; the swept angle is added to this.
+    base: i16,
+}
+
 /// The in-bounds cells of a float layer as a selection set (for the
 /// highlight while it floats).
 fn float_selection(cells: &[([i32; 3], u32)], dims: (u32, u32, u32)) -> HashSet<[u32; 3]> {
@@ -343,6 +365,18 @@ fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
         a[2] * b[0] - a[0] * b[2],
         a[0] * b[1] - a[1] * b[0],
     ]
+}
+
+/// Signed rotation from `ref0` to `r` about unit `axis`, in KFA hinge units
+/// (full circle = 65536). Both vectors are expected in the plane normal to
+/// `axis`. `None` when either is ~zero (cursor on the pivot — the angle is
+/// noise). The sign is right-handed about `axis`.
+fn hinge_sweep(axis: [f64; 3], ref0: [f64; 3], r: [f64; 3]) -> Option<f64> {
+    if dot3(r, r) < 1e-6 || dot3(ref0, ref0) < 1e-6 {
+        return None;
+    }
+    let theta = dot3(axis, cross3(ref0, r)).atan2(dot3(ref0, r));
+    Some(theta * 65536.0 / std::f64::consts::TAU)
 }
 
 /// Snap a cursor ray to a whole-voxel offset within a drag plane: meet the
@@ -984,6 +1018,7 @@ fn main() {
         drag: None,
         ref_drag: None,
         bone_drag: None,
+        pose_drag: None,
         last_tool: Tool::Place,
         force_cpu,
         force_gpu,
@@ -1123,6 +1158,8 @@ struct App {
     /// An in-progress drag of the reference layer (Move mode), else `None`.
     ref_drag: Option<RefDrag>,
     bone_drag: Option<BoneDrag>,
+    /// An in-progress viewport pose (Animate mode), else `None`.
+    pose_drag: Option<PoseDrag>,
     /// The active tool last frame, to detect a tool switch (keyboard or
     /// UI) and settle a floating layer when the user leaves Select.
     last_tool: Tool,
@@ -1623,6 +1660,139 @@ impl App {
         self.editor.rig_dirty = true;
     }
 
+    /// Begin a viewport pose (Animate mode): grab the active bone and rotate it
+    /// about its hinge axis, writing into the selected keyframe. Bails (no drag,
+    /// gesture falls through to nothing) unless we're in Animate with a key
+    /// selected and the active bone is poseable — a child (`parent >= 0`, roots
+    /// aren't keyframed) with a non-empty range (`vmin < vmax`, locked bones
+    /// can't move). The pivot, world axis and base angle are captured once here.
+    #[allow(clippy::cast_sign_loss)] // parent / key indices are >= 0 by the guards
+    fn begin_pose_drag(&mut self) {
+        if self.editor.rig_mode != RigMode::Animate {
+            return;
+        }
+        let Some(key) = self.editor.selected_key else {
+            return;
+        };
+        let clip = self.editor.active_clip;
+        let bone = self.editor.active_bone;
+        let Some((o, d)) = self.bone_pointer_ray() else {
+            return;
+        };
+        let Some(kfa) = &self.kfa else {
+            return;
+        };
+        let Some((pivot, _)) = kfa.limb_pose(bone) else {
+            return;
+        };
+        let Some(rig) = &self.editor.rig else {
+            return;
+        };
+        let Some(b) = rig.bones.get(bone) else {
+            return;
+        };
+        // Roots aren't keyframed; a zero range (vmin == vmax) is locked.
+        if b.hinge.parent < 0 || b.hinge.vmin >= b.hinge.vmax {
+            return;
+        }
+        // The hinge axis is fixed in the parent's frame; map it to world by the
+        // parent's solved basis. A child of the (dummy) root uses the sprite
+        // basis (≈ identity), which limb_pose returns for the root too.
+        let Some((_, pb)) = kfa.limb_pose(b.hinge.parent as usize) else {
+            return;
+        };
+        let va = b.hinge.v[1];
+        let world = [
+            f64::from(va.x) * f64::from(pb[0][0])
+                + f64::from(va.y) * f64::from(pb[1][0])
+                + f64::from(va.z) * f64::from(pb[2][0]),
+            f64::from(va.x) * f64::from(pb[0][1])
+                + f64::from(va.y) * f64::from(pb[1][1])
+                + f64::from(va.z) * f64::from(pb[2][1]),
+            f64::from(va.x) * f64::from(pb[0][2])
+                + f64::from(va.y) * f64::from(pb[1][2])
+                + f64::from(va.z) * f64::from(pb[2][2]),
+        ];
+        let len = dot3(world, world).sqrt();
+        if len < 1e-9 {
+            return; // degenerate axis
+        }
+        let axis = [world[0] / len, world[1] / len, world[2] / len];
+        let piv = [
+            f64::from(pivot[0]),
+            f64::from(pivot[1]),
+            f64::from(pivot[2]),
+        ];
+        let Some(anchor) = ray_plane(o, d, piv, axis) else {
+            return;
+        };
+        let ref0 = [anchor[0] - piv[0], anchor[1] - piv[1], anchor[2] - piv[2]];
+        let base = rig
+            .clip_keyframes(clip)
+            .get(key)
+            .and_then(|kf| kf.angles.get(bone).copied())
+            .unwrap_or(0);
+        // Posing pauses; undo is captured lazily (begin_edit now, commit on the
+        // first real change) so a click that doesn't move adds no step.
+        self.editor.anim_playing = false;
+        self.editor.rig_begin_edit();
+        self.pose_drag = Some(PoseDrag {
+            bone,
+            key,
+            clip,
+            pivot: piv,
+            axis,
+            ref0,
+            base,
+        });
+    }
+
+    /// Update a pose drag: sweep the active bone from `ref0` to the cursor's
+    /// in-plane vector and write `base + swept` into the keyframe. The first
+    /// real change commits the pending undo snapshot (one drag = one step).
+    #[allow(clippy::cast_possible_truncation)] // the angle is clamped into i16 by the rig
+    fn update_pose_drag(&mut self) {
+        let Some(drag) = &self.pose_drag else {
+            return;
+        };
+        let (bone, key, clip, pivot, axis, ref0, base) = (
+            drag.bone, drag.key, drag.clip, drag.pivot, drag.axis, drag.ref0, drag.base,
+        );
+        let Some((o, d)) = self.bone_pointer_ray() else {
+            return;
+        };
+        let Some(cur) = ray_plane(o, d, pivot, axis) else {
+            return;
+        };
+        let r = [cur[0] - pivot[0], cur[1] - pivot[1], cur[2] - pivot[2]];
+        let Some(delta) = hinge_sweep(axis, ref0, r) else {
+            return; // cursor on the pivot — the angle is noise
+        };
+        let new = (f64::from(base) + delta).round();
+        let new = new.clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
+        // Skip frames that don't change the stored value, so a stationary press
+        // commits no undo step and writes nothing (set_keyframe_angle clamps, so
+        // compare against the post-clamp stored angle).
+        let stored = self.editor.rig.as_ref().and_then(|rg| {
+            rg.clip_keyframes(clip)
+                .get(key)
+                .and_then(|k| k.angles.get(bone).copied())
+        });
+        if stored == Some(new) {
+            return;
+        }
+        // First real motion: fold the pre-drag snapshot into one undo step.
+        self.editor.rig_commit_pending();
+        if self
+            .editor
+            .rig
+            .as_mut()
+            .is_some_and(|rg| rg.set_keyframe_angle(clip, key, bone, new))
+        {
+            self.editor.rig_dirty = true;
+        }
+    }
+
     /// Left-button press: a quick eyedropper (Ctrl), a selection marquee
     /// (Select tool), a drag-paint stroke (continuous tools), or a
     /// click-once tool.
@@ -1631,10 +1801,12 @@ impl App {
             return; // don't edit behind the quit / saving / dialog modal
         }
         if self.editor.rig.is_some() && self.editor.rig_mode != RigMode::Sculpt {
-            // Skeleton: left-drag repositions the active bone. Animate is
-            // read-only.
+            // Skeleton: left-drag repositions the active bone. Animate:
+            // left-drag rotates the active bone into the selected keyframe.
             if self.editor.rig_mode == RigMode::Skeleton {
                 self.begin_bone_drag();
+            } else {
+                self.begin_pose_drag();
             }
             return;
         }
@@ -1776,6 +1948,13 @@ impl App {
     fn end_paint(&mut self) {
         if self.bone_drag.take().is_some() {
             return; // bone repositioned
+        }
+        if self.pose_drag.take().is_some() {
+            // A click that never moved leaves an uncommitted pre-edit snapshot;
+            // drop it so the next unrelated edit doesn't absorb it. (A real
+            // drag already committed it on its first change.)
+            self.editor.rig_pending = None;
+            return; // bone posed into the keyframe
         }
         if self.ref_drag.take().is_some() {
             return; // reference repositioned
@@ -2688,12 +2867,28 @@ impl App {
     /// index clears the selection). Pure view state, no rig change / undo.
     fn set_selected_key(&mut self, sel: Option<usize>) {
         let clip = self.editor.active_clip;
-        self.editor.selected_key = sel.filter(|&k| {
+        let sel = sel.filter(|&k| {
             self.editor
                 .rig
                 .as_ref()
                 .is_some_and(|r| k < r.clip_keyframes(clip).len())
         });
+        self.editor.selected_key = sel;
+        // Snap the playhead to the selected key's time and pause, so the
+        // viewport shows exactly the pose being edited (posing rotates against
+        // the shown pose; an interpolated in-between would be non-WYSIWYG).
+        if let Some(k) = sel {
+            let tim = self
+                .editor
+                .rig
+                .as_ref()
+                .and_then(|r| r.clip_keyframes(clip).get(k).map(|kf| kf.tim));
+            if let (Some(tim), Some(kfa)) = (tim, self.kfa.as_mut()) {
+                kfa.set_time(tim);
+                self.editor.anim_playing = false;
+                self.editor.rig_dirty = true; // re-pose the preview at the key
+            }
+        }
     }
 
     /// Add a keyframe at the playhead from the currently displayed pose
@@ -3374,6 +3569,9 @@ impl ApplicationHandler for App {
                 if self.bone_drag.is_some() {
                     self.update_bone_drag();
                 }
+                if self.pose_drag.is_some() {
+                    self.update_pose_drag();
+                }
                 if self.ref_drag.is_some() {
                     self.update_ref_drag();
                 }
@@ -3478,6 +3676,31 @@ mod tests {
             plane_drag_delta([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 2, -3.0, [0.0; 3]),
             None
         );
+    }
+
+    #[test]
+    fn hinge_sweep_is_signed_and_in_hinge_units() {
+        let z = [0.0, 0.0, 1.0];
+        // ref0 = +x; a quarter turn to +y is +90° = a quarter of 65536.
+        let q = hinge_sweep(z, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]).unwrap();
+        assert!(
+            (q - 16384.0).abs() < 1.0,
+            "+90deg about +z is +16384, got {q}"
+        );
+        // The same sweep about -z is the opposite sign (right-handed).
+        let qn = hinge_sweep([0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]).unwrap();
+        assert!(
+            (qn + 16384.0).abs() < 1.0,
+            "flipping the axis flips the sign"
+        );
+        // A turn the other way (+x -> -y) is -90deg; magnitude is scale-free.
+        let h = hinge_sweep(z, [2.0, 0.0, 0.0], [0.0, -5.0, 0.0]).unwrap();
+        assert!(
+            (h + 16384.0).abs() < 1.0,
+            "-90deg is -16384 regardless of length"
+        );
+        // Cursor on the pivot (a ~zero vector) yields no angle.
+        assert_eq!(hinge_sweep(z, [1.0, 0.0, 0.0], [0.0; 3]), None);
     }
 
     #[test]
