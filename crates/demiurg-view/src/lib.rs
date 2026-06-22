@@ -170,6 +170,10 @@ impl ModelView {
     /// disable). `flip_x` mirrors the result horizontally to match the
     /// viewport's "Flip X" correction.
     #[must_use]
+    // A headless-render facade that mirrors roxlap's CPU `render` inputs
+    // (camera, dims, shades, sky, flip, ray density); bundling them into a
+    // struct would just shuffle the same fields around.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_cpu(
         &mut self,
         camera: &OrbitCamera,
@@ -192,6 +196,9 @@ impl ModelView {
         // angstart scratch (sized ~per-pixel) must be inflated to match, or
         // hrend indexes out of bounds. Cap the oversample so the buffers
         // stay a sane size.
+        // `anginc.clamp(0.125, 1.0)` makes the reciprocal a finite positive in
+        // 1.0..=8.0, so the ceil-to-u32 can't truncate or lose a sign.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let oversample = (1.0 / anginc.clamp(0.125, 1.0)).ceil() as u32;
         let pool_xres = width.saturating_mul(oversample).saturating_add(8);
         let mut pool = ScratchPool::new(pool_xres, height, roxlap_scene::CHUNK_SIZE_XY);

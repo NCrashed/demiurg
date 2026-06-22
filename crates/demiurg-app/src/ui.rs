@@ -651,6 +651,7 @@ fn rig_panel(
 /// timeline bar (which animates the active clip). Emits [`UiActions`]; the
 /// rename field edits a per-frame copy of the name (the host applies it, so the
 /// round-trip is invisible) under the inline begin/commit-pending undo step.
+#[allow(clippy::too_many_lines)] // a flat panel: clip list + pose inspector + buttons
 fn clips_panel(
     ui: &mut egui::Ui,
     editor: &Editor,

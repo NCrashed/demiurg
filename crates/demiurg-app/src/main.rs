@@ -474,6 +474,7 @@ fn signed_angle(axis: [f64; 3], ref0: [f64; 3], r: [f64; 3]) -> Option<f64> {
 
 /// Push a closed ring (polyline) of radius `r` centred at `center` in the
 /// plane normal to unit `normal`.
+#[allow(clippy::many_single_char_names)] // basis vectors u/w + sin/cos s/c, idiomatic
 fn ring_lines(
     out: &mut Vec<Line3>,
     center: [f64; 3],
@@ -517,15 +518,6 @@ fn cube_lines(
     color: u32,
     width: f32,
 ) {
-    let corner = |i: usize| {
-        let sgn = |bit: usize| if i & (1 << bit) == 0 { -half } else { half };
-        let (a, b, c) = (sgn(0), sgn(1), sgn(2));
-        [
-            center[0] + a * axes[0][0] + b * axes[1][0] + c * axes[2][0],
-            center[1] + a * axes[0][1] + b * axes[1][1] + c * axes[2][1],
-            center[2] + a * axes[0][2] + b * axes[1][2] + c * axes[2][2],
-        ]
-    };
     const EDGES: [(usize, usize); 12] = [
         (0, 1),
         (2, 3),
@@ -540,6 +532,15 @@ fn cube_lines(
         (2, 6),
         (3, 7), // along z
     ];
+    let corner = |i: usize| {
+        let sgn = |bit: usize| if i & (1 << bit) == 0 { -half } else { half };
+        let (a, b, c) = (sgn(0), sgn(1), sgn(2));
+        [
+            center[0] + a * axes[0][0] + b * axes[1][0] + c * axes[2][0],
+            center[1] + a * axes[0][1] + b * axes[1][1] + c * axes[2][1],
+            center[2] + a * axes[0][2] + b * axes[1][2] + c * axes[2][2],
+        ]
+    };
     for (a, b) in EDGES {
         out.push(Line3 {
             a: corner(a),
@@ -553,6 +554,13 @@ fn cube_lines(
 
 fn point_dist_2d(p: [f64; 2], a: [f64; 2]) -> f64 {
     ((p[0] - a[0]).powi(2) + (p[1] - a[1]).powi(2)).sqrt()
+}
+
+/// Narrow a world point to `f32` for the renderer's projection API; the
+/// sub-pixel precision lost projecting to screen space doesn't matter.
+#[allow(clippy::cast_possible_truncation)]
+fn world_f32(p: [f64; 3]) -> [f32; 3] {
+    [p[0] as f32, p[1] as f32, p[2] as f32]
 }
 
 /// Distance from point `p` to the segment `[a, b]` in 2D (screen pixels).
@@ -1052,6 +1060,13 @@ fn save_png(path: &str, fb: &[u32], width: u32, height: u32) {
     }
 }
 
+// Entry point: flat argument parsing + one-time setup, so the pedantic
+// length / single-use-const / similar-name lints don't pull their weight here.
+#[allow(
+    clippy::too_many_lines,
+    clippy::similar_names,
+    clippy::items_after_statements
+)]
 fn main() {
     // The CPU renderer is the default (it's reliable everywhere); `--gpu`
     // opts into the GPU backend, `--cpu` forces CPU. The first non-flag
@@ -2089,10 +2104,7 @@ impl App {
     /// `ray_cursor`), or `None` before the first frame / behind the camera.
     fn project_to_screen(&self, w: [f64; 3]) -> Option<[f64; 2]> {
         let cam = self.camera.to_roxlap();
-        let (x, y) = self
-            .renderer
-            .as_ref()?
-            .project_point(&cam, [w[0] as f32, w[1] as f32, w[2] as f32])?;
+        let (x, y) = self.renderer.as_ref()?.project_point(&cam, world_f32(w))?;
         Some([f64::from(x), f64::from(y)])
     }
 
@@ -2108,7 +2120,7 @@ impl App {
         let (cx, cy) = self.ray_cursor();
         let proj = |w: [f64; 3]| {
             renderer
-                .project_point(&cam, [w[0] as f32, w[1] as f32, w[2] as f32])
+                .project_point(&cam, world_f32(w))
                 .map(|(x, y)| [f64::from(x), f64::from(y)])
         };
         let o = proj(pivot)?;
@@ -2231,9 +2243,7 @@ impl App {
                     pivot[1] + (u[1] * cs + w[1] * sn) * r,
                     pivot[2] + (u[2] * cs + w[2] * sn) * r,
                 ];
-                if let Some((px, py)) =
-                    renderer.project_point(&cam, [pt[0] as f32, pt[1] as f32, pt[2] as f32])
-                {
+                if let Some((px, py)) = renderer.project_point(&cam, world_f32(pt)) {
                     min_d = min_d.min(point_dist_2d([cx, cy], [f64::from(px), f64::from(py)]));
                 }
             }
@@ -2280,6 +2290,7 @@ impl App {
     /// gizmo axis under the cursor and drag the active bone's selected-key
     /// translation along it. Bails unless Animate + a key is selected + the
     /// bone is non-root + an axis was hit. Snaps the playhead to the key first.
+    #[allow(clippy::similar_names)] // `axis` (the picked one) vs `axes` (all three)
     fn begin_translate_drag(&mut self) {
         if self.editor.rig_mode != RigMode::Animate {
             return;
@@ -2456,6 +2467,7 @@ impl App {
     /// Begin a viewport scale drag (Animate, Scale gizmo): grab an axis handle
     /// to scale along that axis, or anywhere else (easy to hit) for a uniform
     /// scale on all axes. Bails like the translate drag.
+    #[allow(clippy::similar_names)] // `axis` (the picked one) vs `axes` (all three)
     fn begin_scale_drag(&mut self) {
         if self.editor.rig_mode != RigMode::Animate {
             return;
@@ -2612,6 +2624,7 @@ impl App {
     /// rotates about that bone-local axis; grabbing off the rings is a free
     /// trackball about the camera. Bails unless Animate + a key is selected +
     /// the bone is non-root. Snaps the playhead to the key first (WYSIWYG).
+    #[allow(clippy::many_single_char_names)] // quat/vector math: a, r, o, d, t, ...
     fn begin_rotate_drag(&mut self) {
         if self.editor.rig_mode != RigMode::Animate {
             return;
@@ -4820,6 +4833,7 @@ impl ApplicationHandler for App {
         self.window = Some(window);
     }
 
+    #[allow(clippy::too_many_lines)] // a flat match over winit window events
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         // Let egui see the event first; `consumed` means a widget took it
         // (a click on a panel), so we skip camera / editing.
