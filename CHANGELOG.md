@@ -7,11 +7,51 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-22
+
+Skeletal animation (preview): rig a model into bones and animate it with
+keyframes, posed right in the viewport and saved to roxlap's `.rkc` rigged-
+character format. Formats and UI may still change.
+
 ### Added
 
+- **Skeletal animation editor** — build a rigged character (a skeleton of bones,
+  each carrying its own voxel mesh) and animate it:
+  - **Rig** a model: File ▸ New rig (one root bone) or Convert to rig (wrap the
+    current model). Bones can be added, duplicated, reordered and deleted, with
+    3-axis ball joints and a dummy root for full-body motion.
+  - Three **sub-modes**: Sculpt (edit the active bone's mesh with the usual voxel
+    tools), Skeleton (set each bone's joint / parent / rotation axis, or drag a
+    bone in the viewport to place it), and Animate (preview and pose the clip).
+  - **Pose in the viewport**: click a bone to select it, then left-drag to
+    transform it on the selected keyframe — `R` / `G` / `S` switch the gizmo
+    between rotate (trackball / ring), move and scale. Each keyframe stores a
+    full per-bone transform (translation + rotation + scale).
+  - **Timeline** (bottom bar): play / pause with `Space`, step keyframes with
+    `,` / `.`, add / delete / copy / cut / paste keyframes, and drag a tick to
+    retime it; a pose inspector edits the selected key's move / rotate / scale
+    numerically.
+  - **Clips** (left panel): add, rename and delete animation clips, set each
+    clip's length, and toggle whether it loops.
+  - **Export** to `.rkc` (File ▸ Export character); a `.demiurg` project stores
+    the full rig too, and opening or dropping a `.rkc` loads it.
+- **Recent files**: File ▸ Open recent reopens a recently used document, and the
+  file dialog now remembers the last folder you used.
 - The menu bar shows a build stamp — `demiurg <version> · <commit>` — so you
   can tell which version and git commit a binary was built from (selectable to
   copy into a bug report). Source-tarball builds with no git show `unknown`.
+
+### Changed
+
+- Bumped roxlap to 0.13.0, which adds the `roxlap_formats::character` rigged-
+  character container (per-keyframe translation + rotation + scale) the
+  animation editor builds on.
+
+### Fixed
+
+- Editing a rig or animation now marks the project unsaved (the title `*` and
+  the quit guard), so posing / keyframing work can't be lost by quitting a
+  document that still looked saved.
 
 ## [0.4.0] - 2026-06-16
 
@@ -134,7 +174,8 @@ paint is what the game shows.
 - The browser/WASM build (M3), `.kfa` animation (M4), and voxel-video (M5) are
   designed but not yet implemented — see DESIGN.md §9.
 
-[Unreleased]: https://github.com/NCrashed/demiurg/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/NCrashed/demiurg/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/NCrashed/demiurg/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/NCrashed/demiurg/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/NCrashed/demiurg/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/NCrashed/demiurg/compare/v0.1.0...v0.2.0

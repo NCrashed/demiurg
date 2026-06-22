@@ -12,14 +12,15 @@ designed but not yet shipped (one codebase, see [DESIGN.md](./DESIGN.md)).
 
 ## Status
 
-**v0.4.0 — native model editor for artists.** Tools, selection + move, palette,
-mirror, pivot, resizing, undo/redo, reference-image tracing, project save and
-engine-format export all work (DESIGN.md milestone M2 plus reference images).
+**v0.5.0 — model + skeletal-animation editor for artists.** The native model
+editor (tools, selection + move, palette, mirror, pivot, resizing, undo/redo,
+reference-image tracing, project save and engine-format export) plus a new
+**skeletal-animation editor** — rig a model into bones and animate it with
+keyframes, posed in the viewport and exported to `.rkc` (DESIGN.md M2 + M4).
 
-A **skeletal-animation editor** (rig mode, `.rkc` rigged characters, keyframes,
-clips, viewport posing — DESIGN.md M4) is in **active development on `master`**
-and not yet in a tagged release; see [Skeletal animation](#skeletal-animation-preview)
-below. Voxel-video (`.vvid`, M5) follows. See the [CHANGELOG](./CHANGELOG.md).
+Animation is a **preview**: the `.rkc` format and the rig UI may still change.
+See [Skeletal animation](#skeletal-animation-preview) below. Voxel-video
+(`.vvid`, M5) follows. See the [CHANGELOG](./CHANGELOG.md).
 
 ## Install
 
@@ -78,9 +79,9 @@ demiurg [path.kv6 | path.vox | path.demiurg | path.rkc]    # no path -> a blank 
 
 ### Skeletal animation (preview)
 
-In active development on `master` — the formats and UI may still change. You
-build a **rigged character** (a skeleton of bones, each carrying its own voxel
-mesh), pose it across keyframes, and export to roxlap's `.rkc` format.
+New in v0.5.0, and still a preview — the formats and UI may change. You build a
+**rigged character** (a skeleton of bones, each carrying its own voxel mesh),
+pose it across keyframes, and export to roxlap's `.rkc` format.
 
 - **Start a rig**: File ▸ New rig (one root bone) or Convert to rig (wrap the
   current model as a one-bone rig). Opening a `.rkc` continues editing one.
