@@ -171,6 +171,7 @@ pub enum Msg {
     Loop,
     Length,
     Translation,
+    Rotation,
     Scale,
     // Window title + quit confirmation
     Untitled,
@@ -187,7 +188,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 107] = [
+    pub const ALL: [Msg; 108] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -285,6 +286,7 @@ impl Msg {
         Msg::Loop,
         Msg::Length,
         Msg::Translation,
+        Msg::Rotation,
         Msg::Scale,
         Msg::Untitled,
         Msg::ConfirmQuitTitle,
@@ -409,6 +411,7 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Loop => "loop",
         Msg::Length => "length",
         Msg::Translation => "move",
+        Msg::Rotation => "rotate",
         Msg::Scale => "scale",
         Msg::Untitled => "untitled",
         Msg::ConfirmQuitTitle => "Unsaved changes",
@@ -524,6 +527,7 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Loop => "цикл",
         Msg::Length => "длина",
         Msg::Translation => "сдвиг",
+        Msg::Rotation => "поворот",
         Msg::Scale => "масштаб",
         Msg::Untitled => "без названия",
         Msg::ConfirmQuitTitle => "Несохранённые изменения",

@@ -42,7 +42,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use demiurg_core::{Document, KeyXform, Rig, VoxelModel, project};
+use demiurg_core::{Document, KeyXform, Quat, Rig, VoxelModel, project};
 use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{
     KfaView, Line3, ModelView, OrbitCamera, PickHit, RenderMode, ViewDir, pick_voxel,
@@ -2639,6 +2639,9 @@ impl App {
         if let Some((k, bone, s)) = a.set_key_scale {
             self.set_key_scale(k, bone, s);
         }
+        if let Some((k, bone, r)) = a.set_key_rotation {
+            self.set_key_rotation(k, bone, r);
+        }
         // Clip length: a drag, so it rides the begin/commit-pending pair like
         // move_key (one undo step per drag) — dispatch after the commit above.
         if let Some(ms) = a.set_clip_length {
@@ -3326,6 +3329,22 @@ impl App {
             .rig
             .as_mut()
             .is_some_and(|r| r.set_keyframe_scale(clip, k, bone, s))
+        {
+            self.seek_to_key(k);
+            self.editor.rig_dirty = true;
+        }
+    }
+
+    /// Set bone `bone`'s full rotation in key `k` (free 3-DOF, from the
+    /// inspector's Euler fields). Undo is the active begin/commit-pending step;
+    /// snaps the playhead to the key.
+    fn set_key_rotation(&mut self, k: usize, bone: usize, r: Quat) {
+        let clip = self.editor.active_clip;
+        if self
+            .editor
+            .rig
+            .as_mut()
+            .is_some_and(|rg| rg.set_keyframe_rotation(clip, k, bone, r))
         {
             self.seek_to_key(k);
             self.editor.rig_dirty = true;

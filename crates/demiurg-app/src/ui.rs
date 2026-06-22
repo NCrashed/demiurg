@@ -11,6 +11,8 @@ use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{AXIS_COLORS, RenderMode, ViewDir};
 use roxlap_render::egui;
 
+use demiurg_core::Quat;
+
 use crate::reference::RefAxis;
 use crate::{Editor, RigMode, Tool};
 
@@ -124,6 +126,9 @@ pub struct UiActions {
     /// inspector).
     pub set_key_translation: Option<(usize, usize, [f32; 3])>,
     pub set_key_scale: Option<(usize, usize, [f32; 3])>,
+    /// Animate: set key `.0`'s bone `.1` full rotation to `.2` (free 3-DOF,
+    /// from the inspector's Euler fields).
+    pub set_key_rotation: Option<(usize, usize, Quat)>,
     /// Animate timeline: set the active clip's length (loop-marker ms).
     pub set_clip_length: Option<i32>,
     /// Animate timeline: toggle whether the active clip loops.
@@ -695,6 +700,13 @@ fn clips_panel(
                 };
             vec3_row(ui, Msg::Translation, xf.t, 0.1, &mut |a, t| {
                 a.set_key_translation = Some((k, bone, t));
+            });
+            // Free 3-DOF rotation as Euler degrees (X/Y/Z). Read back the
+            // stored quaternion, edit, rebuild — gimbal-limited near ±90° pitch.
+            let euler_deg = xf.r.to_euler().map(f32::to_degrees);
+            vec3_row(ui, Msg::Rotation, euler_deg, 1.0, &mut |a, d| {
+                let r = Quat::from_euler(d[0].to_radians(), d[1].to_radians(), d[2].to_radians());
+                a.set_key_rotation = Some((k, bone, r));
             });
             vec3_row(ui, Msg::Scale, xf.s, 0.01, &mut |a, s| {
                 a.set_key_scale = Some((k, bone, s));

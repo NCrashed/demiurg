@@ -547,6 +547,14 @@ impl Rig {
         self.edit_keyframe_xform(clip, k, bone, |x| x.s = s)
     }
 
+    /// Set bone `bone`'s full rotation in key `k`, keeping its translation and
+    /// scale — free 3-DOF, unlike [`Self::set_keyframe_angle`] (which is the
+    /// 1-DOF hinge case). Returns `false` if the clip / key / bone is out of
+    /// range.
+    pub fn set_keyframe_rotation(&mut self, clip: usize, k: usize, bone: usize, r: Quat) -> bool {
+        self.edit_keyframe_xform(clip, k, bone, |x| x.r = r)
+    }
+
     /// Apply `edit` to bone `bone`'s transform in key `k`, then re-bake.
     /// Returns `false` if the clip / key / bone is out of range.
     fn edit_keyframe_xform(
