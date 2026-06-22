@@ -70,6 +70,10 @@ pub struct UiActions {
     pub select_bone: Option<usize>,
     /// Append a new bone as a child of the active bone.
     pub add_bone: bool,
+    /// Append a 3-axis (ball) joint under the active bone.
+    pub add_axis_joint: bool,
+    /// Wrap the rig's root in a dummy root so the old root is animatable.
+    pub add_dummy_root: bool,
     /// Duplicate the bone at this index (the active bone) as a sibling.
     pub duplicate_bone: Option<usize>,
     /// Reorder the active bone: move it from `.0` to index `.1`.
@@ -570,6 +574,21 @@ fn rig_panel(
             .clicked()
         {
             actions.move_bone = Some((active, active + 1));
+        }
+    });
+    // Rig-building helpers for the 1-DOF hinge format: a 3-axis ball joint
+    // (a chain of X/Y/Z rotator bones) and a dummy root (so the real root
+    // becomes animatable).
+    ui.horizontal(|ui| {
+        if ui
+            .button(t(Msg::AxisJoint))
+            .on_hover_text(t(Msg::AxisJoint))
+            .clicked()
+        {
+            actions.add_axis_joint = true;
+        }
+        if ui.button(t(Msg::DummyRoot)).clicked() {
+            actions.add_dummy_root = true;
         }
     });
 }

@@ -143,7 +143,7 @@ impl Rig {
         self.bones.push(RigBone {
             name: format!("bone {n}"),
             model: default_bone_model(),
-            hinge: default_hinge(parent, joint),
+            hinge: free_hinge(parent, Z_AXIS, joint),
         });
         for clip in &mut self.clips {
             if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
@@ -279,6 +279,90 @@ impl Rig {
             }
         }
         true
+    }
+
+    // --- Rig-building helpers (multi-DOF joints) ----------------------------
+
+    /// Add a 3-DOF "ball" joint under `parent`: a chain of three 1-DOF rotator
+    /// bones (axes X -> Y -> Z), the last carrying a default visible mesh.
+    /// Returns the leaf (visible) bone's index.
+    ///
+    /// The format animates exactly one angle per bone about a fixed axis, so a
+    /// multi-axis joint is built from one bone per axis (the standard voxlap
+    /// trick). The two upper rotators are zero-length with empty (invisible)
+    /// meshes and exist only to compose rotation; posing all three gives a full
+    /// 3-axis orientation. Every clip gains three fresh `0` columns so
+    /// `frmval[*].len()` stays equal to `bones.len()`.
+    pub fn add_axis_joint(&mut self, parent: i32) -> usize {
+        let n = self.bones.len();
+        // Offset the joint to the parent's +X edge (like `add_bone`) so it sits
+        // beside the parent; only the first rotator's parent-side velcro
+        // carries the offset, the rest are coincident.
+        let joint = usize::try_from(parent)
+            .ok()
+            .and_then(|p| self.bones.get(p))
+            .map_or(ZERO, |p| {
+                #[allow(clippy::cast_precision_loss)] // mesh dims are tiny
+                let x = p.model.dims().0 as f32;
+                Point3 { x, y: 0.0, z: 0.0 }
+            });
+        let leaf = format!("bone {}", n + 2);
+        let rot_x = i32::try_from(n).unwrap_or(-1);
+        let rot_y = i32::try_from(n + 1).unwrap_or(-1);
+        self.bones.push(RigBone {
+            name: format!("{leaf} rotX"),
+            model: empty_bone_model(),
+            hinge: free_hinge(parent, X_AXIS, joint),
+        });
+        self.bones.push(RigBone {
+            name: format!("{leaf} rotY"),
+            model: empty_bone_model(),
+            hinge: free_hinge(rot_x, Y_AXIS, ZERO),
+        });
+        self.bones.push(RigBone {
+            name: leaf,
+            model: default_bone_model(),
+            hinge: free_hinge(rot_y, Z_AXIS, ZERO),
+        });
+        for clip in &mut self.clips {
+            if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
+                for row in frmval {
+                    row.extend_from_slice(&[0, 0, 0]);
+                }
+            }
+        }
+        n + 2 // the leaf
+    }
+
+    /// Insert an empty "dummy" root above the current root so the old root
+    /// becomes an animatable child (a keyframed clip can't pose a `parent < 0`
+    /// bone — the solver takes the root orientation from the sprite basis, not
+    /// `frmval`). The old root is re-parented to the new dummy at the same
+    /// spot, with a free rotation range. Returns the dummy's index, or `None`
+    /// if the rig has no root.
+    pub fn add_dummy_root(&mut self) -> Option<usize> {
+        let old_root = self.bones.iter().position(|b| b.hinge.parent < 0)?;
+        let dummy = self.bones.len();
+        let dummy_parent = i32::try_from(dummy).unwrap_or(-1);
+        // Re-parent the old root onto the dummy, coincident, animatable.
+        let h = &mut self.bones[old_root].hinge;
+        h.parent = dummy_parent;
+        h.p = [ZERO, ZERO];
+        h.vmin = i16::MIN;
+        h.vmax = i16::MAX;
+        self.bones.push(RigBone {
+            name: "origin".to_string(),
+            model: empty_bone_model(),
+            hinge: free_hinge(-1, Z_AXIS, ZERO),
+        });
+        for clip in &mut self.clips {
+            if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
+                for row in frmval {
+                    row.push(0);
+                }
+            }
+        }
+        Some(dummy)
     }
 
     // --- Clip management (Animate mode) -------------------------------------
@@ -547,6 +631,26 @@ const Z_AXIS: Point3 = Point3 {
     z: 1.0,
 };
 
+/// The +X unit axis (a 3-axis joint's first rotator).
+const X_AXIS: Point3 = Point3 {
+    x: 1.0,
+    y: 0.0,
+    z: 0.0,
+};
+
+/// The +Y unit axis (a 3-axis joint's second rotator).
+const Y_AXIS: Point3 = Point3 {
+    x: 0.0,
+    y: 1.0,
+    z: 0.0,
+};
+
+/// An empty 1x1x1 mesh (zero voxels) for an invisible "rotator" bone — the
+/// zero-length helper bones of a 3-axis joint carry no geometry.
+fn empty_bone_model() -> VoxelModel {
+    VoxelModel::new(1, 1, 1)
+}
+
 /// A small, visible default mesh for a freshly added bone: a solid box of
 /// the centre voxels in a 3×3×3 grid.
 fn default_bone_model() -> VoxelModel {
@@ -562,16 +666,20 @@ fn default_bone_model() -> VoxelModel {
 }
 
 /// A neutral hinge with the bone's joint at `joint` in the parent's frame
-/// (the child mesh sits centred there), no rotation range.
-fn default_hinge(parent: i32, joint: Point3) -> Hinge {
+/// (the child mesh sits centred there), rotating about `axis`. The rotation
+/// range is **free** (`i16::MIN..=i16::MAX`) so the bone is animatable out of
+/// the box — there is no in-editor control to widen a locked range, and the
+/// format only animates this one angle per bone, so a locked default would
+/// make a freshly added bone impossible to pose.
+fn free_hinge(parent: i32, axis: Point3, joint: Point3) -> Hinge {
     Hinge {
         parent,
         // p[0] = child-side attach (its own pivot); p[1] = parent-side joint.
         p: [ZERO, joint],
         // A valid (non-zero) rotation axis — see Z_AXIS.
-        v: [Z_AXIS, Z_AXIS],
-        vmin: 0,
-        vmax: 0,
+        v: [axis, axis],
+        vmin: i16::MIN,
+        vmax: i16::MAX,
         htype: 0,
         filler: [0; 7],
     }
@@ -1029,6 +1137,54 @@ mod tests {
         assert!(rig.remove_clip(0));
         assert!(rig.clips.is_empty());
         assert!(!rig.remove_clip(0));
+    }
+
+    #[test]
+    fn add_axis_joint_builds_an_xyz_rotator_chain() {
+        let mut rig = anim_rig(2); // bones: 0 root, 1 child
+        let leaf = rig.add_axis_joint(1);
+        assert_eq!(leaf, 4, "leaf is the last of the 3 added bones");
+        assert_eq!(rig.bones.len(), 5);
+        // Chain: rotX(2) -> rotY(3) -> leaf(4), under bone 1.
+        assert_eq!(rig.bones[2].hinge.parent, 1);
+        assert_eq!(rig.bones[3].hinge.parent, 2);
+        assert_eq!(rig.bones[4].hinge.parent, 3);
+        // One principal axis each.
+        assert_eq!(rig.bones[2].hinge.v[0], X_AXIS);
+        assert_eq!(rig.bones[3].hinge.v[0], Y_AXIS);
+        assert_eq!(rig.bones[4].hinge.v[0], Z_AXIS);
+        // Rotators are empty (invisible) and free-range (animatable); the leaf
+        // is visible.
+        assert!(rig.bones[2].model.used_colors().is_empty());
+        assert!(rig.bones[3].model.used_colors().is_empty());
+        assert!(!rig.bones[4].model.used_colors().is_empty());
+        assert_eq!(rig.bones[2].hinge.vmin, i16::MIN);
+        assert_eq!(rig.bones[2].hinge.vmax, i16::MAX);
+        // Every clip grew by three columns; still consistent on reload.
+        let frmval = skeletal(&rig.clips[0]);
+        assert!(frmval.iter().all(|row| row.len() == 5));
+        let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("joint stays consistent");
+        assert_eq!(back.bones.len(), 5);
+    }
+
+    #[test]
+    fn add_dummy_root_makes_the_old_root_animatable() {
+        let mut rig = anim_rig(2); // bone 0 is the root
+        let dummy = rig.add_dummy_root().expect("has a root");
+        assert_eq!(dummy, 2);
+        assert_eq!(rig.bones.len(), 3);
+        // Exactly one root, and it's the new dummy.
+        assert_eq!(rig.bones.iter().filter(|b| b.hinge.parent < 0).count(), 1);
+        assert_eq!(rig.bones[2].hinge.parent, -1);
+        assert!(rig.bones[2].model.used_colors().is_empty());
+        // The old root is now a free-range child of the dummy.
+        assert_eq!(rig.bones[0].hinge.parent, 2);
+        assert_eq!(rig.bones[0].hinge.vmin, i16::MIN);
+        // Clip columns grew by one; reload stays consistent.
+        let frmval = skeletal(&rig.clips[0]);
+        assert!(frmval.iter().all(|row| row.len() == 3));
+        let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("dummy root is consistent");
+        assert_eq!(back.bones.len(), 3);
     }
 
     #[test]

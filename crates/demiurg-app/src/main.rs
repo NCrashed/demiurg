@@ -2192,6 +2192,12 @@ impl App {
         if a.add_bone {
             self.add_bone();
         }
+        if a.add_axis_joint {
+            self.add_axis_joint();
+        }
+        if a.add_dummy_root {
+            self.add_dummy_root();
+        }
         if let Some(i) = a.duplicate_bone {
             self.duplicate_bone(i);
         }
@@ -2844,6 +2850,48 @@ impl App {
         self.editor.rig_dirty = true;
         if self.editor.rig_mode == RigMode::Sculpt {
             self.load_active_bone(true);
+        }
+    }
+
+    /// Add a 3-axis (ball) joint under the active bone and select its visible
+    /// leaf. Same scene handling as [`Self::add_bone`].
+    fn add_axis_joint(&mut self) {
+        if self.editor.rig.is_none() {
+            return;
+        }
+        self.editor.rig_checkpoint();
+        if self.editor.rig_mode == RigMode::Sculpt {
+            self.commit_active_bone();
+        }
+        let parent = i32::try_from(self.editor.active_bone).unwrap_or(-1);
+        let leaf = self
+            .editor
+            .rig
+            .as_mut()
+            .expect("rig present")
+            .add_axis_joint(parent);
+        self.editor.active_bone = leaf;
+        self.editor.rig_dirty = true;
+        if self.editor.rig_mode == RigMode::Sculpt {
+            self.load_active_bone(true);
+        }
+    }
+
+    /// Wrap the rig's root in a dummy root so the old root becomes animatable.
+    /// One undo step (on success); rebuilds the posed preview.
+    fn add_dummy_root(&mut self) {
+        let snap = self.editor.rig_state();
+        let wrapped = self
+            .editor
+            .rig
+            .as_mut()
+            .and_then(Rig::add_dummy_root)
+            .is_some();
+        if wrapped {
+            if let Some(snap) = snap {
+                self.editor.rig_push_undo(snap);
+            }
+            self.editor.rig_dirty = true;
         }
     }
 

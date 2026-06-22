@@ -126,6 +126,8 @@ pub enum Msg {
     Rig,
     Bones,
     AddBone,
+    AxisJoint,
+    DummyRoot,
     DuplicateBone,
     DeleteBone,
     MoveBoneUp,
@@ -176,7 +178,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 98] = [
+    pub const ALL: [Msg; 100] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -232,6 +234,8 @@ impl Msg {
         Msg::Rig,
         Msg::Bones,
         Msg::AddBone,
+        Msg::AxisJoint,
+        Msg::DummyRoot,
         Msg::DuplicateBone,
         Msg::DeleteBone,
         Msg::MoveBoneUp,
@@ -345,6 +349,8 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Rig => "Rig",
         Msg::Bones => "Bones",
         Msg::AddBone => "Add bone",
+        Msg::AxisJoint => "3-axis joint",
+        Msg::DummyRoot => "Dummy root",
         Msg::DuplicateBone => "Duplicate bone",
         Msg::DeleteBone => "Delete bone",
         Msg::MoveBoneUp => "Move bone up",
@@ -451,6 +457,8 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Rig => "Риг",
         Msg::Bones => "Кости",
         Msg::AddBone => "Добавить кость",
+        Msg::AxisJoint => "3-осевой сустав",
+        Msg::DummyRoot => "Фиктивный корень",
         Msg::DuplicateBone => "Дублировать кость",
         Msg::DeleteBone => "Удалить кость",
         Msg::MoveBoneUp => "Переместить кость вверх",

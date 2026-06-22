@@ -299,6 +299,63 @@ mod tests {
     }
 
     #[test]
+    fn empty_mesh_rotator_chain_bakes_solves_and_round_trips() {
+        // A 3-axis joint is a chain of zero-length, empty-mesh "rotator" bones
+        // (one per principal axis) carrying a visible leaf. Verify the format
+        // handles empty (zero-voxel) meshes through bake -> solve -> .rkc.
+        let axis = |x: f32, y: f32, z: f32| Point3 { x, y, z };
+        let zero = axis(0.0, 0.0, 0.0);
+        let hinge = |parent: i32, v: Point3| Hinge {
+            parent,
+            p: [zero, zero], // zero-length: child pivot == parent joint
+            v: [v, v],
+            vmin: i16::MIN,
+            vmax: i16::MAX,
+            htype: 0,
+            filler: [0; 7],
+        };
+        let rotator = |name: &str, parent: i32, v: Point3| RigBone {
+            name: name.to_string(),
+            model: VoxelModel::new(1, 1, 1), // empty: zero voxels -> invisible
+            hinge: hinge(parent, v),
+        };
+        let rig = Rig {
+            name: "joint".to_string(),
+            root: [0.0; 3],
+            bones: vec![
+                rotator("root", -1, axis(0.0, 0.0, 1.0)),
+                rotator("rotX", 0, axis(1.0, 0.0, 0.0)),
+                rotator("rotY", 1, axis(0.0, 1.0, 0.0)),
+                RigBone {
+                    name: "leaf".to_string(),
+                    model: box_model(3, 3, 8, 0x80ff_ffff),
+                    hinge: hinge(2, axis(0.0, 0.0, 1.0)),
+                },
+            ],
+            clips: vec![Clip {
+                name: "c".to_string(),
+                data: ClipData::Skeletal {
+                    // ~44 deg on each rotator axis.
+                    frmval: vec![vec![0, 8000, 8000, 8000]],
+                    seq: vec![Seq { tim: 0, frm: 0 }, Seq { tim: 500, frm: !0 }],
+                },
+            }],
+        };
+        // Round-trips through .rkc with empty meshes (zero-voxel kv6).
+        let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("empty meshes round-trip");
+        assert_eq!(back.bones.len(), 4);
+        // Bakes + solves without panic; the leaf gets a finite pose.
+        let mut view = KfaView::from_rig(rig, Some(0));
+        view.advance(0);
+        let (p, basis) = view.limb_pose(3).expect("leaf is posed");
+        assert!(p.iter().all(|c| c.is_finite()), "leaf pivot finite: {p:?}");
+        assert!(
+            basis.iter().flatten().all(|c| c.is_finite()),
+            "leaf basis finite (empty rotators didn't break the solve)"
+        );
+    }
+
+    #[test]
     fn pose_angles_read_the_resolved_pose_at_the_playhead() {
         let mut view = KfaView::from_rig(demo_rig(), Some(0));
         // Seek to t=500 (demo frame 1) and re-pose in place; the arm hinge
