@@ -323,28 +323,6 @@ struct BoneDrag {
     parent_basis: Option<[[f64; 3]; 3]>,
 }
 
-/// An in-progress viewport pose (Animate mode): rotates the active bone about
-/// its (fixed) hinge axis to follow the cursor, writing the resulting angle
-/// into the selected keyframe (`frmval[key][bone]`). The pivot, axis and base
-/// angle are frozen at grab time — recomputing them from the moving pose would
-/// make the drag wander.
-struct PoseDrag {
-    /// Bone being rotated (index into `rig.bones`).
-    bone: usize,
-    /// Keyframe receiving the angle, and its clip.
-    key: usize,
-    clip: usize,
-    /// World pivot (the bone's solved joint position) — the rotation centre.
-    pivot: [f64; 3],
-    /// World rotation axis (the hinge axis in the parent's frame), unit length.
-    axis: [f64; 3],
-    /// Reference vector `anchor - pivot` (in the drag plane) at grab time, the
-    /// zero of the swept angle.
-    ref0: [f64; 3],
-    /// The key's angle at grab time; the swept angle is added to this.
-    base: i16,
-}
-
 /// An in-progress viewport translate drag (Animate, Translate gizmo): drags the
 /// active bone along one of its local axes, writing the selected key's
 /// translation. Pivot, axis and the base translation are frozen at grab time.
@@ -363,6 +341,41 @@ struct TranslateDrag {
     /// The key's full translation at grab time; the swept distance is added to
     /// component `comp`.
     base_t: [f32; 3],
+}
+
+/// How a rotate drag sweeps: freely about the camera (grabbed off the gizmo
+/// rings) or constrained to one bone-local axis (grabbed on a ring).
+#[derive(Clone, Copy)]
+enum RotateKind {
+    /// Free trackball: camera right / up in world + the grab cursor.
+    Free {
+        right: [f64; 3],
+        up: [f64; 3],
+        start: (f64, f64),
+    },
+    /// Axis-constrained: which ring (0=x,1=y,2=z), its world axis, the pivot,
+    /// and the in-plane reference vector (`grab point − pivot`) the swept angle
+    /// is measured from.
+    Axis {
+        comp: usize,
+        axis: [f64; 3],
+        pivot: [f64; 3],
+        ref0: [f64; 3],
+    },
+}
+
+/// An in-progress viewport rotate (Animate, Rotate gizmo), writing the selected
+/// key's full rotation. Everything is frozen at grab time. A world increment
+/// `Δ` (from the camera sweep or the constrained axis) becomes a local one via
+/// the parent's world rotation `A`: `r' = (A⁻¹·Δ·A)·base_r`.
+struct RotateDrag {
+    bone: usize,
+    key: usize,
+    clip: usize,
+    base_r: Quat,
+    parent: Quat,
+    parent_inv: Quat,
+    kind: RotateKind,
 }
 
 /// The in-bounds cells of a float layer as a selection set (for the
@@ -405,6 +418,50 @@ fn plane_basis(n: [f64; 3]) -> ([f64; 3], [f64; 3]) {
     (u, cross3(n, u))
 }
 
+/// Signed angle (radians) from `ref0` to `r` about unit `axis` (both in the
+/// plane normal to `axis`); `None` if either is ~zero. Right-handed about `axis`.
+fn signed_angle(axis: [f64; 3], ref0: [f64; 3], r: [f64; 3]) -> Option<f64> {
+    if dot3(r, r) < 1e-9 || dot3(ref0, ref0) < 1e-9 {
+        return None;
+    }
+    Some(dot3(axis, cross3(ref0, r)).atan2(dot3(ref0, r)))
+}
+
+/// Push a closed ring (polyline) of radius `r` centred at `center` in the
+/// plane normal to unit `normal`.
+fn ring_lines(
+    out: &mut Vec<Line3>,
+    center: [f64; 3],
+    normal: [f64; 3],
+    r: f64,
+    color: u32,
+    width: f32,
+) {
+    const SEG: usize = 32;
+    let (u, w) = plane_basis(normal);
+    let pt = |ang: f64| {
+        let (s, c) = ang.sin_cos();
+        [
+            center[0] + (u[0] * c + w[0] * s) * r,
+            center[1] + (u[1] * c + w[1] * s) * r,
+            center[2] + (u[2] * c + w[2] * s) * r,
+        ]
+    };
+    for i in 0..SEG {
+        #[allow(clippy::cast_precision_loss)] // i <= 32
+        let a0 = (i as f64) / (SEG as f64) * std::f64::consts::TAU;
+        #[allow(clippy::cast_precision_loss)]
+        let a1 = ((i + 1) as f64) / (SEG as f64) * std::f64::consts::TAU;
+        out.push(Line3 {
+            a: pt(a0),
+            b: pt(a1),
+            color,
+            width_px: width,
+            depth_test: false,
+        });
+    }
+}
+
 fn point_dist_2d(p: [f64; 2], a: [f64; 2]) -> f64 {
     ((p[0] - a[0]).powi(2) + (p[1] - a[1]).powi(2)).sqrt()
 }
@@ -426,18 +483,6 @@ fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
         a[2] * b[0] - a[0] * b[2],
         a[0] * b[1] - a[1] * b[0],
     ]
-}
-
-/// Signed rotation from `ref0` to `r` about unit `axis`, in KFA hinge units
-/// (full circle = 65536). Both vectors are expected in the plane normal to
-/// `axis`. `None` when either is ~zero (cursor on the pivot — the angle is
-/// noise). The sign is right-handed about `axis`.
-fn hinge_sweep(axis: [f64; 3], ref0: [f64; 3], r: [f64; 3]) -> Option<f64> {
-    if dot3(r, r) < 1e-6 || dot3(ref0, ref0) < 1e-6 {
-        return None;
-    }
-    let theta = dot3(axis, cross3(ref0, r)).atan2(dot3(ref0, r));
-    Some(theta * 65536.0 / std::f64::consts::TAU)
 }
 
 /// Snap a cursor ray to a whole-voxel offset within a drag plane: meet the
@@ -1088,7 +1133,7 @@ fn main() {
         drag: None,
         ref_drag: None,
         bone_drag: None,
-        pose_drag: None,
+        rotate_drag: None,
         translate_drag: None,
         last_tool: Tool::Place,
         force_cpu,
@@ -1230,7 +1275,8 @@ struct App {
     ref_drag: Option<RefDrag>,
     bone_drag: Option<BoneDrag>,
     /// An in-progress viewport pose (Animate mode), else `None`.
-    pose_drag: Option<PoseDrag>,
+    /// An in-progress viewport trackball rotate (Animate, Rotate gizmo).
+    rotate_drag: Option<RotateDrag>,
     /// An in-progress viewport translate drag (Animate, Translate gizmo).
     translate_drag: Option<TranslateDrag>,
     /// The active tool last frame, to detect a tool switch (keyboard or
@@ -1818,9 +1864,7 @@ impl App {
         let kfa = self.kfa.as_ref()?;
         let rig = self.editor.rig.as_ref()?;
         let b = rig.bones.get(bone)?;
-        // Any non-root bone has a hinge axis to show; the *poseability* gate
-        // (vmin < vmax) is the caller's concern (begin_pose_drag checks it),
-        // so the gizmo can display a locked bone's axis too.
+        // Any non-root bone has a hinge axis to show in the Rotate gizmo.
         if b.hinge.parent < 0 {
             return None;
         }
@@ -1917,9 +1961,9 @@ impl App {
             RigMode::Sculpt => Vec::new(),
             // Skeleton always shows the hinge-axis gizmo; Animate picks the
             // gizmo for the active transform mode.
-            RigMode::Skeleton => self.rotate_gizmo_lines(),
+            RigMode::Skeleton => self.hinge_axis_gizmo_lines(),
             RigMode::Animate => match self.editor.gizmo_mode {
-                GizmoMode::Rotate => self.rotate_gizmo_lines(),
+                GizmoMode::Rotate => self.rotate_rings_gizmo_lines(),
                 GizmoMode::Translate => self.translate_gizmo_lines(),
             },
         }
@@ -1938,17 +1982,15 @@ impl App {
             })
     }
 
-    /// The rotation gizmo: a line through the pivot along the active bone's
-    /// hinge axis plus a ring in the rotation plane. Empty for a root bone.
-    fn rotate_gizmo_lines(&self) -> Vec<Line3> {
+    /// The Skeleton hinge-axis gizmo: a line through the pivot along the active
+    /// bone's hinge axis plus a ring in its rotation plane. Empty for a root.
+    fn hinge_axis_gizmo_lines(&self) -> Vec<Line3> {
         let mut lines = Vec::new();
         let bone = self.editor.active_bone;
         let Some((p, n)) = self.bone_pose_axis(bone) else {
             return lines;
         };
         let r = self.gizmo_radius(bone);
-        let (u, w) = plane_basis(n);
-        // Axis line through the pivot (both directions), full diameter.
         lines.push(Line3 {
             a: [p[0] - n[0] * r, p[1] - n[1] * r, p[2] - n[2] * r],
             b: [p[0] + n[0] * r, p[1] + n[1] * r, p[2] + n[2] * r],
@@ -1956,30 +1998,72 @@ impl App {
             width_px: 2.0,
             depth_test: false,
         });
-        // Ring in the rotation plane, as a closed polyline.
-        const SEG: usize = 32;
-        let pt = |ang: f64| {
-            let (s, c) = ang.sin_cos();
-            [
-                p[0] + (u[0] * c + w[0] * s) * r,
-                p[1] + (u[1] * c + w[1] * s) * r,
-                p[2] + (u[2] * c + w[2] * s) * r,
-            ]
+        ring_lines(&mut lines, p, n, r, GIZMO_RING_COLOR, 1.5);
+        lines
+    }
+
+    /// The Animate rotate gizmo: three rings around the active bone's local
+    /// axes (X red, Y green, Z blue). The ring under the cursor — or the one
+    /// being dragged — is drawn thicker. Empty for a root bone.
+    fn rotate_rings_gizmo_lines(&self) -> Vec<Line3> {
+        let mut lines = Vec::new();
+        let bone = self.editor.active_bone;
+        let non_root = self
+            .editor
+            .rig
+            .as_ref()
+            .is_some_and(|r| r.bones.get(bone).is_some_and(|b| b.hinge.parent >= 0));
+        if !non_root {
+            return lines;
+        }
+        let Some((p, axes)) = self.bone_world_axes(bone) else {
+            return lines;
         };
-        for i in 0..SEG {
-            #[allow(clippy::cast_precision_loss)] // i <= 32
-            let a0 = (i as f64) / (SEG as f64) * std::f64::consts::TAU;
-            #[allow(clippy::cast_precision_loss)]
-            let a1 = ((i + 1) as f64) / (SEG as f64) * std::f64::consts::TAU;
-            lines.push(Line3 {
-                a: pt(a0),
-                b: pt(a1),
-                color: GIZMO_RING_COLOR,
-                width_px: 1.5,
-                depth_test: false,
-            });
+        let r = self.gizmo_radius(bone);
+        // The highlighted ring: the one being dragged, else the one hovered.
+        let hot = match self.rotate_drag.as_ref().map(|d| &d.kind) {
+            Some(RotateKind::Axis { comp, .. }) => Some(*comp),
+            _ => self.hovered_rotate_ring(p, axes, r),
+        };
+        for (i, ax) in axes.iter().enumerate() {
+            let width = if hot == Some(i) { 3.5 } else { 1.5 };
+            ring_lines(&mut lines, p, *ax, r, AXIS_COLORS[i], width);
         }
         lines
+    }
+
+    /// The rotate ring (0=x,1=y,2=z) whose on-screen circle is nearest the
+    /// cursor, within a pixel threshold — for hover highlight and ring picking.
+    fn hovered_rotate_ring(&self, pivot: [f64; 3], axes: [[f64; 3]; 3], r: f64) -> Option<usize> {
+        const MAX_PX: f64 = 12.0;
+        const SEG: usize = 24;
+        let cam = self.camera.to_roxlap();
+        let renderer = self.renderer.as_ref()?;
+        let (cx, cy) = self.ray_cursor();
+        let mut best: Option<(usize, f64)> = None;
+        for (i, ax) in axes.iter().enumerate() {
+            let (u, w) = plane_basis(*ax);
+            let mut min_d = f64::INFINITY;
+            for s in 0..SEG {
+                #[allow(clippy::cast_precision_loss)] // s < 24
+                let a = (s as f64) / (SEG as f64) * std::f64::consts::TAU;
+                let (sn, cs) = a.sin_cos();
+                let pt = [
+                    pivot[0] + (u[0] * cs + w[0] * sn) * r,
+                    pivot[1] + (u[1] * cs + w[1] * sn) * r,
+                    pivot[2] + (u[2] * cs + w[2] * sn) * r,
+                ];
+                if let Some((px, py)) =
+                    renderer.project_point(&cam, [pt[0] as f32, pt[1] as f32, pt[2] as f32])
+                {
+                    min_d = min_d.min(point_dist_2d([cx, cy], [f64::from(px), f64::from(py)]));
+                }
+            }
+            if best.is_none_or(|(_, bd)| min_d < bd) {
+                best = Some((i, min_d));
+            }
+        }
+        best.filter(|&(_, d)| d <= MAX_PX).map(|(i, _)| i)
     }
 
     /// The translate gizmo: three axis arrows from the active bone's pivot along
@@ -2135,8 +2219,11 @@ impl App {
         }
     }
 
-    /// can't move). The pivot, world axis and base angle are captured once here.
-    fn begin_pose_drag(&mut self) {
+    /// Begin a viewport rotate (Animate, Rotate gizmo). Grabbing a gizmo ring
+    /// rotates about that bone-local axis; grabbing off the rings is a free
+    /// trackball about the camera. Bails unless Animate + a key is selected +
+    /// the bone is non-root. Snaps the playhead to the key first (WYSIWYG).
+    fn begin_rotate_drag(&mut self) {
         if self.editor.rig_mode != RigMode::Animate {
             return;
         }
@@ -2145,21 +2232,18 @@ impl App {
         };
         let clip = self.editor.active_clip;
         let bone = self.editor.active_bone;
-        // Bail early on an un-poseable bone (bone_pose_axis re-checks) so the
-        // playhead snap below doesn't fire on a click that won't pose anything.
-        if !self
+        let parent = self
             .editor
             .rig
             .as_ref()
-            .is_some_and(|r| r.is_poseable(bone))
-        {
-            return;
-        }
-        // Snap the playhead to the key being edited and re-pose *now*, so the
-        // bone we grab — its pivot/axis below, and the live preview — reflects
-        // THIS key, not an interpolated in-between if the playhead had drifted
-        // (Play / scrub). The write targets the key regardless; this keeps the
-        // drag WYSIWYG. (`advance(0)` re-solves in place at the new time.)
+            .and_then(|r| r.bones.get(bone))
+            .map(|b| b.hinge.parent);
+        let Some(parent) = parent.filter(|&p| p >= 0) else {
+            return; // root bones aren't keyframed
+        };
+        #[allow(clippy::cast_sign_loss)] // parent >= 0 just checked
+        let parent = parent as usize;
+        // WYSIWYG: pose at the key before reading the world axes / basis.
         let key_tim = self
             .editor
             .rig
@@ -2169,92 +2253,118 @@ impl App {
             kfa.set_time(t);
             kfa.advance(0);
         }
-        let Some((o, d)) = self.bone_pointer_ray() else {
+        // Parent world rotation `A` (sprite basis for a child of the root) — a
+        // world increment maps to a local one as `A⁻¹·Δ·A`.
+        let Some((_, pbasis)) = self.kfa.as_ref().and_then(|k| k.limb_pose(parent)) else {
             return;
         };
-        let Some((piv, axis)) = self.bone_pose_axis(bone) else {
-            return;
-        };
-        let Some(anchor) = ray_plane(o, d, piv, axis) else {
-            return;
-        };
-        let ref0 = [anchor[0] - piv[0], anchor[1] - piv[1], anchor[2] - piv[2]];
-        // The drag sweeps a 1-DOF hinge angle, so read the key's current angle
-        // about this bone's axis out of its stored transform.
-        let base = self
+        let a = Quat::from_basis(pbasis[0], pbasis[1], pbasis[2]);
+        let base_r = self
             .editor
             .rig
             .as_ref()
-            .and_then(|rig| {
-                let v = rig.bones.get(bone)?.hinge.v[0];
-                rig.clip_keyframes(clip)
-                    .get(key)
-                    .map(|kf| kf.xforms[bone].hinge_angle([v.x, v.y, v.z]))
+            .and_then(|r| r.clip_keyframes(clip).get(key).map(|kf| kf.xforms[bone].r))
+            .unwrap_or(Quat::IDENTITY);
+        // A grabbed ring constrains to that axis; otherwise a free trackball.
+        let kind = self
+            .bone_world_axes(bone)
+            .and_then(|(pivot, axes)| {
+                let r = self.gizmo_radius(bone);
+                let i = self.hovered_rotate_ring(pivot, axes, r)?;
+                let (o, d) = self.bone_pointer_ray()?;
+                let cur = ray_plane(o, d, pivot, axes[i])?;
+                Some(RotateKind::Axis {
+                    comp: i,
+                    axis: axes[i],
+                    pivot,
+                    ref0: [cur[0] - pivot[0], cur[1] - pivot[1], cur[2] - pivot[2]],
+                })
             })
-            .unwrap_or(0);
-        // Posing pauses; undo is captured lazily (begin_edit now, commit on the
-        // first real change) so a click that doesn't move adds no step.
+            .unwrap_or_else(|| {
+                let cam = self.camera.to_roxlap();
+                RotateKind::Free {
+                    right: cam.right,
+                    up: [-cam.down[0], -cam.down[1], -cam.down[2]],
+                    start: self.cursor,
+                }
+            });
         self.editor.anim_playing = false;
         self.editor.rig_begin_edit();
-        self.pose_drag = Some(PoseDrag {
+        self.rotate_drag = Some(RotateDrag {
             bone,
             key,
             clip,
-            pivot: piv,
-            axis,
-            ref0,
-            base,
+            base_r,
+            parent: a,
+            parent_inv: a.conjugate(),
+            kind,
         });
     }
 
-    /// Update a pose drag: sweep the active bone from `ref0` to the cursor's
-    /// in-plane vector and write `base + swept` into the keyframe. The first
-    /// real change commits the pending undo snapshot (one drag = one step).
-    #[allow(clippy::cast_possible_truncation)] // the angle is clamped into i16 by the rig
-    fn update_pose_drag(&mut self) {
-        let Some(drag) = &self.pose_drag else {
+    /// Update a rotate drag: build the world rotation `Δ` (free trackball about
+    /// the camera, or constrained about the grabbed ring's axis), conjugate it
+    /// into the bone's local frame, and write `key`'s rotation. Commits the
+    /// pending undo on the first real move.
+    #[allow(clippy::cast_possible_truncation)] // pixels -> radians, small angles
+    fn update_rotate_drag(&mut self) {
+        const SENS: f32 = 0.01; // radians per pixel (free trackball)
+        let Some(drag) = self.rotate_drag.as_ref() else {
             return;
         };
-        let (bone, key, clip, pivot, axis, ref0, base) = (
-            drag.bone, drag.key, drag.clip, drag.pivot, drag.axis, drag.ref0, drag.base,
+        let (bone, key, clip, base_r, parent, parent_inv, kind) = (
+            drag.bone,
+            drag.key,
+            drag.clip,
+            drag.base_r,
+            drag.parent,
+            drag.parent_inv,
+            drag.kind,
         );
-        let Some((o, d)) = self.bone_pointer_ray() else {
-            return;
+        let world = match kind {
+            RotateKind::Free { right, up, start } => {
+                let dx = (self.cursor.0 - start.0) as f32;
+                let dy = (self.cursor.1 - start.1) as f32;
+                if dx == 0.0 && dy == 0.0 {
+                    return; // no movement yet
+                }
+                let r3 = |v: [f64; 3]| [v[0] as f32, v[1] as f32, v[2] as f32];
+                // Drag right spins about the camera up-axis; drag down about right.
+                Quat::from_axis_angle(r3(up), dx * SENS)
+                    * Quat::from_axis_angle(r3(right), dy * SENS)
+            }
+            RotateKind::Axis {
+                axis, pivot, ref0, ..
+            } => {
+                let Some((o, d)) = self.bone_pointer_ray() else {
+                    return;
+                };
+                let Some(cur) = ray_plane(o, d, pivot, axis) else {
+                    return;
+                };
+                let r = [cur[0] - pivot[0], cur[1] - pivot[1], cur[2] - pivot[2]];
+                let Some(mut theta) = signed_angle(axis, ref0, r) else {
+                    return;
+                };
+                // The world-plane angle reads reversed on screen for a ring
+                // whose axis points toward the camera; flip it so the drag
+                // always follows the cursor's tangential motion.
+                if dot3(axis, self.camera.to_roxlap().forward) < 0.0 {
+                    theta = -theta;
+                }
+                Quat::from_axis_angle(
+                    [axis[0] as f32, axis[1] as f32, axis[2] as f32],
+                    theta as f32,
+                )
+            }
         };
-        let Some(cur) = ray_plane(o, d, pivot, axis) else {
-            return;
-        };
-        let r = [cur[0] - pivot[0], cur[1] - pivot[1], cur[2] - pivot[2]];
-        let Some(sweep) = hinge_sweep(axis, ref0, r) else {
-            return; // cursor on the pivot — the angle is noise
-        };
-        // roxlap's sprite render / stored rig frame is left-handed (the same
-        // chirality issue as bone_pointer_ray, Gotcha #2): a right-handed world
-        // sweep turns the bone the wrong way on screen, so negate it. This is a
-        // FIXED flip (view-independent) — the rig's parent basis carries the
-        // handedness, not the camera.
-        let delta = -sweep;
-        let new = (f64::from(base) + delta).round();
-        let new = new.clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
-        // Skip frames that don't change the stored value, so a stationary press
-        // commits no undo step and writes nothing (set_keyframe_angle clamps, so
-        // compare against the post-clamp stored angle).
-        let stored = self.editor.rig.as_ref().and_then(|rg| {
-            let v = rg.bones.get(bone)?.hinge.v[0];
-            rg.clip_keyframes(clip)
-                .get(key)
-                .map(|k| k.xforms[bone].hinge_angle([v.x, v.y, v.z]))
-        });
-        if stored == Some(new) {
-            return;
-        }
-        // First real motion: fold the pre-drag snapshot into one undo step.
+        let local = parent_inv * world * parent;
+        let r = (local * base_r).normalize();
         self.editor.rig_commit_pending();
         if self
             .editor
             .rig
             .as_mut()
-            .is_some_and(|rg| rg.set_keyframe_angle(clip, key, bone, new))
+            .is_some_and(|rg| rg.set_keyframe_rotation(clip, key, bone, r))
         {
             self.editor.rig_dirty = true;
         }
@@ -2281,7 +2391,7 @@ impl App {
             } else {
                 // Animate: the active gizmo mode chooses the transform.
                 match self.editor.gizmo_mode {
-                    GizmoMode::Rotate => self.begin_pose_drag(),
+                    GizmoMode::Rotate => self.begin_rotate_drag(),
                     GizmoMode::Translate => self.begin_translate_drag(),
                 }
             }
@@ -2429,12 +2539,12 @@ impl App {
             self.editor.rig_pending = None;
             return; // bone repositioned
         }
-        if self.pose_drag.take().is_some() {
+        if self.rotate_drag.take().is_some() {
             // A click that never moved leaves an uncommitted pre-edit snapshot;
             // drop it so the next unrelated edit doesn't absorb it. (A real
             // drag already committed it on its first change.)
             self.editor.rig_pending = None;
-            return; // bone posed into the keyframe
+            return; // bone rotated into the keyframe
         }
         if self.translate_drag.take().is_some() {
             self.editor.rig_pending = None; // drop an uncommitted select-only grab
@@ -4275,8 +4385,8 @@ impl ApplicationHandler for App {
                 if self.bone_drag.is_some() {
                     self.update_bone_drag();
                 }
-                if self.pose_drag.is_some() {
-                    self.update_pose_drag();
+                if self.rotate_drag.is_some() {
+                    self.update_rotate_drag();
                 }
                 if self.translate_drag.is_some() {
                     self.update_translate_drag();
@@ -4407,31 +4517,6 @@ mod tests {
         assert!((point_seg_dist_2d([13.0, 4.0], [0.0, 0.0], [10.0, 0.0]) - 5.0).abs() < 1e-9);
         // A zero-length segment is just point-to-point.
         assert!((point_seg_dist_2d([3.0, 4.0], [0.0, 0.0], [0.0, 0.0]) - 5.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn hinge_sweep_is_signed_and_in_hinge_units() {
-        let z = [0.0, 0.0, 1.0];
-        // ref0 = +x; a quarter turn to +y is +90° = a quarter of 65536.
-        let q = hinge_sweep(z, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]).unwrap();
-        assert!(
-            (q - 16384.0).abs() < 1.0,
-            "+90deg about +z is +16384, got {q}"
-        );
-        // The same sweep about -z is the opposite sign (right-handed).
-        let qn = hinge_sweep([0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]).unwrap();
-        assert!(
-            (qn + 16384.0).abs() < 1.0,
-            "flipping the axis flips the sign"
-        );
-        // A turn the other way (+x -> -y) is -90deg; magnitude is scale-free.
-        let h = hinge_sweep(z, [2.0, 0.0, 0.0], [0.0, -5.0, 0.0]).unwrap();
-        assert!(
-            (h + 16384.0).abs() < 1.0,
-            "-90deg is -16384 regardless of length"
-        );
-        // Cursor on the pivot (a ~zero vector) yields no angle.
-        assert_eq!(hinge_sweep(z, [1.0, 0.0, 0.0], [0.0; 3]), None);
     }
 
     #[test]
