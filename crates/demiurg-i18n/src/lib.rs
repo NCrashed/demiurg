@@ -170,6 +170,8 @@ pub enum Msg {
     // Animate timeline: per-clip playback
     Loop,
     Length,
+    Translation,
+    Scale,
     // Window title + quit confirmation
     Untitled,
     ConfirmQuitTitle,
@@ -185,7 +187,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 105] = [
+    pub const ALL: [Msg; 107] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -282,6 +284,8 @@ impl Msg {
         Msg::PoseUnposeable,
         Msg::Loop,
         Msg::Length,
+        Msg::Translation,
+        Msg::Scale,
         Msg::Untitled,
         Msg::ConfirmQuitTitle,
         Msg::ConfirmQuitBody,
@@ -404,6 +408,8 @@ const fn en(msg: Msg) -> &'static str {
         Msg::PoseUnposeable => "this bone can't be posed (root or locked)",
         Msg::Loop => "loop",
         Msg::Length => "length",
+        Msg::Translation => "move",
+        Msg::Scale => "scale",
         Msg::Untitled => "untitled",
         Msg::ConfirmQuitTitle => "Unsaved changes",
         Msg::ConfirmQuitBody => "Quit without saving?",
@@ -517,6 +523,8 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::PoseUnposeable => "эту кость нельзя позировать (корень или заблокирована)",
         Msg::Loop => "цикл",
         Msg::Length => "длина",
+        Msg::Translation => "сдвиг",
+        Msg::Scale => "масштаб",
         Msg::Untitled => "без названия",
         Msg::ConfirmQuitTitle => "Несохранённые изменения",
         Msg::ConfirmQuitBody => "Выйти без сохранения?",

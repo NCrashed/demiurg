@@ -529,6 +529,44 @@ impl Rig {
         true
     }
 
+    /// Set bone `bone`'s translation in key `k`, keeping its rotation and
+    /// scale. Returns `false` if the clip / key / bone is out of range.
+    pub fn set_keyframe_translation(
+        &mut self,
+        clip: usize,
+        k: usize,
+        bone: usize,
+        t: [f32; 3],
+    ) -> bool {
+        self.edit_keyframe_xform(clip, k, bone, |x| x.t = t)
+    }
+
+    /// Set bone `bone`'s scale in key `k`, keeping its translation and
+    /// rotation. Returns `false` if the clip / key / bone is out of range.
+    pub fn set_keyframe_scale(&mut self, clip: usize, k: usize, bone: usize, s: [f32; 3]) -> bool {
+        self.edit_keyframe_xform(clip, k, bone, |x| x.s = s)
+    }
+
+    /// Apply `edit` to bone `bone`'s transform in key `k`, then re-bake.
+    /// Returns `false` if the clip / key / bone is out of range.
+    fn edit_keyframe_xform(
+        &mut self,
+        clip: usize,
+        k: usize,
+        bone: usize,
+        edit: impl FnOnce(&mut BoneXform),
+    ) -> bool {
+        let Some((mut kfs, loop_tim, loops)) = self.read_clip(clip) else {
+            return false;
+        };
+        let Some(slot) = kfs.get_mut(k).and_then(|kf| kf.xforms.get_mut(bone)) else {
+            return false;
+        };
+        edit(slot);
+        self.write_clip(clip, kfs, loop_tim, loops);
+        true
+    }
+
     /// Retime key `k` to `new_tim` (clamped `>= 0`), re-sort, and return its
     /// new index. No-op (`None`) if the clip / key is out of range or another
     /// key already sits at `new_tim`.
@@ -1347,6 +1385,27 @@ mod tests {
         assert!(frmval.iter().all(|row| row.len() == 3));
         let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("dummy root is consistent");
         assert_eq!(back.bones.len(), 3);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // the test literals are exact in f32
+    fn set_keyframe_translation_and_scale_keep_other_components() {
+        let mut rig = anim_rig(2);
+        // Rotate bone 1, then set its translation + scale — each keeps the rest.
+        assert!(rig.set_keyframe_angle(0, 0, 1, 4000));
+        assert!(rig.set_keyframe_translation(0, 0, 1, [1.0, 2.0, 3.0]));
+        assert!(rig.set_keyframe_scale(0, 0, 1, [2.0, 1.0, 0.5]));
+        let x = rig.clip_keyframes(0)[0].xforms[1];
+        assert_eq!(x.t, [1.0, 2.0, 3.0]);
+        assert_eq!(x.s, [2.0, 1.0, 0.5]);
+        assert_eq!(
+            key_angle(&rig, 0, 0, 1),
+            4000,
+            "rotation survived t/s edits"
+        );
+        // Out-of-range is a no-op.
+        assert!(!rig.set_keyframe_translation(0, 9, 1, [0.0; 3]));
+        assert!(!rig.set_keyframe_scale(0, 0, 9, [1.0; 3]));
     }
 
     #[test]

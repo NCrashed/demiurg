@@ -120,6 +120,10 @@ pub struct UiActions {
     pub move_key: Option<(usize, i32)>,
     /// Animate timeline: set key `.0`'s bone `.1` angle to `.2` (angle editor).
     pub set_key_angle: Option<(usize, usize, i16)>,
+    /// Animate: set key `.0`'s bone `.1` translation / scale to `.2` (the pose
+    /// inspector).
+    pub set_key_translation: Option<(usize, usize, [f32; 3])>,
+    pub set_key_scale: Option<(usize, usize, [f32; 3])>,
     /// Animate timeline: set the active clip's length (loop-marker ms).
     pub set_clip_length: Option<i32>,
     /// Animate timeline: toggle whether the active clip loops.
@@ -652,6 +656,51 @@ fn clips_panel(
             }
         });
     });
+    // Pose inspector: numeric translation + scale for the active bone in the
+    // selected key (rotation has the bottom-bar slider + viewport drag). Each
+    // field drag is one undo step (the inline begin/commit-pending pair). Only
+    // for a non-root bone (the solver ignores a root's transform).
+    if !rig.clips.is_empty() {
+        let clip = editor.active_clip.min(rig.clips.len() - 1);
+        let keys = rig.clip_keyframes(clip);
+        let bone = editor.active_bone;
+        let sel = editor.selected_key.filter(|&k| k < keys.len());
+        let non_root = rig.bones.get(bone).is_some_and(|b| b.hinge.parent >= 0);
+        if let (Some(k), true) = (sel, non_root) {
+            ui.separator();
+            let xf = keys[k].xforms[bone];
+            // One labelled row of 3 DragValues; emits `make` when any changes.
+            let mut vec3_row =
+                |ui: &mut egui::Ui,
+                 label: Msg,
+                 v: [f32; 3],
+                 speed: f64,
+                 make: &mut dyn FnMut(&mut UiActions, [f32; 3])| {
+                    let mut out = v;
+                    ui.horizontal(|ui| {
+                        ui.label(t(label));
+                        let mut changed = false;
+                        for c in &mut out {
+                            let resp = ui.add(egui::DragValue::new(c).speed(speed));
+                            if resp.drag_started() || resp.gained_focus() {
+                                actions.rig_edit_begin = true;
+                            }
+                            changed |= resp.changed();
+                        }
+                        if changed {
+                            make(actions, out);
+                            actions.rig_edit_changed = true;
+                        }
+                    });
+                };
+            vec3_row(ui, Msg::Translation, xf.t, 0.1, &mut |a, t| {
+                a.set_key_translation = Some((k, bone, t));
+            });
+            vec3_row(ui, Msg::Scale, xf.s, 0.01, &mut |a, s| {
+                a.set_key_scale = Some((k, bone, s));
+            });
+        }
+    }
     // Contextual posing hint: what (if anything) blocks a viewport rotate-drag
     // right now — no key selected, an un-poseable bone (root / locked), or the
     // ready state. Mirrors the begin_pose_drag guards so the viewport gesture

@@ -2633,6 +2633,12 @@ impl App {
         if let Some((k, bone, v)) = a.set_key_angle {
             self.set_key_angle(k, bone, v);
         }
+        if let Some((k, bone, t)) = a.set_key_translation {
+            self.set_key_translation(k, bone, t);
+        }
+        if let Some((k, bone, s)) = a.set_key_scale {
+            self.set_key_scale(k, bone, s);
+        }
         // Clip length: a drag, so it rides the begin/commit-pending pair like
         // move_key (one undo step per drag) — dispatch after the commit above.
         if let Some(ms) = a.set_clip_length {
@@ -3291,6 +3297,36 @@ impl App {
             // Show the key being edited (the slider also targets `k`, so snap
             // the playhead there if it had drifted) — same WYSIWYG fix as the
             // viewport drag.
+            self.seek_to_key(k);
+            self.editor.rig_dirty = true;
+        }
+    }
+
+    /// Set bone `bone`'s translation in key `k` (pose inspector). Undo is the
+    /// active begin/commit-pending step; snaps the playhead to the key.
+    fn set_key_translation(&mut self, k: usize, bone: usize, t: [f32; 3]) {
+        let clip = self.editor.active_clip;
+        if self
+            .editor
+            .rig
+            .as_mut()
+            .is_some_and(|r| r.set_keyframe_translation(clip, k, bone, t))
+        {
+            self.seek_to_key(k);
+            self.editor.rig_dirty = true;
+        }
+    }
+
+    /// Set bone `bone`'s scale in key `k` (pose inspector). Undo is the active
+    /// begin/commit-pending step; snaps the playhead to the key.
+    fn set_key_scale(&mut self, k: usize, bone: usize, s: [f32; 3]) {
+        let clip = self.editor.active_clip;
+        if self
+            .editor
+            .rig
+            .as_mut()
+            .is_some_and(|r| r.set_keyframe_scale(clip, k, bone, s))
+        {
             self.seek_to_key(k);
             self.editor.rig_dirty = true;
         }
