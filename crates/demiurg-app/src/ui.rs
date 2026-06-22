@@ -740,6 +740,7 @@ fn clips_panel(
             for (mode, label, key) in [
                 (GizmoMode::Rotate, Msg::Rotation, "R"),
                 (GizmoMode::Translate, Msg::Translation, "G"),
+                (GizmoMode::Scale, Msg::Scale, "S"),
             ] {
                 if ui
                     .selectable_label(editor.gizmo_mode == mode, t(label))

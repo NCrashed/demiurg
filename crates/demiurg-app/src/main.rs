@@ -86,6 +86,8 @@ const VOXEL_EDGE_COLOR: u32 = 0x66d4_d8e0;
 /// pivot, and a translucent orange ring in the rotation plane.
 const GIZMO_AXIS_COLOR: u32 = 0xffff_8c1a;
 const GIZMO_RING_COLOR: u32 = 0x99ff_8c1a;
+/// Screen-pixel radius for grabbing the scale gizmo's centre (uniform) knob.
+const GIZMO_CENTER_PX: f64 = 16.0;
 /// How often a background autosave is written while there are unsaved
 /// changes — a crash-recovery snapshot, not "the save".
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(20);
@@ -232,12 +234,14 @@ pub(crate) enum RigMode {
 }
 
 /// Which transform the Animate viewport gizmo edits on a left-drag. Switched
-/// with `R` / `G` (rotate / grab). `Rotate` is the default 1-DOF hinge sweep;
-/// `Translate` drags the selected key's translation. (Scale is a later slice.)
+/// with `R` / `G` / `S` (rotate / grab / scale): `Rotate` is a trackball / ring
+/// rotation; `Translate` and `Scale` drag the selected key's translation /
+/// scale along an axis handle.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GizmoMode {
     Rotate,
     Translate,
+    Scale,
 }
 
 /// How a selection gesture combines with the existing selection: replace
@@ -341,6 +345,37 @@ struct TranslateDrag {
     /// The key's full translation at grab time; the swept distance is added to
     /// component `comp`.
     base_t: [f32; 3],
+}
+
+/// How a scale drag sweeps: along one axis handle (grabbed on a handle) or
+/// uniformly on all axes (grabbed off the handles — easy to hit).
+#[derive(Clone, Copy)]
+enum ScaleKind {
+    /// One bone-local axis: which component, its world axis + pivot, and the
+    /// signed world distance along it at grab time.
+    Axis {
+        comp: usize,
+        axis: [f64; 3],
+        pivot: [f64; 3],
+        anchor: f64,
+    },
+    /// Uniform: the pivot's screen position and the cursor's screen distance
+    /// from it at grab time (radial drag — out grows, in shrinks).
+    Uniform { pivot_screen: [f64; 2], anchor: f64 },
+}
+
+/// An in-progress viewport scale drag (Animate, Scale gizmo): drags a handle to
+/// scale the active bone, writing the selected key's scale.
+struct ScaleDrag {
+    bone: usize,
+    key: usize,
+    clip: usize,
+    /// Gizmo radius at grab time — the world / pixel distance that maps to one
+    /// unit of scale.
+    radius: f64,
+    /// The key's full scale at grab time.
+    base_s: [f32; 3],
+    kind: ScaleKind,
 }
 
 /// How a rotate drag sweeps: freely about the camera (grabbed off the gizmo
@@ -455,6 +490,50 @@ fn ring_lines(
         out.push(Line3 {
             a: pt(a0),
             b: pt(a1),
+            color,
+            width_px: width,
+            depth_test: false,
+        });
+    }
+}
+
+/// Push the 12 edges of a box centred at `center`, oriented by the orthonormal
+/// frame `axes`, with half-extent `half` along each axis.
+fn cube_lines(
+    out: &mut Vec<Line3>,
+    center: [f64; 3],
+    axes: [[f64; 3]; 3],
+    half: f64,
+    color: u32,
+    width: f32,
+) {
+    let corner = |i: usize| {
+        let sgn = |bit: usize| if i & (1 << bit) == 0 { -half } else { half };
+        let (a, b, c) = (sgn(0), sgn(1), sgn(2));
+        [
+            center[0] + a * axes[0][0] + b * axes[1][0] + c * axes[2][0],
+            center[1] + a * axes[0][1] + b * axes[1][1] + c * axes[2][1],
+            center[2] + a * axes[0][2] + b * axes[1][2] + c * axes[2][2],
+        ]
+    };
+    const EDGES: [(usize, usize); 12] = [
+        (0, 1),
+        (2, 3),
+        (4, 5),
+        (6, 7), // along x
+        (0, 2),
+        (1, 3),
+        (4, 6),
+        (5, 7), // along y
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7), // along z
+    ];
+    for (a, b) in EDGES {
+        out.push(Line3 {
+            a: corner(a),
+            b: corner(b),
             color,
             width_px: width,
             depth_test: false,
@@ -1135,6 +1214,7 @@ fn main() {
         bone_drag: None,
         rotate_drag: None,
         translate_drag: None,
+        scale_drag: None,
         last_tool: Tool::Place,
         force_cpu,
         force_gpu,
@@ -1279,6 +1359,8 @@ struct App {
     rotate_drag: Option<RotateDrag>,
     /// An in-progress viewport translate drag (Animate, Translate gizmo).
     translate_drag: Option<TranslateDrag>,
+    /// An in-progress viewport scale drag (Animate, Scale gizmo).
+    scale_drag: Option<ScaleDrag>,
     /// The active tool last frame, to detect a tool switch (keyboard or
     /// UI) and settle a floating layer when the user leaves Select.
     last_tool: Tool,
@@ -1924,8 +2006,80 @@ impl App {
     /// The gizmo axis (0=x,1=y,2=z) whose on-screen arrow is nearest the cursor,
     /// within a pixel threshold — for picking which axis a translate / scale
     /// drag constrains to. `len` is the arrow length in world units.
-    fn pick_gizmo_axis(&self, pivot: [f64; 3], axes: [[f64; 3]; 3], len: f64) -> Option<usize> {
-        const MAX_PX: f64 = 18.0;
+    /// Whether the cursor is on the active bone's gizmo axis handle for the
+    /// current Animate gizmo mode (rotate ring / translate arrow / scale
+    /// handle). Used to give handle clicks priority over re-selecting a bone
+    /// when a handle overlaps another bone's sprite. False outside Animate.
+    fn cursor_on_active_gizmo_axis(&self) -> bool {
+        if self.editor.rig_mode != RigMode::Animate {
+            return false;
+        }
+        let bone = self.editor.active_bone;
+        let Some((pivot, axes)) = self.bone_world_axes(bone) else {
+            return false;
+        };
+        let r = self.gizmo_radius(bone);
+        match self.editor.gizmo_mode {
+            GizmoMode::Rotate => self.hovered_rotate_ring(pivot, axes, r).is_some(),
+            GizmoMode::Translate => self.pick_gizmo_axis(pivot, axes, r, 18.0).is_some(),
+            // Scale: an axis handle, or anywhere on the gizmo's footprint
+            // (uniform-scale zone).
+            GizmoMode::Scale => {
+                self.pick_gizmo_axis(pivot, axes, r, 30.0).is_some()
+                    || self.cursor_near(pivot, self.gizmo_screen_radius(pivot, axes, r))
+            }
+        }
+    }
+
+    /// Whether the cursor is within `max_px` of `world`'s on-screen position —
+    /// for grabbing the gizmo's centre (uniform-scale) knob.
+    fn cursor_near(&self, world: [f64; 3], max_px: f64) -> bool {
+        self.project_to_screen(world).is_some_and(|p| {
+            let (cx, cy) = self.ray_cursor();
+            point_dist_2d([cx, cy], p) <= max_px
+        })
+    }
+
+    /// The gizmo's on-screen radius (px): the farthest axis tip from the pivot
+    /// in screen space, floored. This is the uniform-scale grab zone — a disc
+    /// covering the whole gizmo, so a click anywhere on it (off the axes) scales
+    /// uniformly, while a click outside it can still select another bone.
+    fn gizmo_screen_radius(&self, pivot: [f64; 3], axes: [[f64; 3]; 3], r: f64) -> f64 {
+        let Some(o) = self.project_to_screen(pivot) else {
+            return GIZMO_CENTER_PX;
+        };
+        let mut max = GIZMO_CENTER_PX;
+        for ax in &axes {
+            let tip = [
+                pivot[0] + ax[0] * r,
+                pivot[1] + ax[1] * r,
+                pivot[2] + ax[2] * r,
+            ];
+            if let Some(t) = self.project_to_screen(tip) {
+                max = max.max(point_dist_2d(o, t));
+            }
+        }
+        max
+    }
+
+    /// Project a world point to engine screen coords (same space as
+    /// `ray_cursor`), or `None` before the first frame / behind the camera.
+    fn project_to_screen(&self, w: [f64; 3]) -> Option<[f64; 2]> {
+        let cam = self.camera.to_roxlap();
+        let (x, y) = self
+            .renderer
+            .as_ref()?
+            .project_point(&cam, [w[0] as f32, w[1] as f32, w[2] as f32])?;
+        Some([f64::from(x), f64::from(y)])
+    }
+
+    fn pick_gizmo_axis(
+        &self,
+        pivot: [f64; 3],
+        axes: [[f64; 3]; 3],
+        len: f64,
+        max_px: f64,
+    ) -> Option<usize> {
         let cam = self.camera.to_roxlap();
         let renderer = self.renderer.as_ref()?;
         let (cx, cy) = self.ray_cursor();
@@ -1948,7 +2102,7 @@ impl App {
                 best = Some((i, d));
             }
         }
-        best.filter(|&(_, d)| d <= MAX_PX).map(|(i, _)| i)
+        best.filter(|&(_, d)| d <= max_px).map(|(i, _)| i)
     }
 
     /// Gizmo lines for the active bone's rotation axis (Skeleton + Animate): a
@@ -1965,6 +2119,7 @@ impl App {
             RigMode::Animate => match self.editor.gizmo_mode {
                 GizmoMode::Rotate => self.rotate_rings_gizmo_lines(),
                 GizmoMode::Translate => self.translate_gizmo_lines(),
+                GizmoMode::Scale => self.scale_gizmo_lines(),
             },
         }
     }
@@ -2136,7 +2291,7 @@ impl App {
             return;
         };
         let r = self.gizmo_radius(bone);
-        let Some(comp) = self.pick_gizmo_axis(pivot, axes, r) else {
+        let Some(comp) = self.pick_gizmo_axis(pivot, axes, r, 18.0) else {
             return; // cursor not on an axis arrow
         };
         let axis = axes[comp];
@@ -2214,6 +2369,217 @@ impl App {
             .rig
             .as_mut()
             .is_some_and(|r| r.set_keyframe_translation(clip, key, bone, t))
+        {
+            self.editor.rig_dirty = true;
+        }
+    }
+
+    /// The scale gizmo: three axis handles (a line + a small box knob at the
+    /// tip) along the active bone's local axes (X/Y/Z), plus a centre knob for
+    /// uniform scale. The dragged handle is drawn thicker. Empty for a root.
+    fn scale_gizmo_lines(&self) -> Vec<Line3> {
+        let mut lines = Vec::new();
+        let bone = self.editor.active_bone;
+        let non_root = self
+            .editor
+            .rig
+            .as_ref()
+            .is_some_and(|r| r.bones.get(bone).is_some_and(|b| b.hinge.parent >= 0));
+        if !non_root {
+            return lines;
+        }
+        let Some((p, axes)) = self.bone_world_axes(bone) else {
+            return lines;
+        };
+        let r = self.gizmo_radius(bone);
+        let dragging = self.scale_drag.as_ref().map(|d| d.kind);
+        let active_axis = match dragging {
+            Some(ScaleKind::Axis { comp, .. }) => Some(comp),
+            _ => None,
+        };
+        let uniform = matches!(dragging, Some(ScaleKind::Uniform { .. }));
+        for (i, ax) in axes.iter().enumerate() {
+            let hot = active_axis == Some(i);
+            let tip = [p[0] + ax[0] * r, p[1] + ax[1] * r, p[2] + ax[2] * r];
+            lines.push(Line3 {
+                a: p,
+                b: tip,
+                color: AXIS_COLORS[i],
+                width_px: if hot { 4.0 } else { 2.0 },
+                depth_test: false,
+            });
+            // A small box knob at the tip (distinguishes scale from translate).
+            cube_lines(
+                &mut lines,
+                tip,
+                axes,
+                r * 0.07,
+                AXIS_COLORS[i],
+                if hot { 3.0 } else { 1.5 },
+            );
+        }
+        // Centre knob — grab it (or miss the axes) for uniform scale.
+        cube_lines(
+            &mut lines,
+            p,
+            axes,
+            r * 0.09,
+            GIZMO_AXIS_COLOR,
+            if uniform { 3.0 } else { 1.5 },
+        );
+        lines
+    }
+
+    /// Begin a viewport scale drag (Animate, Scale gizmo): grab an axis handle
+    /// to scale along that axis, or anywhere else (easy to hit) for a uniform
+    /// scale on all axes. Bails like the translate drag.
+    fn begin_scale_drag(&mut self) {
+        if self.editor.rig_mode != RigMode::Animate {
+            return;
+        }
+        let Some(key) = self.editor.selected_key else {
+            return;
+        };
+        let clip = self.editor.active_clip;
+        let bone = self.editor.active_bone;
+        let non_root = self
+            .editor
+            .rig
+            .as_ref()
+            .is_some_and(|r| r.bones.get(bone).is_some_and(|b| b.hinge.parent >= 0));
+        if !non_root {
+            return;
+        }
+        // WYSIWYG: pose at the key before reading the gizmo axes / picking.
+        let key_tim = self
+            .editor
+            .rig
+            .as_ref()
+            .and_then(|r| r.clip_keyframes(clip).get(key).map(|kf| kf.tim));
+        if let (Some(tm), Some(kfa)) = (key_tim, self.kfa.as_mut()) {
+            kfa.set_time(tm);
+            kfa.advance(0);
+        }
+        let Some((o, d)) = self.bone_pointer_ray() else {
+            return;
+        };
+        let Some((pivot, axes)) = self.bone_world_axes(bone) else {
+            return;
+        };
+        let radius = self.gizmo_radius(bone);
+        // A grabbed axis handle (generous threshold) scales that axis; the
+        // centre knob scales uniformly. A click elsewhere isn't a scale grab
+        // (so it can't hijack selecting another bone).
+        let kind = if let Some(comp) = self.pick_gizmo_axis(pivot, axes, radius, 30.0) {
+            let axis = axes[comp];
+            let normal = self.camera.to_roxlap().forward;
+            let Some(cur) = ray_plane(o, d, pivot, normal) else {
+                return;
+            };
+            let anchor = dot3(
+                [cur[0] - pivot[0], cur[1] - pivot[1], cur[2] - pivot[2]],
+                axis,
+            );
+            ScaleKind::Axis {
+                comp,
+                axis,
+                pivot,
+                anchor,
+            }
+        } else if self.cursor_near(pivot, self.gizmo_screen_radius(pivot, axes, radius)) {
+            let Some(pivot_screen) = self.project_to_screen(pivot) else {
+                return;
+            };
+            let (cx, cy) = self.ray_cursor();
+            ScaleKind::Uniform {
+                pivot_screen,
+                anchor: point_dist_2d([cx, cy], pivot_screen),
+            }
+        } else {
+            return; // not on a scale handle
+        };
+        let base_s = self
+            .editor
+            .rig
+            .as_ref()
+            .and_then(|r| r.clip_keyframes(clip).get(key).map(|kf| kf.xforms[bone].s))
+            .unwrap_or([1.0; 3]);
+        self.editor.anim_playing = false;
+        self.editor.rig_begin_edit();
+        self.scale_drag = Some(ScaleDrag {
+            bone,
+            key,
+            clip,
+            radius,
+            base_s,
+            kind,
+        });
+    }
+
+    /// Update a scale drag: the swept distance (along the axis, or radial from
+    /// the pivot for uniform) in gizmo-radius units adds to the bone's scale,
+    /// floored just above 0.
+    #[allow(clippy::cast_possible_truncation, clippy::float_cmp)] // world deltas small; exact skip-guard
+    fn update_scale_drag(&mut self) {
+        let Some(drag) = self.scale_drag.as_ref() else {
+            return;
+        };
+        let (bone, key, clip, radius, base_s, kind) = (
+            drag.bone,
+            drag.key,
+            drag.clip,
+            drag.radius,
+            drag.base_s,
+            drag.kind,
+        );
+        let mut s = base_s;
+        match kind {
+            ScaleKind::Axis {
+                comp,
+                axis,
+                pivot,
+                anchor,
+            } => {
+                let Some((o, d)) = self.bone_pointer_ray() else {
+                    return;
+                };
+                let normal = self.camera.to_roxlap().forward;
+                let Some(cur) = ray_plane(o, d, pivot, normal) else {
+                    return;
+                };
+                let along = dot3(
+                    [cur[0] - pivot[0], cur[1] - pivot[1], cur[2] - pivot[2]],
+                    axis,
+                );
+                s[comp] = (base_s[comp] + ((along - anchor) / radius) as f32).max(0.05);
+            }
+            ScaleKind::Uniform {
+                pivot_screen,
+                anchor,
+            } => {
+                // Radial screen drag from the pivot; 80px maps to one scale unit
+                // on every axis.
+                let (cx, cy) = self.ray_cursor();
+                let delta = ((point_dist_2d([cx, cy], pivot_screen) - anchor) / 80.0) as f32;
+                for i in 0..3 {
+                    s[i] = (base_s[i] + delta).max(0.05);
+                }
+            }
+        }
+        let stored = self
+            .editor
+            .rig
+            .as_ref()
+            .and_then(|r| r.clip_keyframes(clip).get(key).map(|kf| kf.xforms[bone].s));
+        if stored == Some(s) {
+            return;
+        }
+        self.editor.rig_commit_pending();
+        if self
+            .editor
+            .rig
+            .as_mut()
+            .is_some_and(|r| r.set_keyframe_scale(clip, key, bone, s))
         {
             self.editor.rig_dirty = true;
         }
@@ -2379,12 +2745,16 @@ impl App {
         }
         if self.editor.rig.is_some() && self.editor.rig_mode != RigMode::Sculpt {
             // Skeleton: left-drag repositions the active bone. Animate:
-            // left-drag rotates the active bone into the selected keyframe.
-            // Both first select the bone nearest the cursor (a click far from
-            // any bone keeps the current selection), so the bone list isn't the
-            // only way to choose what to edit.
-            if let Some(i) = self.pick_bone_screen() {
-                self.select_bone(i);
+            // left-drag drives the active gizmo. Both first select the bone
+            // nearest the cursor (a click far from any bone keeps the current
+            // selection), so the bone list isn't the only way to choose what to
+            // edit — UNLESS the cursor is on a gizmo axis handle of the active
+            // bone, which takes priority (so a handle overlapping another bone's
+            // sprite is still grabbable, not a bone switch).
+            if !self.cursor_on_active_gizmo_axis() {
+                if let Some(i) = self.pick_bone_screen() {
+                    self.select_bone(i);
+                }
             }
             if self.editor.rig_mode == RigMode::Skeleton {
                 self.begin_bone_drag();
@@ -2393,6 +2763,7 @@ impl App {
                 match self.editor.gizmo_mode {
                     GizmoMode::Rotate => self.begin_rotate_drag(),
                     GizmoMode::Translate => self.begin_translate_drag(),
+                    GizmoMode::Scale => self.begin_scale_drag(),
                 }
             }
             return;
@@ -2549,6 +2920,10 @@ impl App {
         if self.translate_drag.take().is_some() {
             self.editor.rig_pending = None; // drop an uncommitted select-only grab
             return; // bone translated
+        }
+        if self.scale_drag.take().is_some() {
+            self.editor.rig_pending = None;
+            return; // bone scaled
         }
         if self.ref_drag.take().is_some() {
             return; // reference repositioned
@@ -4168,14 +4543,17 @@ impl App {
                     self.paste_clipboard();
                 }
             }
-            // Animate gizmo mode: R/G switch what a viewport drag transforms
-            // (rotate / grab-translate). Animate-only so they don't clobber
-            // tool hotkeys elsewhere. (Scale joins here in a later slice.)
+            // Animate gizmo mode: R/G/S switch what a viewport drag transforms
+            // (rotate / grab-translate / scale). Animate-only so they don't
+            // clobber tool hotkeys (e.g. S=zoom-out) elsewhere.
             KeyCode::KeyR if pressed && self.in_animate() => {
                 self.editor.gizmo_mode = GizmoMode::Rotate;
             }
             KeyCode::KeyG if pressed && self.in_animate() => {
                 self.editor.gizmo_mode = GizmoMode::Translate;
+            }
+            KeyCode::KeyS if pressed && !ctrl && self.in_animate() => {
+                self.editor.gizmo_mode = GizmoMode::Scale;
             }
             // Ctrl+S overwrites the project file (S without Ctrl zooms out).
             KeyCode::KeyS if ctrl && pressed => self.save_project(),
@@ -4390,6 +4768,9 @@ impl ApplicationHandler for App {
                 }
                 if self.translate_drag.is_some() {
                     self.update_translate_drag();
+                }
+                if self.scale_drag.is_some() {
+                    self.update_scale_drag();
                 }
                 if self.ref_drag.is_some() {
                     self.update_ref_drag();
