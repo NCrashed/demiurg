@@ -433,14 +433,16 @@ impl Rig {
     /// poseable keys.
     #[must_use]
     pub fn clip_keyframes(&self, clip: usize) -> Vec<Keyframe> {
-        self.read_clip(clip).map(|(kfs, _)| kfs).unwrap_or_default()
+        self.read_clip(clip)
+            .map(|(kfs, _, _)| kfs)
+            .unwrap_or_default()
     }
 
     /// The clip's loop length in ms: the timestamp of the trailing loop marker
     /// (== the playback duration). `0` if `clip` is out of range / not skeletal.
     #[must_use]
     pub fn clip_loop_tim(&self, clip: usize) -> i32 {
-        self.read_clip(clip).map_or(0, |(_, lt)| lt)
+        self.read_clip(clip).map_or(0, |(_, lt, _)| lt)
     }
 
     /// Insert a key at `tim` (clamped `>= 0`) with `angles` as the pose
@@ -449,7 +451,7 @@ impl Rig {
     /// already at exactly `tim` is overwritten in place. `None` if `clip` is
     /// out of range / not skeletal.
     pub fn add_keyframe(&mut self, clip: usize, tim: i32, mut angles: Vec<i16>) -> Option<usize> {
-        let (mut kfs, loop_tim) = self.read_clip(clip)?;
+        let (mut kfs, loop_tim, loops) = self.read_clip(clip)?;
         let tim = tim.max(0);
         angles.resize(self.bones.len(), 0);
         self.clamp_pose(&mut angles);
@@ -460,7 +462,7 @@ impl Rig {
         }
         kfs.sort_by_key(|k| k.tim);
         let idx = kfs.iter().position(|k| k.tim == tim)?;
-        self.write_clip(clip, kfs, loop_tim);
+        self.write_clip(clip, kfs, loop_tim, loops);
         Some(idx)
     }
 
@@ -468,7 +470,7 @@ impl Rig {
     /// [`Self::add_keyframe`]). Returns `false` if the clip / key is out of
     /// range.
     pub fn set_keyframe_pose(&mut self, clip: usize, k: usize, mut angles: Vec<i16>) -> bool {
-        let Some((mut kfs, loop_tim)) = self.read_clip(clip) else {
+        let Some((mut kfs, loop_tim, loops)) = self.read_clip(clip) else {
             return false;
         };
         if k >= kfs.len() {
@@ -477,14 +479,14 @@ impl Rig {
         angles.resize(self.bones.len(), 0);
         self.clamp_pose(&mut angles);
         kfs[k].angles = angles;
-        self.write_clip(clip, kfs, loop_tim);
+        self.write_clip(clip, kfs, loop_tim, loops);
         true
     }
 
     /// Set one bone's angle in key `k` (clamped to the bone's `vmin..=vmax`).
     /// Returns `false` if the clip / key / bone is out of range.
     pub fn set_keyframe_angle(&mut self, clip: usize, k: usize, bone: usize, v: i16) -> bool {
-        let Some((mut kfs, loop_tim)) = self.read_clip(clip) else {
+        let Some((mut kfs, loop_tim, loops)) = self.read_clip(clip) else {
             return false;
         };
         let Some(kf) = kfs.get_mut(k) else {
@@ -494,7 +496,7 @@ impl Rig {
             return false;
         };
         *slot = clamp_angle(v, self.bones.get(bone));
-        self.write_clip(clip, kfs, loop_tim);
+        self.write_clip(clip, kfs, loop_tim, loops);
         true
     }
 
@@ -502,7 +504,7 @@ impl Rig {
     /// new index. No-op (`None`) if the clip / key is out of range or another
     /// key already sits at `new_tim`.
     pub fn move_keyframe(&mut self, clip: usize, k: usize, new_tim: i32) -> Option<usize> {
-        let (mut kfs, loop_tim) = self.read_clip(clip)?;
+        let (mut kfs, loop_tim, loops) = self.read_clip(clip)?;
         if k >= kfs.len() {
             return None;
         }
@@ -517,21 +519,54 @@ impl Rig {
         kfs[k].tim = new_tim;
         kfs.sort_by_key(|kf| kf.tim);
         let idx = kfs.iter().position(|kf| kf.tim == new_tim)?;
-        self.write_clip(clip, kfs, loop_tim);
+        self.write_clip(clip, kfs, loop_tim, loops);
         Some(idx)
     }
 
     /// Delete key `k`. Refuses (`false`) to remove the last remaining key (an
     /// empty clip would have nothing to loop to) or an out-of-range index.
     pub fn remove_keyframe(&mut self, clip: usize, k: usize) -> bool {
-        let Some((mut kfs, loop_tim)) = self.read_clip(clip) else {
+        let Some((mut kfs, loop_tim, loops)) = self.read_clip(clip) else {
             return false;
         };
         if k >= kfs.len() || kfs.len() <= 1 {
             return false;
         }
         kfs.remove(k);
-        self.write_clip(clip, kfs, loop_tim);
+        self.write_clip(clip, kfs, loop_tim, loops);
+        true
+    }
+
+    /// Whether `clip` loops (the trailing marker returns to the start) versus
+    /// playing once and holding the last frame. `false` if out of range / not
+    /// skeletal.
+    #[must_use]
+    pub fn clip_loops(&self, clip: usize) -> bool {
+        self.read_clip(clip).is_some_and(|(_, _, loops)| loops)
+    }
+
+    /// Set `clip`'s length (the trailing marker's time / playback duration) to
+    /// `ms`, keeping the keyframes and loop mode. `ms` is clamped strictly
+    /// after the last key (a marker at/before it would leave no final segment).
+    /// `false` if the clip is out of range / not skeletal.
+    pub fn set_clip_length(&mut self, clip: usize, ms: i32) -> bool {
+        let Some((kfs, _, loops)) = self.read_clip(clip) else {
+            return false;
+        };
+        // write_clip enforces `loop_tim > last key` itself; pass the request as
+        // the desired marker time and let it clamp.
+        self.write_clip(clip, kfs, ms, loops);
+        true
+    }
+
+    /// Set whether `clip` loops back to the start (`true`) or plays once and
+    /// holds its last frame (`false`), keeping keyframes and length. `false`
+    /// if the clip is out of range / not skeletal.
+    pub fn set_clip_loops(&mut self, clip: usize, loops: bool) -> bool {
+        let Some((kfs, loop_tim, _)) = self.read_clip(clip) else {
+            return false;
+        };
+        self.write_clip(clip, kfs, loop_tim, loops);
         true
     }
 
@@ -542,9 +577,12 @@ impl Rig {
         }
     }
 
-    /// Read a skeletal clip as `(sorted keyframes, loop_tim)`. The loop marker
-    /// (`frm < 0`) is dropped; only real frames (`frm >= 0`) become keys.
-    fn read_clip(&self, clip: usize) -> Option<(Vec<Keyframe>, i32)> {
+    /// Read a skeletal clip as `(sorted keyframes, loop_tim, loops)`. The loop
+    /// marker (`frm < 0`) is dropped from the key list; only real frames
+    /// (`frm >= 0`) become keys. `loops` is whether the trailing marker loops
+    /// back to the start (`frm == !0`) versus a self-jump (`frm == !own_index`)
+    /// that plays once and holds the last frame — see [`Self::write_clip`].
+    fn read_clip(&self, clip: usize) -> Option<(Vec<Keyframe>, i32, bool)> {
         let ClipData::Skeletal { frmval, seq } = &self.clips.get(clip)?.data else {
             return None;
         };
@@ -561,16 +599,28 @@ impl Rig {
             .collect();
         kfs.sort_by_key(|k| k.tim);
         let loop_tim = seq.iter().map(|s| s.tim).max().unwrap_or(0);
-        Some((kfs, loop_tim))
+        // The trailing marker (the negative-`frm` entry at the latest time)
+        // loops iff it jumps back to entry 0 (`frm == !0 == -1`); any other
+        // self-jump marker holds the last frame.
+        let loops = seq
+            .iter()
+            .filter(|s| s.frm < 0)
+            .max_by_key(|s| s.tim)
+            .is_none_or(|s| s.frm == !0);
+        Some((kfs, loop_tim, loops))
     }
 
     /// Re-bake `clip`'s `seq`/`frmval` from a keyframe list: `frmval` rows in
-    /// `tim` order, a 1:1 `seq` (`frm == row index`), and a trailing loop
-    /// marker (`frm == !0`) at `loop_tim`. The marker is kept strictly after
-    /// the last key (extended by [`DEFAULT_TAIL_MS`] when a key would meet or
-    /// pass it) so there's always a return-to-start segment.
+    /// `tim` order, a 1:1 `seq` (`frm == row index`), and a trailing marker at
+    /// `loop_tim`. The marker is kept strictly after the last key (extended by
+    /// [`DEFAULT_TAIL_MS`] when a key would meet or pass it) so there's always
+    /// a final segment. `loops` chooses the marker: `frm == !0` loops back to
+    /// the start (a return-to-start segment); otherwise a self-jump
+    /// (`frm == !own_index`) plays the clip once and holds the last frame (the
+    /// engine breaks Phase-1 advance on a self-jump and skips the Phase-2 blend
+    /// — see `KfaSprite::animsprite`).
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)] // key counts are tiny
-    fn write_clip(&mut self, clip: usize, mut kfs: Vec<Keyframe>, prev_loop: i32) {
+    fn write_clip(&mut self, clip: usize, mut kfs: Vec<Keyframe>, prev_loop: i32, loops: bool) {
         kfs.sort_by_key(|k| k.tim);
         let max_tim = kfs.iter().map(|k| k.tim).max().unwrap_or(0);
         let loop_tim = if prev_loop > max_tim {
@@ -587,9 +637,10 @@ impl Rig {
                 frm: i as i32,
             })
             .collect();
+        let marker_idx = seq.len() as i32; // the marker's own index in `seq`
         seq.push(Seq {
             tim: loop_tim,
-            frm: !0, // loop back to entry 0
+            frm: if loops { !0 } else { !marker_idx },
         });
         if let Some(c) = self.clips.get_mut(clip) {
             c.data = ClipData::Skeletal { frmval, seq };
@@ -1132,6 +1183,48 @@ mod tests {
         // Round-trips (frmval columns match bones.len()).
         let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("new clip is consistent");
         assert_eq!(back.clips.len(), 2);
+    }
+
+    #[test]
+    fn set_clip_loops_toggles_the_trailing_marker() {
+        let mut rig = anim_rig(2); // demo clip loops by default
+        assert!(rig.clip_loops(0));
+        // Turning the loop off swaps the marker to a self-jump; keys + length
+        // are preserved.
+        let before = rig.clip_keyframes(0);
+        let len = rig.clip_loop_tim(0);
+        assert!(rig.set_clip_loops(0, false));
+        assert!(!rig.clip_loops(0));
+        assert_eq!(rig.clip_keyframes(0), before);
+        assert_eq!(rig.clip_loop_tim(0), len);
+        // The trailing seq marker is now a self-jump (`!own_index`), not `!0`.
+        if let ClipData::Skeletal { seq, .. } = &rig.clips[0].data {
+            let last = seq.last().unwrap();
+            let last_idx = i32::try_from(seq.len() - 1).unwrap();
+            assert_eq!(last.frm, !last_idx);
+        } else {
+            panic!("skeletal");
+        }
+        // And back on.
+        assert!(rig.set_clip_loops(0, true));
+        assert!(rig.clip_loops(0));
+        // Survives a round-trip.
+        let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("consistent");
+        assert!(back.clip_loops(0));
+    }
+
+    #[test]
+    fn set_clip_length_moves_the_marker_and_clamps_past_the_last_key() {
+        let mut rig = anim_rig(2); // keys at 0 and 1000
+        assert!(rig.set_clip_length(0, 3000));
+        assert_eq!(rig.clip_loop_tim(0), 3000);
+        assert_eq!(rig.clip_keyframes(0).len(), 2, "keys untouched");
+        // A length at/before the last key is clamped strictly past it.
+        assert!(rig.set_clip_length(0, 500));
+        assert!(
+            rig.clip_loop_tim(0) > 1000,
+            "marker stays after the last key"
+        );
     }
 
     #[test]

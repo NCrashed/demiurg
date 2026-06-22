@@ -114,6 +114,10 @@ pub struct UiActions {
     pub move_key: Option<(usize, i32)>,
     /// Animate timeline: set key `.0`'s bone `.1` angle to `.2` (angle editor).
     pub set_key_angle: Option<(usize, usize, i16)>,
+    /// Animate timeline: set the active clip's length (loop-marker ms).
+    pub set_clip_length: Option<i32>,
+    /// Animate timeline: toggle whether the active clip loops.
+    pub set_clip_loops: Option<bool>,
     pub undo: bool,
     pub redo: bool,
     pub delete_sel: bool,
@@ -737,6 +741,30 @@ fn timeline_bar(
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.monospace(format!("{} / {duration} ms", timeline.time));
+            ui.separator();
+            // Per-clip playback: loop on/off + the clip length (the loop-marker
+            // time). Length drags coalesce into one undo step via the inline
+            // begin/commit-pending pair; the loop toggle is one discrete edit.
+            let mut loops = rig.clip_loops(active);
+            if ui.checkbox(&mut loops, t(Msg::Loop)).changed() {
+                actions.set_clip_loops = Some(loops);
+            }
+            let mut len = duration;
+            let last_key = key_times.iter().copied().max().unwrap_or(0);
+            let resp = ui.add(
+                egui::DragValue::new(&mut len)
+                    .suffix(" ms")
+                    .speed(10.0)
+                    .range((last_key + 1)..=600_000),
+            );
+            ui.label(t(Msg::Length));
+            if resp.drag_started() || resp.gained_focus() {
+                actions.rig_edit_begin = true;
+            }
+            if resp.changed() {
+                actions.set_clip_length = Some(len);
+                actions.rig_edit_changed = true;
+            }
         });
     });
 

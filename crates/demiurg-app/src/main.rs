@@ -2572,8 +2572,17 @@ impl App {
         if let Some((k, bone, v)) = a.set_key_angle {
             self.set_key_angle(k, bone, v);
         }
+        // Clip length: a drag, so it rides the begin/commit-pending pair like
+        // move_key (one undo step per drag) — dispatch after the commit above.
+        if let Some(ms) = a.set_clip_length {
+            self.set_clip_length(ms);
+        }
         if let Some(axis) = a.set_bone_axis {
             self.set_bone_axis(axis);
+        }
+        // Loop toggle: a discrete click — its own one-step checkpoint.
+        if let Some(on) = a.set_clip_loops {
+            self.set_clip_loops(on);
         }
     }
 
@@ -3139,6 +3148,38 @@ impl App {
             .as_mut()
             .is_some_and(|r| r.set_keyframe_angle(clip, k, bone, v));
         if changed {
+            self.editor.rig_dirty = true;
+        }
+    }
+
+    /// Set the active clip's length (loop-marker ms) — a length-field drag.
+    /// Undo is the active begin/commit-pending step; this only mutates +
+    /// re-bakes (the clip's `seq` changed, so the preview / duration refresh).
+    fn set_clip_length(&mut self, ms: i32) {
+        let clip = self.editor.active_clip;
+        let changed = self
+            .editor
+            .rig
+            .as_mut()
+            .is_some_and(|r| r.set_clip_length(clip, ms));
+        if changed {
+            self.editor.rig_dirty = true;
+        }
+    }
+
+    /// Toggle whether the active clip loops (one undo step on success).
+    fn set_clip_loops(&mut self, on: bool) {
+        let clip = self.editor.active_clip;
+        let snap = self.editor.rig_state();
+        let changed = self
+            .editor
+            .rig
+            .as_mut()
+            .is_some_and(|r| r.set_clip_loops(clip, on));
+        if changed {
+            if let Some(snap) = snap {
+                self.editor.rig_push_undo(snap);
+            }
             self.editor.rig_dirty = true;
         }
     }

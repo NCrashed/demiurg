@@ -167,6 +167,9 @@ pub enum Msg {
     PoseHint,
     PoseNeedKey,
     PoseUnposeable,
+    // Animate timeline: per-clip playback
+    Loop,
+    Length,
     // Window title + quit confirmation
     Untitled,
     ConfirmQuitTitle,
@@ -182,7 +185,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 103] = [
+    pub const ALL: [Msg; 105] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -277,6 +280,8 @@ impl Msg {
         Msg::PoseHint,
         Msg::PoseNeedKey,
         Msg::PoseUnposeable,
+        Msg::Loop,
+        Msg::Length,
         Msg::Untitled,
         Msg::ConfirmQuitTitle,
         Msg::ConfirmQuitBody,
@@ -397,6 +402,8 @@ const fn en(msg: Msg) -> &'static str {
         Msg::PoseHint => "click a bone, then left-drag to rotate it into the key",
         Msg::PoseNeedKey => "select a keyframe to pose",
         Msg::PoseUnposeable => "this bone can't be posed (root or locked)",
+        Msg::Loop => "loop",
+        Msg::Length => "length",
         Msg::Untitled => "untitled",
         Msg::ConfirmQuitTitle => "Unsaved changes",
         Msg::ConfirmQuitBody => "Quit without saving?",
@@ -508,6 +515,8 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::PoseHint => "кликните кость, затем тяните ЛКМ, чтобы повернуть её в кадре",
         Msg::PoseNeedKey => "выберите кадр для позирования",
         Msg::PoseUnposeable => "эту кость нельзя позировать (корень или заблокирована)",
+        Msg::Loop => "цикл",
+        Msg::Length => "длина",
         Msg::Untitled => "без названия",
         Msg::ConfirmQuitTitle => "Несохранённые изменения",
         Msg::ConfirmQuitBody => "Выйти без сохранения?",
