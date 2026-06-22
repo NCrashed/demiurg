@@ -116,6 +116,8 @@ pub enum Msg {
     NewRig,
     ConvertToRig,
     Open,
+    OpenRecent,
+    ClearRecent,
     OpenReference,
     Save,
     SaveAs,
@@ -189,7 +191,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 109] = [
+    pub const ALL: [Msg; 111] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -235,6 +237,8 @@ impl Msg {
         Msg::NewRig,
         Msg::ConvertToRig,
         Msg::Open,
+        Msg::OpenRecent,
+        Msg::ClearRecent,
         Msg::OpenReference,
         Msg::Save,
         Msg::SaveAs,
@@ -359,6 +363,8 @@ const fn en(msg: Msg) -> &'static str {
         Msg::NewRig => "New rig",
         Msg::ConvertToRig => "Convert to rig",
         Msg::Open => "Open…",
+        Msg::OpenRecent => "Open recent",
+        Msg::ClearRecent => "Clear recent",
         Msg::OpenReference => "Open reference image…",
         Msg::Save => "Save",
         Msg::SaveAs => "Save As…",
@@ -476,6 +482,8 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::NewRig => "Новый риг",
         Msg::ConvertToRig => "Преобразовать в риг",
         Msg::Open => "Открыть…",
+        Msg::OpenRecent => "Открыть недавние",
+        Msg::ClearRecent => "Очистить недавние",
         Msg::OpenReference => "Открыть опорное изображение…",
         Msg::Save => "Сохранить",
         Msg::SaveAs => "Сохранить как…",

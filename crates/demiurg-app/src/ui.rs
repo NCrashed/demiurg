@@ -13,6 +13,8 @@ use roxlap_render::egui;
 
 use demiurg_core::Quat;
 
+use std::path::PathBuf;
+
 use crate::reference::RefAxis;
 use crate::{Editor, GizmoMode, RigMode, Tool};
 
@@ -56,6 +58,10 @@ pub struct UiActions {
     /// Open any supported document (`.demiurg` / `.rkc` / `.kv6` / `.vox`) — a
     /// single file dialog; the loader detects the format from the extension.
     pub open: bool,
+    /// Reopen this recently used document (File ▸ Open recent).
+    pub open_recent: Option<PathBuf>,
+    /// Forget the recent-files list (File ▸ Open recent ▸ Clear recent).
+    pub clear_recent: bool,
     /// Open a reference image (file dialog).
     pub open_reference: bool,
     /// Remove the current reference image.
@@ -181,6 +187,7 @@ pub fn build(
     modals: Modals,
     marquee: Option<[(f64, f64); 2]>,
     timeline: Timeline,
+    recent: &[PathBuf],
 ) {
     let lang = editor.lang;
     let t = |m: Msg| tr(lang, m);
@@ -209,6 +216,31 @@ pub fn build(
                     actions.open = true;
                     ui.close();
                 }
+                // Open recent: one entry per remembered document (newest first),
+                // shown by file name with the full path on hover. Only present
+                // when there's history.
+                ui.add_enabled_ui(!recent.is_empty(), |ui| {
+                    ui.menu_button(t(Msg::OpenRecent), |ui| {
+                        for path in recent {
+                            let label = path
+                                .file_name()
+                                .map_or_else(|| path.to_string_lossy(), |n| n.to_string_lossy());
+                            if ui
+                                .button(label)
+                                .on_hover_text(path.to_string_lossy())
+                                .clicked()
+                            {
+                                actions.open_recent = Some(path.clone());
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        if ui.button(t(Msg::ClearRecent)).clicked() {
+                            actions.clear_recent = true;
+                            ui.close();
+                        }
+                    });
+                });
                 if ui.button(t(Msg::OpenReference)).clicked() {
                     actions.open_reference = true;
                     ui.close();

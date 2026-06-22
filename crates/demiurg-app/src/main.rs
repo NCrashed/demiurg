@@ -29,6 +29,7 @@
 //! `ROXLAP_GPU=1`) opts into the faster GPU backend, whose device creation
 //! can hang on some Windows GPUs/drivers.
 
+mod recent;
 mod reference;
 mod ui;
 
@@ -168,19 +169,28 @@ fn run_dialog(kind: DialogKind, dir: Option<PathBuf>, name: Option<&str>) -> Opt
         // One "Open" for every document format — the loader dispatches on the
         // extension. A combined filter (shown first) lists them all; the
         // per-format filters let the user narrow if they want.
-        DialogKind::Open => rfd::FileDialog::new()
-            .add_filter("voxel files", &["demiurg", "rkc", "kv6", "vox"])
-            .add_filter("demiurg project", &["demiurg"])
-            .add_filter("rigged character", &["rkc"])
-            .add_filter("kv6 model", &["kv6"])
-            .add_filter("MagicaVoxel", &["vox"])
-            .pick_file(),
-        DialogKind::OpenReference => rfd::FileDialog::new()
-            .add_filter(
+        DialogKind::Open => {
+            let mut dialog = rfd::FileDialog::new()
+                .add_filter("voxel files", &["demiurg", "rkc", "kv6", "vox"])
+                .add_filter("demiurg project", &["demiurg"])
+                .add_filter("rigged character", &["rkc"])
+                .add_filter("kv6 model", &["kv6"])
+                .add_filter("MagicaVoxel", &["vox"]);
+            if let Some(dir) = dir {
+                dialog = dialog.set_directory(dir);
+            }
+            dialog.pick_file()
+        }
+        DialogKind::OpenReference => {
+            let mut dialog = rfd::FileDialog::new().add_filter(
                 "image",
                 &["png", "jpg", "jpeg", "bmp", "gif", "tga", "webp"],
-            )
-            .pick_file(),
+            );
+            if let Some(dir) = dir {
+                dialog = dialog.set_directory(dir);
+            }
+            dialog.pick_file()
+        }
         DialogKind::Save(format) => {
             let (filter, ext, default) = format.dialog_spec();
             let mut dialog = rfd::FileDialog::new()
@@ -736,6 +746,10 @@ struct Editor {
     /// The rig's skeleton changed (a hinge edit): the posed preview must be
     /// rebuilt from `rig`.
     rig_dirty: bool,
+    /// The rig has unsaved edits (skeleton / animation). Separate from the
+    /// document's modified flag (which tracks voxel-mesh edits); set on every
+    /// rig edit, cleared when the rig is saved.
+    rig_modified: bool,
     /// The viewport scene needs a rebuild from the model.
     dirty: bool,
     /// Whole-rig undo / redo snapshots (rig mode only). Each entry is the
@@ -825,6 +839,7 @@ impl Editor {
             selected_key: None,
             key_clipboard: None,
             rig_dirty: false,
+            rig_modified: false,
             dirty: false,
             rig_undo: Vec::new(),
             rig_redo: Vec::new(),
@@ -858,6 +873,10 @@ impl Editor {
         if self.rig_undo.len() > RIG_UNDO_DEPTH {
             self.rig_undo.remove(0);
         }
+        // Every rig edit funnels through here (structural ops, bone/pose drags,
+        // keyframe + clip edits all commit via this), so it's the one place to
+        // flag the rig as unsaved.
+        self.rig_modified = true;
     }
 
     /// Record the pre-edit rig state for undo. Call *before* a mutation that is
@@ -1201,6 +1220,7 @@ fn main() {
         last_drag: None,
         doc_name,
         project_path,
+        recent: recent::load(),
         pending_save: None,
         pending_dialog: None,
         autosave_path: autosave,
@@ -1333,6 +1353,9 @@ struct App {
     /// Path of the open `.demiurg` project, if any — `Ctrl+S` overwrites it
     /// without a dialog.
     project_path: Option<PathBuf>,
+    /// Recently opened documents (most recent first), for the File ▸ Open recent
+    /// menu and the file dialog's "last folder" default. Persisted via [`recent`].
+    recent: Vec<PathBuf>,
     /// A background save in progress, else `None`.
     pending_save: Option<PendingSave>,
     /// A native file dialog running off the event loop, else `None`.
@@ -3113,19 +3136,21 @@ impl App {
             .retain(|c| c[0] < dx && c[1] < dy && c[2] < dz);
     }
 
+    /// Whether there's unsaved work: voxel-mesh edits (the document) or rig /
+    /// animation edits (the rig).
+    fn unsaved(&self) -> bool {
+        self.editor.document.is_modified() || self.editor.rig_modified
+    }
+
     /// Refresh the window title: `demiurg — <name>`, with a trailing `*`
-    /// while the document has unsaved changes. Only calls `set_title`
+    /// while there are unsaved changes. Only calls `set_title`
     /// when the text actually changes.
     fn update_title(&mut self) {
         let name = self
             .doc_name
             .clone()
             .unwrap_or_else(|| tr(self.editor.lang, Msg::Untitled).to_string());
-        let star = if self.editor.document.is_modified() {
-            " *"
-        } else {
-            ""
-        };
+        let star = if self.unsaved() { " *" } else { "" };
         let title = format!("demiurg — {name}{star}");
         if self.last_title.as_deref() != Some(title.as_str()) {
             if let Some(window) = &self.window {
@@ -3140,7 +3165,7 @@ impl App {
     /// is settled first, so it counts as unsaved work.
     fn request_exit(&mut self, event_loop: &ActiveEventLoop) {
         self.commit_float();
-        if self.editor.document.is_modified() {
+        if self.unsaved() {
             self.confirm_quit = true;
         } else {
             self.do_exit(event_loop);
@@ -3224,10 +3249,11 @@ impl App {
         let timeline = ui::Timeline {
             time: self.kfa.as_ref().map_or(0, KfaView::time),
         };
+        let recent = &self.recent;
         let editor = &mut self.editor;
         let mut actions = UiActions::default();
         let out = ctx.run_ui(raw, |ui| {
-            ui::build(ui, editor, &mut actions, modals, marquee, timeline);
+            ui::build(ui, editor, &mut actions, modals, marquee, timeline, recent);
         });
         self.egui_state
             .as_mut()
@@ -3273,6 +3299,16 @@ impl App {
         }
         if a.open {
             self.open_dialog(DialogKind::Open);
+        }
+        if let Some(path) = &a.open_recent {
+            // A recent file may have been moved / deleted since; open_and_record
+            // reports the failure and leaves it in the list (it sorts down as
+            // newer opens push past it).
+            self.open_and_record(path.clone());
+        }
+        if a.clear_recent {
+            self.recent.clear();
+            recent::clear();
         }
         if a.open_reference {
             self.open_dialog(DialogKind::OpenReference);
@@ -3453,13 +3489,15 @@ impl App {
         if self.busy() {
             return; // one dialog / user save at a time
         }
-        // Default a project Save-As to the open file's folder + name.
+        // Default a project Save-As to the open file's folder + name; every
+        // other dialog (Open, reference, a Save with no known path) starts in
+        // the last folder the user opened or saved into.
         let (dir, name) = match (kind, &self.project_path) {
             (DialogKind::Save(SaveFormat::Project), Some(p)) => (
                 p.parent().map(Path::to_path_buf),
                 p.file_name().map(|n| n.to_string_lossy().into_owned()),
             ),
-            _ => (None, None),
+            _ => (recent::last_dir(&self.recent), None),
         };
         let (tx, rx) = std::sync::mpsc::channel();
         #[cfg(not(target_os = "macos"))]
@@ -3488,7 +3526,7 @@ impl App {
             return; // cancelled
         };
         match kind {
-            DialogKind::Open => self.open_path(path),
+            DialogKind::Open => self.open_and_record(path),
             DialogKind::OpenReference => self.load_reference(&path),
             DialogKind::Save(format) => self.start_save(path, format, true),
         }
@@ -3497,8 +3535,10 @@ impl App {
     /// Open any supported document, dispatching on the file extension: a
     /// `.demiurg` project, a `.rkc` rigged character, a `.kv6` model, or a
     /// `.vox` import. An unknown extension is reported. (The reference image is
-    /// a separate "open" — it's a tracing overlay, not a document.)
-    fn open_path(&mut self, path: PathBuf) {
+    /// a separate "open" — it's a tracing overlay, not a document.) Returns
+    /// whether the document loaded, so the caller records it as a recent file
+    /// only on success.
+    fn open_path(&mut self, path: PathBuf) -> bool {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -3512,36 +3552,71 @@ impl App {
                     self.load_model(m);
                     self.doc_name = stem_of(&path);
                     self.project_path = Some(path);
+                    true
                 }
                 Ok(Ok(project::Loaded::Rig(rig))) => {
                     self.enter_rig(rig);
                     self.doc_name = stem_of(&path);
                     self.project_path = Some(path);
+                    true
                 }
-                Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
-                Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
+                Ok(Err(e)) => {
+                    eprintln!("demiurg: {}: {e}", path.display());
+                    false
+                }
+                Err(e) => {
+                    eprintln!("demiurg: read {}: {e}", path.display());
+                    false
+                }
             },
             "rkc" => self.load_character(&path),
             "kv6" => match std::fs::read(&path).map(|b| VoxelModel::from_kv6_bytes(&b)) {
                 Ok(Ok(m)) => {
                     self.load_model(m); // a .kv6 has no project path
                     self.doc_name = stem_of(&path);
+                    true
                 }
-                Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
-                Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
+                Ok(Err(e)) => {
+                    eprintln!("demiurg: {}: {e}", path.display());
+                    false
+                }
+                Err(e) => {
+                    eprintln!("demiurg: read {}: {e}", path.display());
+                    false
+                }
             },
             "vox" => match std::fs::read(&path).map(|b| VoxelModel::from_vox_bytes(&b)) {
                 Ok(Ok(m)) => {
                     self.load_model(m); // imported .vox has no project path
                     self.doc_name = stem_of(&path);
+                    true
                 }
-                Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
-                Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
+                Ok(Err(e)) => {
+                    eprintln!("demiurg: {}: {e}", path.display());
+                    false
+                }
+                Err(e) => {
+                    eprintln!("demiurg: read {}: {e}", path.display());
+                    false
+                }
             },
-            other => eprintln!(
-                "demiurg: {}: unsupported format {other:?} (open .demiurg / .rkc / .kv6 / .vox)",
-                path.display()
-            ),
+            other => {
+                eprintln!(
+                    "demiurg: {}: unsupported format {other:?} (open .demiurg / .rkc / .kv6 / .vox)",
+                    path.display()
+                );
+                false
+            }
+        }
+    }
+
+    /// Open `path` and, on success, record it at the top of the recent list
+    /// (which also updates the file dialog's "last folder"). The single entry
+    /// point for user-initiated opens (dialog, recent menu, drag-and-drop).
+    fn open_and_record(&mut self, path: PathBuf) {
+        let recorded = path.clone(); // open_path consumes `path`; keep a copy to record
+        if self.open_path(path) {
+            self.recent = recent::push(&self.recent, &recorded);
         }
     }
 
@@ -3613,6 +3688,13 @@ impl App {
         match (result, done.user) {
             (Ok(()), true) => {
                 eprintln!("demiurg: saved {}", done.path.display());
+                // Both the project (`.demiurg`) and the `.rkc` export persist
+                // the rig, so either clears the rig's unsaved flag — and both are
+                // reopenable documents, so they join the recent list.
+                if matches!(done.format, SaveFormat::Project | SaveFormat::Rkc) {
+                    self.editor.rig_modified = false;
+                    self.recent = recent::push(&self.recent, &done.path);
+                }
                 if done.format == SaveFormat::Project {
                     self.editor.document.mark_saved();
                     self.doc_name = stem_of(&done.path);
@@ -3669,19 +3751,29 @@ impl App {
 
     /// Read a `.rkc` rigged-character file and open it for editing (rig
     /// mode), starting on the first bone.
-    fn load_character(&mut self, path: &Path) {
+    /// Returns whether the character loaded (so the caller can record it as a
+    /// recent file only on success).
+    fn load_character(&mut self, path: &Path) -> bool {
         match std::fs::read(path) {
             Ok(bytes) => match Rig::from_rkc_bytes(&bytes) {
                 Ok(rig) if rig.bones.is_empty() => {
                     eprintln!("demiurg: {}: character has no bones", path.display());
+                    false
                 }
                 Ok(rig) => {
                     self.enter_rig(rig);
                     self.doc_name = stem_of(path);
+                    true
                 }
-                Err(e) => eprintln!("demiurg: {}: {e}", path.display()),
+                Err(e) => {
+                    eprintln!("demiurg: {}: {e}", path.display());
+                    false
+                }
             },
-            Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
+            Err(e) => {
+                eprintln!("demiurg: read {}: {e}", path.display());
+                false
+            }
         }
     }
 
@@ -3696,7 +3788,7 @@ impl App {
             self.load_reference(path);
             return;
         }
-        self.open_path(path.to_path_buf());
+        self.open_and_record(path.to_path_buf());
     }
 
     /// Replace the document model, rebuild the sprite, refresh the
@@ -3750,6 +3842,7 @@ impl App {
         self.editor.rig_undo.clear();
         self.editor.rig_redo.clear();
         self.editor.rig_pending = None;
+        self.editor.rig_modified = false; // freshly loaded / created
         self.kfa = None;
         self.load_active_bone(true);
     }
@@ -3907,6 +4000,28 @@ impl App {
             kfa.set_time(tim);
             self.editor.anim_playing = false;
             self.editor.rig_dirty = true; // re-pose the preview at the key
+        }
+    }
+
+    /// Jump the playhead to the keyframe before / after the current time in the
+    /// active clip and select it (the bottom-bar `|◀` / `▶|` buttons do the same
+    /// seek). No-op if there's no keyframe in that direction. Animate mode only.
+    fn step_key(&mut self, forward: bool) {
+        if !self.in_animate() {
+            return;
+        }
+        let now = self.kfa.as_ref().map_or(0, KfaView::time);
+        let clip = self.editor.active_clip;
+        let target = self.editor.rig.as_ref().and_then(|r| {
+            let keys = r.clip_keyframes(clip);
+            if forward {
+                keys.iter().position(|k| k.tim > now)
+            } else {
+                keys.iter().rposition(|k| k.tim < now)
+            }
+        });
+        if let Some(idx) = target {
+            self.set_selected_key(Some(idx));
         }
     }
 
@@ -4504,12 +4619,38 @@ impl App {
         self.editor.rig.is_some() && self.editor.rig_mode == RigMode::Animate
     }
 
+    /// Handle a key that's only meaningful while animating: R/G/S switch the
+    /// gizmo mode (rotate / grab-translate / scale), Space toggles play/pause,
+    /// and `,` / `.` step the playhead to the previous / next keyframe. Returns
+    /// whether the key was consumed; `on_key` falls through to the global
+    /// bindings otherwise (notably Ctrl+S = save, so the scale gizmo skips it).
+    fn on_animate_key(&mut self, code: KeyCode, ctrl: bool) -> bool {
+        if !self.in_animate() {
+            return false;
+        }
+        match code {
+            KeyCode::KeyR => self.editor.gizmo_mode = GizmoMode::Rotate,
+            KeyCode::KeyG => self.editor.gizmo_mode = GizmoMode::Translate,
+            KeyCode::KeyS if !ctrl => self.editor.gizmo_mode = GizmoMode::Scale,
+            KeyCode::Space => self.editor.anim_playing = !self.editor.anim_playing,
+            KeyCode::Comma => self.step_key(false),
+            KeyCode::Period => self.step_key(true),
+            _ => return false,
+        }
+        true
+    }
+
     /// Dispatch a key press/release (camera holds, tool hotkeys, undo).
     fn on_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, pressed: bool) {
         let ctrl = self.modifiers.control_key();
         let shift = self.modifiers.shift_key();
         if self.busy() {
             return; // keys are blocked behind the saving / dialog modal
+        }
+        // Animate-only keys (gizmo mode + playback transport) get first crack,
+        // so they don't clobber the global tool/camera hotkeys (e.g. S=zoom-out).
+        if pressed && self.on_animate_key(code, ctrl) {
+            return;
         }
         match code {
             KeyCode::Digit1 if pressed => self.editor.tool = Tool::Place,
@@ -4542,18 +4683,6 @@ impl App {
                 } else {
                     self.paste_clipboard();
                 }
-            }
-            // Animate gizmo mode: R/G/S switch what a viewport drag transforms
-            // (rotate / grab-translate / scale). Animate-only so they don't
-            // clobber tool hotkeys (e.g. S=zoom-out) elsewhere.
-            KeyCode::KeyR if pressed && self.in_animate() => {
-                self.editor.gizmo_mode = GizmoMode::Rotate;
-            }
-            KeyCode::KeyG if pressed && self.in_animate() => {
-                self.editor.gizmo_mode = GizmoMode::Translate;
-            }
-            KeyCode::KeyS if pressed && !ctrl && self.in_animate() => {
-                self.editor.gizmo_mode = GizmoMode::Scale;
             }
             // Ctrl+S overwrites the project file (S without Ctrl zooms out).
             KeyCode::KeyS if ctrl && pressed => self.save_project(),
