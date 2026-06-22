@@ -359,6 +359,21 @@ fn ray_plane(o: [f64; 3], d: [f64; 3], point: [f64; 3], n: [f64; 3]) -> Option<[
     (t > 0.0).then(|| [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t])
 }
 
+fn point_dist_2d(p: [f64; 2], a: [f64; 2]) -> f64 {
+    ((p[0] - a[0]).powi(2) + (p[1] - a[1]).powi(2)).sqrt()
+}
+
+/// Distance from point `p` to the segment `[a, b]` in 2D (screen pixels).
+fn point_seg_dist_2d(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let len2 = ab[0] * ab[0] + ab[1] * ab[1];
+    if len2 < 1e-9 {
+        return point_dist_2d(p, a); // degenerate (zero-length) segment
+    }
+    let t = (((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / len2).clamp(0.0, 1.0);
+    point_dist_2d(p, [a[0] + ab[0] * t, a[1] + ab[1] * t])
+}
+
 fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
@@ -1260,7 +1275,7 @@ impl App {
             }
         }
         if let Some(kfa) = &self.kfa {
-            lines.extend(kfa.bone_lines());
+            lines.extend(kfa.bone_lines(Some(self.editor.active_bone)));
         }
         lines
     }
@@ -1297,6 +1312,54 @@ impl App {
             [r.origin.x, r.origin.y, r.origin.z],
             [r.dir.x, r.dir.y, r.dir.z],
         ))
+    }
+
+    /// The bone whose gizmo segment is nearest the cursor on screen, within a
+    /// pixel threshold — for click-to-select in the Animate viewport. Projects
+    /// each bone's solved pivot (and its parent's, for the segment) to engine
+    /// screen space via the renderer's `project_point` — the same projection
+    /// the gizmo lines are drawn with, and the inverse of `view_ray` that
+    /// `ray_cursor` is calibrated against — then compares in pixels. `None`
+    /// when the click is far from every bone (the selection then stays put) or
+    /// nothing projects (before the first frame / behind the camera).
+    fn pick_bone_screen(&self) -> Option<usize> {
+        const MAX_PX: f64 = 32.0;
+        let cam = self.camera.to_roxlap();
+        let renderer = self.renderer.as_ref()?;
+        let kfa = self.kfa.as_ref()?;
+        let rig = self.editor.rig.as_ref()?;
+        let (cx, cy) = self.ray_cursor();
+        let cursor = [cx, cy];
+        let proj = |w: [f32; 3]| {
+            renderer
+                .project_point(&cam, w)
+                .map(|(x, y)| [f64::from(x), f64::from(y)])
+        };
+        let mut best: Option<(usize, f64)> = None;
+        for (i, bone) in rig.bones.iter().enumerate() {
+            let Some((p, _)) = kfa.limb_pose(i) else {
+                continue;
+            };
+            let Some(a) = proj(p) else {
+                continue;
+            };
+            // Measure to the bone's gizmo segment (pivot → parent pivot); a
+            // root (or an unprojectable parent) falls back to its pivot point.
+            let dist = if bone.hinge.parent >= 0 {
+                #[allow(clippy::cast_sign_loss)] // parent >= 0 checked
+                let parent = bone.hinge.parent as usize;
+                match kfa.limb_pose(parent).and_then(|(pp, _)| proj(pp)) {
+                    Some(b) => point_seg_dist_2d(cursor, a, b),
+                    None => point_dist_2d(cursor, a),
+                }
+            } else {
+                point_dist_2d(cursor, a)
+            };
+            if best.is_none_or(|(_, bd)| dist < bd) {
+                best = Some((i, dist));
+            }
+        }
+        best.filter(|&(_, d)| d <= MAX_PX).map(|(i, _)| i)
     }
 
     /// The cursor ray for the **KFA sprite** scene (posed rig / bones), as
@@ -1692,7 +1755,7 @@ impl App {
             return;
         };
         // Roots aren't keyframed; a zero range (vmin == vmax) is locked.
-        if b.hinge.parent < 0 || b.hinge.vmin >= b.hinge.vmax {
+        if !rig.is_poseable(bone) {
             return;
         }
         // The hinge axis is fixed in the parent's frame; map it to world by the
@@ -1812,6 +1875,13 @@ impl App {
             if self.editor.rig_mode == RigMode::Skeleton {
                 self.begin_bone_drag();
             } else {
+                // Animate: a click near a bone first selects it, then starts
+                // posing it — so the bone list isn't the only way to choose
+                // what to rotate. A click far from every bone keeps the current
+                // selection (and just poses it, if poseable).
+                if let Some(i) = self.pick_bone_screen() {
+                    self.select_bone(i);
+                }
                 self.begin_pose_drag();
             }
             return;
@@ -3682,6 +3752,16 @@ mod tests {
             plane_drag_delta([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 2, -3.0, [0.0; 3]),
             None
         );
+    }
+
+    #[test]
+    fn point_seg_dist_2d_measures_to_the_nearest_point_on_the_segment() {
+        // Perpendicular distance to the segment's interior.
+        assert!((point_seg_dist_2d([5.0, 3.0], [0.0, 0.0], [10.0, 0.0]) - 3.0).abs() < 1e-9);
+        // Past an endpoint: clamps to the endpoint distance, not the line.
+        assert!((point_seg_dist_2d([13.0, 4.0], [0.0, 0.0], [10.0, 0.0]) - 5.0).abs() < 1e-9);
+        // A zero-length segment is just point-to-point.
+        assert!((point_seg_dist_2d([3.0, 4.0], [0.0, 0.0], [0.0, 0.0]) - 5.0).abs() < 1e-9);
     }
 
     #[test]

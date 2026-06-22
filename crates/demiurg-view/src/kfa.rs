@@ -17,6 +17,9 @@ use crate::{Line3, OrbitCamera};
 
 /// Colour of the skeleton gizmo (always-on-top yellow, like the hover box).
 const BONE_COLOR: u32 = 0xffff_e600;
+/// Colour of the active (selected) bone in the gizmo — bright cyan, thicker,
+/// so the bone being posed stands out from the yellow skeleton.
+const ACTIVE_BONE_COLOR: u32 = 0xff00_e5ff;
 
 /// A previewable KFA rig: the editable source [`Rig`] plus the live
 /// [`KfaSprite`]s built from it.
@@ -140,10 +143,12 @@ impl KfaView {
 
     /// Skeleton gizmo: a segment from each non-root bone's pivot to its
     /// parent's pivot (reads the already-solved limb transforms). Drawn
-    /// always-on-top so the skeleton stays visible through the meshes.
+    /// always-on-top so the skeleton stays visible through the meshes. The
+    /// bone at `active` (if any) is drawn highlighted (cyan + thicker) so the
+    /// selection / posing target is visible in the viewport.
     #[must_use]
     #[allow(clippy::cast_sign_loss)] // parent >= 0 is checked before the cast
-    pub fn bone_lines(&self) -> Vec<Line3> {
+    pub fn bone_lines(&self, active: Option<usize>) -> Vec<Line3> {
         let mut lines = Vec::new();
         for k in &self.kfas {
             for (i, bone) in self.rig.bones.iter().enumerate() {
@@ -153,11 +158,12 @@ impl KfaView {
                 }
                 let a = k.limbs[i].p;
                 let b = k.limbs[parent as usize].p;
+                let hot = active == Some(i);
                 lines.push(Line3 {
                     a: [f64::from(a[0]), f64::from(a[1]), f64::from(a[2])],
                     b: [f64::from(b[0]), f64::from(b[1]), f64::from(b[2])],
-                    color: BONE_COLOR,
-                    width_px: 2.0,
+                    color: if hot { ACTIVE_BONE_COLOR } else { BONE_COLOR },
+                    width_px: if hot { 3.5 } else { 2.0 },
                     depth_test: false,
                 });
             }

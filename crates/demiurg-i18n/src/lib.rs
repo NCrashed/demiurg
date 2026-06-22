@@ -163,6 +163,10 @@ pub enum Msg {
     HelpApply,
     HelpOrbit,
     HelpSelect,
+    // Animate-mode posing hints (bottom of the clip panel)
+    PoseHint,
+    PoseNeedKey,
+    PoseUnposeable,
     // Window title + quit confirmation
     Untitled,
     ConfirmQuitTitle,
@@ -178,7 +182,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 100] = [
+    pub const ALL: [Msg; 103] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -270,6 +274,9 @@ impl Msg {
         Msg::HelpApply,
         Msg::HelpOrbit,
         Msg::HelpSelect,
+        Msg::PoseHint,
+        Msg::PoseNeedKey,
+        Msg::PoseUnposeable,
         Msg::Untitled,
         Msg::ConfirmQuitTitle,
         Msg::ConfirmQuitBody,
@@ -387,6 +394,9 @@ const fn en(msg: Msg) -> &'static str {
         Msg::HelpSelect => {
             "drag selected: move · drag empty: marquee · Shift/Alt +/- · Ctrl+click pick"
         }
+        Msg::PoseHint => "click a bone, then left-drag to rotate it into the key",
+        Msg::PoseNeedKey => "select a keyframe to pose",
+        Msg::PoseUnposeable => "this bone can't be posed (root or locked)",
         Msg::Untitled => "untitled",
         Msg::ConfirmQuitTitle => "Unsaved changes",
         Msg::ConfirmQuitBody => "Quit without saving?",
@@ -495,6 +505,9 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::HelpSelect => {
             "тянуть выделенный: двигать · тянуть пустоту: рамка · Shift/Alt +/- · Ctrl+клик пипетка"
         }
+        Msg::PoseHint => "кликните кость, затем тяните ЛКМ, чтобы повернуть её в кадре",
+        Msg::PoseNeedKey => "выберите кадр для позирования",
+        Msg::PoseUnposeable => "эту кость нельзя позировать (корень или заблокирована)",
         Msg::Untitled => "без названия",
         Msg::ConfirmQuitTitle => "Несохранённые изменения",
         Msg::ConfirmQuitBody => "Выйти без сохранения?",

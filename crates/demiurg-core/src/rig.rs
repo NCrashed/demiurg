@@ -417,6 +417,17 @@ impl Rig {
     // clip: `frmval` rows line up 1:1 with keyframes in `tim` order, and the
     // single trailing `seq` entry always loops back to entry 0.
 
+    /// Whether bone `bone` can be posed (keyframed): a child (`parent >= 0` —
+    /// roots take their orientation from the sprite basis, never a keyframe)
+    /// with a non-empty hinge range (`vmin < vmax` — a `vmin == vmax` hinge is
+    /// locked). The viewport posing gesture and its angle editor share this rule.
+    #[must_use]
+    pub fn is_poseable(&self, bone: usize) -> bool {
+        self.bones
+            .get(bone)
+            .is_some_and(|b| b.hinge.parent >= 0 && b.hinge.vmin < b.hinge.vmax)
+    }
+
     /// The clip's keyframes in time order (empty if `clip` is out of range or
     /// not a skeletal clip). The loop marker is excluded — these are the real,
     /// poseable keys.

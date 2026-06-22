@@ -642,6 +642,25 @@ fn clips_panel(
             }
         });
     });
+    // Contextual posing hint: what (if anything) blocks a viewport rotate-drag
+    // right now — no key selected, an un-poseable bone (root / locked), or the
+    // ready state. Mirrors the begin_pose_drag guards so the viewport gesture
+    // is discoverable instead of a silent no-op.
+    if !rig.clips.is_empty() {
+        ui.separator();
+        let clip = editor.active_clip.min(rig.clips.len() - 1);
+        let has_key = editor
+            .selected_key
+            .is_some_and(|k| k < rig.clip_keyframes(clip).len());
+        let hint = if !has_key {
+            Msg::PoseNeedKey
+        } else if rig.is_poseable(editor.active_bone) {
+            Msg::PoseHint
+        } else {
+            Msg::PoseUnposeable
+        };
+        ui.small(t(hint));
+    }
 }
 
 /// The Animation timeline bar (Rig ▸ Animate), drawn full-width along the
