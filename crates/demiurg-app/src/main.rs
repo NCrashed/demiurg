@@ -1765,9 +1765,15 @@ impl App {
             return;
         };
         let r = [cur[0] - pivot[0], cur[1] - pivot[1], cur[2] - pivot[2]];
-        let Some(delta) = hinge_sweep(axis, ref0, r) else {
+        let Some(sweep) = hinge_sweep(axis, ref0, r) else {
             return; // cursor on the pivot — the angle is noise
         };
+        // roxlap's sprite render / stored rig frame is left-handed (the same
+        // chirality issue as bone_pointer_ray, Gotcha #2): a right-handed world
+        // sweep turns the bone the wrong way on screen, so negate it. This is a
+        // FIXED flip (view-independent) — the rig's parent basis carries the
+        // handedness, not the camera.
+        let delta = -sweep;
         let new = (f64::from(base) + delta).round();
         let new = new.clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
         // Skip frames that don't change the stored value, so a stationary press
