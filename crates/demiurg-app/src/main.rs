@@ -200,7 +200,7 @@ fn autosave_path() -> PathBuf {
 
 /// Load the autosave file as a model, or `None` if it's missing/corrupt.
 fn recover_autosave(path: &Path) -> Option<VoxelModel> {
-    project::from_bytes(&std::fs::read(path).ok()?).ok()
+    project::from_bytes_model(&std::fs::read(path).ok()?).ok()
 }
 
 /// The active editing tool.
@@ -1084,7 +1084,7 @@ fn load_any(path: &str) -> VoxelModel {
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("vox"));
     let model = if path.ends_with(".demiurg") {
-        project::from_bytes(&bytes).map_err(|e| e.to_string())
+        project::from_bytes_model(&bytes).map_err(|e| e.to_string())
     } else if is_vox {
         VoxelModel::from_vox_bytes(&bytes).map_err(|e| e.to_string())
     } else {
@@ -2711,10 +2711,17 @@ impl App {
             .to_ascii_lowercase();
         match ext.as_str() {
             "demiurg" => match std::fs::read(&path).map(|b| project::from_bytes(&b)) {
-                Ok(Ok(m)) => {
+                // A project holds either a bare model or a full rig; load
+                // whichever it is and remember the path so Ctrl+S overwrites it.
+                Ok(Ok(project::Loaded::Model(m))) => {
                     self.load_model(m);
                     self.doc_name = stem_of(&path);
-                    self.project_path = Some(path); // Ctrl+S overwrites it
+                    self.project_path = Some(path);
+                }
+                Ok(Ok(project::Loaded::Rig(rig))) => {
+                    self.enter_rig(rig);
+                    self.doc_name = stem_of(&path);
+                    self.project_path = Some(path);
                 }
                 Ok(Err(e)) => eprintln!("demiurg: {}: {e}", path.display()),
                 Err(e) => eprintln!("demiurg: read {}: {e}", path.display()),
@@ -2752,7 +2759,12 @@ impl App {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         let job_path = path.clone();
-        if format == SaveFormat::Rkc {
+        // A rigged document saves the whole rig: always for `.rkc`, and for a
+        // `.demiurg` project too (so the project keeps the rig, not just the
+        // active bone's mesh). Other formats are model-only.
+        let save_rig =
+            self.editor.rig.is_some() && matches!(format, SaveFormat::Rkc | SaveFormat::Project);
+        if save_rig {
             // Snapshot the rig (with the active bone's pending edits folded
             // in) and serialize off the event loop.
             self.commit_active_bone();
@@ -2760,7 +2772,11 @@ impl App {
                 return; // not in rig mode
             };
             std::thread::spawn(move || {
-                let _ = tx.send(std::fs::write(&job_path, rig.to_rkc_bytes()));
+                let bytes = match format {
+                    SaveFormat::Project => project::to_bytes_rig(&rig),
+                    _ => rig.to_rkc_bytes(),
+                };
+                let _ = tx.send(std::fs::write(&job_path, bytes));
             });
         } else {
             let model = self.editor.document.model().clone();
@@ -2878,47 +2894,14 @@ impl App {
     /// `.rkc` opens as the KFA rig; a `.kv6` / `.vox` / `.demiurg` opens as
     /// the model; anything else is ignored.
     fn on_dropped_file(&mut self, path: &Path) {
+        // A reference image is an overlay (not a document); everything else
+        // routes through the same loader as File ▸ Open… (dispatches on the
+        // extension, including a rigged `.demiurg` / `.rkc`).
         if reference::is_image(path) {
             self.load_reference(path);
             return;
         }
-        if path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("rkc"))
-        {
-            self.load_character(path);
-            return;
-        }
-        let read = || std::fs::read(path).map_err(|e| e.to_string());
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase);
-        let parsed = match ext.as_deref() {
-            Some("demiurg") => {
-                read().and_then(|b| project::from_bytes(&b).map_err(|e| e.to_string()))
-            }
-            Some("vox") => {
-                read().and_then(|b| VoxelModel::from_vox_bytes(&b).map_err(|e| e.to_string()))
-            }
-            Some("kv6") => {
-                read().and_then(|b| VoxelModel::from_kv6_bytes(&b).map_err(|e| e.to_string()))
-            }
-            _ => {
-                eprintln!("demiurg: ignored dropped file {}", path.display());
-                return;
-            }
-        };
-        match parsed {
-            Ok(m) => {
-                self.load_model(m);
-                self.doc_name = stem_of(path);
-                if ext.as_deref() == Some("demiurg") {
-                    self.project_path = Some(path.to_path_buf());
-                }
-            }
-            Err(e) => eprintln!("demiurg: {}: {e}", path.display()),
-        }
+        self.open_path(path.to_path_buf());
     }
 
     /// Replace the document model, rebuild the sprite, refresh the

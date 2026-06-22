@@ -362,6 +362,22 @@ mod tests {
     }
 
     #[test]
+    fn rig_round_trips_through_a_demiurg_project() {
+        // A rigged document saved as a `.demiurg` project keeps the whole rig —
+        // skeleton, meshes, and animation clips — not just a bare model.
+        let rig = demo_rig();
+        let bytes = demiurg_core::project::to_bytes_rig(&rig);
+        match demiurg_core::project::from_bytes(&bytes).expect("decodes") {
+            demiurg_core::project::Loaded::Rig(back) => {
+                assert_eq!(back.bones.len(), rig.bones.len(), "bones survive");
+                assert_eq!(back.clips.len(), rig.clips.len(), "clips survive");
+                assert_eq!(back.clip_keyframes(0).len(), rig.clip_keyframes(0).len());
+            }
+            demiurg_core::project::Loaded::Model(_) => panic!("expected a rig"),
+        }
+    }
+
+    #[test]
     fn pose_angles_read_the_resolved_pose_at_the_playhead() {
         let mut view = KfaView::from_rig(demo_rig(), Some(0));
         // Seek to t=500 (demo frame 1) and re-pose in place; the arm hinge

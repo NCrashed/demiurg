@@ -1,16 +1,42 @@
-//! The `.demiurg` project format: a **lossless** snapshot of a
-//! [`VoxelModel`] for work-in-progress saves.
+//! The `.demiurg` project format: a **lossless** work-in-progress snapshot of
+//! the editor's document — either a bare [`VoxelModel`] or a full rigged,
+//! animated [`Rig`].
 //!
-//! Unlike `.kv6` (surface-only, the engine export), a project keeps the
-//! full dense volume — including enclosed interior voxels — plus the
-//! pivot and palette, so an edit session round-trips exactly. The wire
-//! format is [`postcard`] (compact, no_std-friendly); the schema is the
-//! [`Project`] struct, versioned by its field layout.
+//! Unlike `.kv6` (surface-only, the engine export), a project keeps the full
+//! dense volume — including enclosed interior voxels — plus the pivot and
+//! palette, so an edit session round-trips exactly. A rigged document is stored
+//! as its `.rkc` bytes (the engine container, which carries the skeleton, every
+//! bone's mesh, and the animation clips) so the project never loses the rig —
+//! and stays lossless as `.rkc` gains richer animation. The wire format is
+//! [`postcard`] (compact, no_std-friendly); the schema is the [`Doc`] enum,
+//! versioned by its layout.
 
 use serde::{Deserialize, Serialize};
 
 use crate::VoxelModel;
+use crate::rig::Rig;
 use roxlap_formats::Rgb6;
+
+/// On-disk top-level document: a bare model, or a rigged character (its `.rkc`
+/// bytes). Postcard tags the variant, so the loader knows which it is.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum Doc {
+    // Boxed: a `Project` (dense voxel buffer + palette) dwarfs the rig's byte
+    // vec, and an unboxed large variant bloats every `Doc`.
+    Model(Box<Project>),
+    /// A rigged, animated character as serialized `.rkc` bytes.
+    Rig(Vec<u8>),
+}
+
+/// What a `.demiurg` file decoded to — a model or a rig.
+// A `VoxelModel` (inline 256-entry palette) dwarfs a `Rig`, but `Loaded` is a
+// one-shot return value the caller immediately unwraps — boxing would only add
+// indirection at every match site, not save any lasting memory.
+#[allow(clippy::large_enum_variant)]
+pub enum Loaded {
+    Model(VoxelModel),
+    Rig(Rig),
+}
 
 /// Serializable form of a [`VoxelModel`]. Palette entries are stored as
 /// raw `[r, g, b]` triplets (6-bit channels, as on disk) so the schema
@@ -68,7 +94,7 @@ impl Project {
     }
 }
 
-/// Serialize a model to `.demiurg` bytes.
+/// Serialize a bare model to `.demiurg` bytes.
 ///
 /// # Panics
 /// Never in practice: postcard serialization of plain data into a
@@ -76,18 +102,48 @@ impl Project {
 #[must_use]
 pub fn to_bytes(model: &VoxelModel) -> Vec<u8> {
     // Plain-data serialization into a growable Vec cannot fail.
-    postcard::to_allocvec(&Project::from_model(model)).expect("postcard serialize")
+    postcard::to_allocvec(&Doc::Model(Box::new(Project::from_model(model))))
+        .expect("postcard serialize")
 }
 
-/// Parse `.demiurg` bytes back into a model.
+/// Serialize a rigged character to `.demiurg` bytes (its `.rkc` encoding).
+///
+/// # Panics
+/// Never in practice: postcard serialization into a growable `Vec` has no
+/// failure path.
+#[must_use]
+pub fn to_bytes_rig(rig: &Rig) -> Vec<u8> {
+    postcard::to_allocvec(&Doc::Rig(rig.to_rkc_bytes())).expect("postcard serialize")
+}
+
+/// Parse `.demiurg` bytes into a model or a rig.
 ///
 /// # Errors
 /// [`LoadError::Decode`] if the bytes are not a valid project,
-/// [`LoadError::DimsMismatch`] if the voxel buffer length disagrees with
-/// the stored dimensions.
-pub fn from_bytes(bytes: &[u8]) -> Result<VoxelModel, LoadError> {
-    let project: Project = postcard::from_bytes(bytes).map_err(LoadError::Decode)?;
-    project.into_model().ok_or(LoadError::DimsMismatch)
+/// [`LoadError::DimsMismatch`] if a model's voxel buffer length disagrees with
+/// its stored dimensions, [`LoadError::Rig`] if an embedded rig fails to parse.
+pub fn from_bytes(bytes: &[u8]) -> Result<Loaded, LoadError> {
+    match postcard::from_bytes::<Doc>(bytes).map_err(LoadError::Decode)? {
+        Doc::Model(p) => (*p)
+            .into_model()
+            .map(Loaded::Model)
+            .ok_or(LoadError::DimsMismatch),
+        Doc::Rig(rkc) => Rig::from_rkc_bytes(&rkc)
+            .map(Loaded::Rig)
+            .map_err(LoadError::Rig),
+    }
+}
+
+/// Parse `.demiurg` bytes that are expected to be a bare model (legacy / CLI /
+/// autosave paths that don't handle rigs). A rig project is an error.
+///
+/// # Errors
+/// As [`from_bytes`], plus [`LoadError::ExpectedModel`] if the file holds a rig.
+pub fn from_bytes_model(bytes: &[u8]) -> Result<VoxelModel, LoadError> {
+    match from_bytes(bytes)? {
+        Loaded::Model(m) => Ok(m),
+        Loaded::Rig(_) => Err(LoadError::ExpectedModel),
+    }
 }
 
 /// Failure modes of [`from_bytes`].
@@ -95,6 +151,10 @@ pub fn from_bytes(bytes: &[u8]) -> Result<VoxelModel, LoadError> {
 pub enum LoadError {
     Decode(postcard::Error),
     DimsMismatch,
+    /// An embedded rig (`.rkc` bytes) failed to parse.
+    Rig(String),
+    /// A model was expected but the file holds a rig (see [`from_bytes_model`]).
+    ExpectedModel,
 }
 
 impl std::fmt::Display for LoadError {
@@ -102,6 +162,8 @@ impl std::fmt::Display for LoadError {
         match self {
             Self::Decode(e) => write!(f, "not a valid .demiurg project: {e}"),
             Self::DimsMismatch => write!(f, "project voxel buffer does not match its dimensions"),
+            Self::Rig(e) => write!(f, "project's embedded rig is invalid: {e}"),
+            Self::ExpectedModel => write!(f, "this .demiurg holds a rig, not a bare model"),
         }
     }
 }
@@ -131,7 +193,7 @@ mod tests {
         m.palette = Some(pal);
         assert_eq!(m.occupied_count(), 27);
 
-        let back = from_bytes(&to_bytes(&m)).expect("round-trips");
+        let back = from_bytes_model(&to_bytes(&m)).expect("round-trips");
         assert_eq!(back.occupied_count(), 27, "interior voxel survives");
         assert_eq!(back.get(1, 1, 1), 0x8080_8080);
         assert_eq!(back.dims(), (3, 3, 3));
@@ -141,13 +203,13 @@ mod tests {
 
     #[test]
     fn rejects_truncated_buffer() {
-        let project = Project {
+        let doc = Doc::Model(Box::new(Project {
             dims: [2, 2, 2],
             pivot: [1.0, 1.0, 1.0],
             palette: None,
             voxels: vec![0; 3], // should be 8
-        };
-        let bytes = postcard::to_allocvec(&project).unwrap();
+        }));
+        let bytes = postcard::to_allocvec(&doc).unwrap();
         assert!(matches!(from_bytes(&bytes), Err(LoadError::DimsMismatch)));
     }
 }
