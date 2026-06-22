@@ -1687,8 +1687,10 @@ impl App {
         let Some(anchor) = ray_plane(o, d, plane_point, normal) else {
             return;
         };
-        // The drag will move the bone — record the pre-drag rig for undo.
-        self.editor.rig_checkpoint();
+        // Capture the pre-drag rig lazily: committed as one undo step on the
+        // first actual move (update_bone_drag), so a click that only selects a
+        // bone adds no undo step.
+        self.editor.rig_begin_edit();
         self.bone_drag = Some(BoneDrag {
             bone,
             plane_point,
@@ -1732,6 +1734,23 @@ impl App {
             base[1] + local[1] as f32,
             base[2] + local[2] as f32,
         ];
+        // Skip frames that don't move the bone (e.g. a click, or the cursor
+        // back at the anchor) so they commit no undo step and write nothing.
+        let cur = self.editor.rig.as_ref().and_then(|rig| {
+            match rig.bones.get(bone).map(|b| b.hinge.parent) {
+                Some(p) if p < 0 => Some(rig.root),
+                Some(_) => rig.bones.get(bone).map(|b| {
+                    let p1 = b.hinge.p[1];
+                    [p1.x, p1.y, p1.z]
+                }),
+                None => None,
+            }
+        });
+        if cur == Some(new) {
+            return;
+        }
+        // First real motion: fold the pre-drag snapshot into one undo step.
+        self.editor.rig_commit_pending();
         if let Some(rig) = &mut self.editor.rig {
             match rig.bones.get(bone).map(|b| b.hinge.parent) {
                 Some(p) if p < 0 => rig.root = new,
@@ -1759,14 +1778,17 @@ impl App {
     /// axis is fixed in the parent's frame). `None` if the bone isn't poseable
     /// (root / locked), isn't solved, or the axis degenerates. Shared by the
     /// posing gesture and the axis gizmo.
-    #[allow(clippy::cast_sign_loss)] // parent >= 0 once is_poseable passed
+    #[allow(clippy::cast_sign_loss)] // parent >= 0 checked just below
     fn bone_pose_axis(&self, bone: usize) -> Option<([f64; 3], [f64; 3])> {
         let kfa = self.kfa.as_ref()?;
         let rig = self.editor.rig.as_ref()?;
-        if !rig.is_poseable(bone) {
+        let b = rig.bones.get(bone)?;
+        // Any non-root bone has a hinge axis to show; the *poseability* gate
+        // (vmin < vmax) is the caller's concern (begin_pose_drag checks it),
+        // so the gizmo can display a locked bone's axis too.
+        if b.hinge.parent < 0 {
             return None;
         }
-        let b = rig.bones.get(bone)?;
         let (pivot, _) = kfa.limb_pose(bone)?;
         // The hinge axis is fixed in the parent's frame; map it to world by the
         // parent's solved basis. A child of the (dummy) root uses the sprite
@@ -1797,14 +1819,14 @@ impl App {
         Some((piv, axis))
     }
 
-    /// Gizmo lines for the active bone's rotation axis (Animate mode): a line
-    /// through the pivot along the hinge axis plus a ring in the rotation
-    /// plane, so the user can see which axis a viewport pose rotates about
-    /// before grabbing. Empty unless Animate + the active bone is poseable.
-    /// Sized to the bone's mesh so the ring tracks the limb it rotates.
+    /// Gizmo lines for the active bone's rotation axis (Skeleton + Animate): a
+    /// line through the pivot along the hinge axis plus a ring in the rotation
+    /// plane, so the user can see which axis the bone rotates about. Empty in
+    /// Sculpt or for a root bone. Sized to the bone's mesh so the ring tracks
+    /// the limb.
     fn pose_gizmo_lines(&self) -> Vec<Line3> {
         let mut lines = Vec::new();
-        if self.editor.rig_mode != RigMode::Animate {
+        if self.editor.rig_mode == RigMode::Sculpt {
             return lines;
         }
         let bone = self.editor.active_bone;
@@ -1992,16 +2014,15 @@ impl App {
         if self.editor.rig.is_some() && self.editor.rig_mode != RigMode::Sculpt {
             // Skeleton: left-drag repositions the active bone. Animate:
             // left-drag rotates the active bone into the selected keyframe.
+            // Both first select the bone nearest the cursor (a click far from
+            // any bone keeps the current selection), so the bone list isn't the
+            // only way to choose what to edit.
+            if let Some(i) = self.pick_bone_screen() {
+                self.select_bone(i);
+            }
             if self.editor.rig_mode == RigMode::Skeleton {
                 self.begin_bone_drag();
             } else {
-                // Animate: a click near a bone first selects it, then starts
-                // posing it — so the bone list isn't the only way to choose
-                // what to rotate. A click far from every bone keeps the current
-                // selection (and just poses it, if poseable).
-                if let Some(i) = self.pick_bone_screen() {
-                    self.select_bone(i);
-                }
                 self.begin_pose_drag();
             }
             return;
@@ -2143,6 +2164,9 @@ impl App {
     /// stroke (one undo step).
     fn end_paint(&mut self) {
         if self.bone_drag.take().is_some() {
+            // A select-only click leaves an uncommitted pre-edit snapshot; drop
+            // it (a real drag already committed it on its first move).
+            self.editor.rig_pending = None;
             return; // bone repositioned
         }
         if self.pose_drag.take().is_some() {
