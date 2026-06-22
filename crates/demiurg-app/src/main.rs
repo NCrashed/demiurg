@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 use demiurg_core::{Document, KeyXform, Quat, Rig, VoxelModel, project};
 use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{
-    KfaView, Line3, ModelView, OrbitCamera, PickHit, RenderMode, ViewDir, pick_voxel,
+    AXIS_COLORS, KfaView, Line3, ModelView, OrbitCamera, PickHit, RenderMode, ViewDir, pick_voxel,
 };
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_core::sprite::SpriteLighting;
@@ -231,6 +231,15 @@ pub(crate) enum RigMode {
     Animate,
 }
 
+/// Which transform the Animate viewport gizmo edits on a left-drag. Switched
+/// with `R` / `G` (rotate / grab). `Rotate` is the default 1-DOF hinge sweep;
+/// `Translate` drags the selected key's translation. (Scale is a later slice.)
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GizmoMode {
+    Rotate,
+    Translate,
+}
+
 /// How a selection gesture combines with the existing selection: replace
 /// it, add to it (Shift), or remove from it (Alt).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -334,6 +343,26 @@ struct PoseDrag {
     ref0: [f64; 3],
     /// The key's angle at grab time; the swept angle is added to this.
     base: i16,
+}
+
+/// An in-progress viewport translate drag (Animate, Translate gizmo): drags the
+/// active bone along one of its local axes, writing the selected key's
+/// translation. Pivot, axis and the base translation are frozen at grab time.
+struct TranslateDrag {
+    bone: usize,
+    key: usize,
+    clip: usize,
+    /// World pivot (bone's solved joint) — the drag plane passes through it.
+    pivot: [f64; 3],
+    /// The constrained world axis (unit) and which translation component
+    /// (0=x,1=y,2=z) it drives.
+    axis: [f64; 3],
+    comp: usize,
+    /// Signed distance along `axis` where the grab ray met the drag plane.
+    anchor: f64,
+    /// The key's full translation at grab time; the swept distance is added to
+    /// component `comp`.
+    base_t: [f32; 3],
 }
 
 /// The in-bounds cells of a float layer as a selection set (for the
@@ -562,6 +591,8 @@ struct Editor {
     /// Which aspect of the rig is being edited (Sculpt / Skeleton /
     /// Animate). Meaningless when `rig` is `None`.
     rig_mode: RigMode,
+    /// Animate mode: which transform a viewport left-drag edits (R/G/S).
+    gizmo_mode: GizmoMode,
     /// Animate mode: whether the timeline is playing (advancing time each
     /// frame) or paused (holding the current pose). Default `true` to match
     /// the historic auto-play behaviour.
@@ -664,6 +695,7 @@ impl Editor {
             rig: None,
             active_bone: 0,
             rig_mode: RigMode::Sculpt,
+            gizmo_mode: GizmoMode::Rotate,
             anim_playing: true,
             active_clip: 0,
             selected_key: None,
@@ -1057,6 +1089,7 @@ fn main() {
         ref_drag: None,
         bone_drag: None,
         pose_drag: None,
+        translate_drag: None,
         last_tool: Tool::Place,
         force_cpu,
         force_gpu,
@@ -1198,6 +1231,8 @@ struct App {
     bone_drag: Option<BoneDrag>,
     /// An in-progress viewport pose (Animate mode), else `None`.
     pose_drag: Option<PoseDrag>,
+    /// An in-progress viewport translate drag (Animate, Translate gizmo).
+    translate_drag: Option<TranslateDrag>,
     /// The active tool last frame, to detect a tool switch (keyboard or
     /// UI) and settle a floating layer when the user leaves Select.
     last_tool: Tool,
@@ -1819,31 +1854,99 @@ impl App {
         Some((piv, axis))
     }
 
+    /// Bone `bone`'s solved world pivot and its three local axes as unit world
+    /// vectors `[x, y, z]` — the basis the translate / scale gizmos act along
+    /// (the bone's local frame; translation/scale are stored in it). `None` if
+    /// not solved or an axis is degenerate.
+    fn bone_world_axes(&self, bone: usize) -> Option<([f64; 3], [[f64; 3]; 3])> {
+        let (pivot, basis) = self.kfa.as_ref()?.limb_pose(bone)?;
+        let piv = [
+            f64::from(pivot[0]),
+            f64::from(pivot[1]),
+            f64::from(pivot[2]),
+        ];
+        let mut axes = [[0.0f64; 3]; 3];
+        for (i, b) in basis.iter().enumerate() {
+            let v = [f64::from(b[0]), f64::from(b[1]), f64::from(b[2])];
+            let len = dot3(v, v).sqrt();
+            if len < 1e-9 {
+                return None;
+            }
+            axes[i] = [v[0] / len, v[1] / len, v[2] / len];
+        }
+        Some((piv, axes))
+    }
+
+    /// The gizmo axis (0=x,1=y,2=z) whose on-screen arrow is nearest the cursor,
+    /// within a pixel threshold — for picking which axis a translate / scale
+    /// drag constrains to. `len` is the arrow length in world units.
+    fn pick_gizmo_axis(&self, pivot: [f64; 3], axes: [[f64; 3]; 3], len: f64) -> Option<usize> {
+        const MAX_PX: f64 = 18.0;
+        let cam = self.camera.to_roxlap();
+        let renderer = self.renderer.as_ref()?;
+        let (cx, cy) = self.ray_cursor();
+        let proj = |w: [f64; 3]| {
+            renderer
+                .project_point(&cam, [w[0] as f32, w[1] as f32, w[2] as f32])
+                .map(|(x, y)| [f64::from(x), f64::from(y)])
+        };
+        let o = proj(pivot)?;
+        let mut best: Option<(usize, f64)> = None;
+        for (i, ax) in axes.iter().enumerate() {
+            let tip = [
+                pivot[0] + ax[0] * len,
+                pivot[1] + ax[1] * len,
+                pivot[2] + ax[2] * len,
+            ];
+            let Some(tp) = proj(tip) else { continue };
+            let d = point_seg_dist_2d([cx, cy], o, tp);
+            if best.is_none_or(|(_, bd)| d < bd) {
+                best = Some((i, d));
+            }
+        }
+        best.filter(|&(_, d)| d <= MAX_PX).map(|(i, _)| i)
+    }
+
     /// Gizmo lines for the active bone's rotation axis (Skeleton + Animate): a
     /// line through the pivot along the hinge axis plus a ring in the rotation
     /// plane, so the user can see which axis the bone rotates about. Empty in
     /// Sculpt or for a root bone. Sized to the bone's mesh so the ring tracks
     /// the limb.
     fn pose_gizmo_lines(&self) -> Vec<Line3> {
-        let mut lines = Vec::new();
-        if self.editor.rig_mode == RigMode::Sculpt {
-            return lines;
+        match self.editor.rig_mode {
+            RigMode::Sculpt => Vec::new(),
+            // Skeleton always shows the hinge-axis gizmo; Animate picks the
+            // gizmo for the active transform mode.
+            RigMode::Skeleton => self.rotate_gizmo_lines(),
+            RigMode::Animate => match self.editor.gizmo_mode {
+                GizmoMode::Rotate => self.rotate_gizmo_lines(),
+                GizmoMode::Translate => self.translate_gizmo_lines(),
+            },
         }
-        let bone = self.editor.active_bone;
-        let Some((p, n)) = self.bone_pose_axis(bone) else {
-            return lines;
-        };
-        // Radius ~ the bone's mesh size, with a floor so a tiny / empty mesh
-        // still shows a visible gizmo.
-        let r = self
-            .editor
+    }
+
+    /// Gizmo radius / arrow length for `bone`: ~ its mesh size, floored so a
+    /// tiny / empty mesh still shows a visible gizmo.
+    fn gizmo_radius(&self, bone: usize) -> f64 {
+        self.editor
             .rig
             .as_ref()
             .and_then(|rig| rig.bones.get(bone))
             .map_or(8.0, |b| {
                 let (x, y, z) = b.model.dims();
                 f64::from(x.max(y).max(z)).max(4.0)
-            });
+            })
+    }
+
+    /// The rotation gizmo: a line through the pivot along the active bone's
+    /// hinge axis plus a ring in the rotation plane. Empty for a root bone.
+    fn rotate_gizmo_lines(&self) -> Vec<Line3> {
+        let mut lines = Vec::new();
+        let bone = self.editor.active_bone;
+        let Some((p, n)) = self.bone_pose_axis(bone) else {
+            return lines;
+        };
+        let r = self.gizmo_radius(bone);
         let (u, w) = plane_basis(n);
         // Axis line through the pivot (both directions), full diameter.
         lines.push(Line3 {
@@ -1877,6 +1980,159 @@ impl App {
             });
         }
         lines
+    }
+
+    /// The translate gizmo: three axis arrows from the active bone's pivot along
+    /// its local axes (X red, Y green, Z blue), the one being dragged drawn
+    /// thicker. Empty for a root bone.
+    fn translate_gizmo_lines(&self) -> Vec<Line3> {
+        let mut lines = Vec::new();
+        let bone = self.editor.active_bone;
+        let non_root = self
+            .editor
+            .rig
+            .as_ref()
+            .is_some_and(|r| r.bones.get(bone).is_some_and(|b| b.hinge.parent >= 0));
+        if !non_root {
+            return lines;
+        }
+        let Some((p, axes)) = self.bone_world_axes(bone) else {
+            return lines;
+        };
+        let r = self.gizmo_radius(bone);
+        let active = self.translate_drag.as_ref().map(|d| d.comp);
+        for (i, ax) in axes.iter().enumerate() {
+            let hot = active == Some(i);
+            lines.push(Line3 {
+                a: p,
+                b: [p[0] + ax[0] * r, p[1] + ax[1] * r, p[2] + ax[2] * r],
+                color: AXIS_COLORS[i],
+                width_px: if hot { 4.0 } else { 2.0 },
+                depth_test: false,
+            });
+        }
+        lines
+    }
+
+    /// Begin a viewport translate drag (Animate, Translate gizmo): pick the
+    /// gizmo axis under the cursor and drag the active bone's selected-key
+    /// translation along it. Bails unless Animate + a key is selected + the
+    /// bone is non-root + an axis was hit. Snaps the playhead to the key first.
+    fn begin_translate_drag(&mut self) {
+        if self.editor.rig_mode != RigMode::Animate {
+            return;
+        }
+        let Some(key) = self.editor.selected_key else {
+            return;
+        };
+        let clip = self.editor.active_clip;
+        let bone = self.editor.active_bone;
+        let non_root = self
+            .editor
+            .rig
+            .as_ref()
+            .is_some_and(|r| r.bones.get(bone).is_some_and(|b| b.hinge.parent >= 0));
+        if !non_root {
+            return;
+        }
+        // WYSIWYG: pose at the key before reading the gizmo axes / picking.
+        let key_tim = self
+            .editor
+            .rig
+            .as_ref()
+            .and_then(|r| r.clip_keyframes(clip).get(key).map(|kf| kf.tim));
+        if let (Some(tm), Some(kfa)) = (key_tim, self.kfa.as_mut()) {
+            kfa.set_time(tm);
+            kfa.advance(0);
+        }
+        let Some((o, d)) = self.bone_pointer_ray() else {
+            return;
+        };
+        let Some((pivot, axes)) = self.bone_world_axes(bone) else {
+            return;
+        };
+        let r = self.gizmo_radius(bone);
+        let Some(comp) = self.pick_gizmo_axis(pivot, axes, r) else {
+            return; // cursor not on an axis arrow
+        };
+        let axis = axes[comp];
+        let normal = self.camera.to_roxlap().forward;
+        let Some(cur) = ray_plane(o, d, pivot, normal) else {
+            return;
+        };
+        let anchor = dot3(
+            [cur[0] - pivot[0], cur[1] - pivot[1], cur[2] - pivot[2]],
+            axis,
+        );
+        let base_t = self
+            .editor
+            .rig
+            .as_ref()
+            .and_then(|r| r.clip_keyframes(clip).get(key).map(|kf| kf.xforms[bone].t))
+            .unwrap_or([0.0; 3]);
+        self.editor.anim_playing = false;
+        self.editor.rig_begin_edit();
+        self.translate_drag = Some(TranslateDrag {
+            bone,
+            key,
+            clip,
+            pivot,
+            axis,
+            comp,
+            anchor,
+            base_t,
+        });
+    }
+
+    /// Update a translate drag: project the cursor onto the drag plane, measure
+    /// the swept distance along the constrained axis, and write the key's
+    /// translation. Commits the pending undo snapshot on the first real change.
+    #[allow(clippy::cast_possible_truncation, clippy::float_cmp)] // world deltas small; exact skip-guard
+    fn update_translate_drag(&mut self) {
+        let Some(drag) = &self.translate_drag else {
+            return;
+        };
+        let (bone, key, clip, pivot, axis, comp, anchor, base_t) = (
+            drag.bone,
+            drag.key,
+            drag.clip,
+            drag.pivot,
+            drag.axis,
+            drag.comp,
+            drag.anchor,
+            drag.base_t,
+        );
+        let Some((o, d)) = self.bone_pointer_ray() else {
+            return;
+        };
+        let normal = self.camera.to_roxlap().forward;
+        let Some(cur) = ray_plane(o, d, pivot, normal) else {
+            return;
+        };
+        let along = dot3(
+            [cur[0] - pivot[0], cur[1] - pivot[1], cur[2] - pivot[2]],
+            axis,
+        );
+        let mut t = base_t;
+        t[comp] = base_t[comp] + (along - anchor) as f32;
+        // Skip frames that don't change the stored value (no undo, no write).
+        let stored = self
+            .editor
+            .rig
+            .as_ref()
+            .and_then(|r| r.clip_keyframes(clip).get(key).map(|kf| kf.xforms[bone].t));
+        if stored == Some(t) {
+            return;
+        }
+        self.editor.rig_commit_pending();
+        if self
+            .editor
+            .rig
+            .as_mut()
+            .is_some_and(|r| r.set_keyframe_translation(clip, key, bone, t))
+        {
+            self.editor.rig_dirty = true;
+        }
     }
 
     /// can't move). The pivot, world axis and base angle are captured once here.
@@ -2023,7 +2279,11 @@ impl App {
             if self.editor.rig_mode == RigMode::Skeleton {
                 self.begin_bone_drag();
             } else {
-                self.begin_pose_drag();
+                // Animate: the active gizmo mode chooses the transform.
+                match self.editor.gizmo_mode {
+                    GizmoMode::Rotate => self.begin_pose_drag(),
+                    GizmoMode::Translate => self.begin_translate_drag(),
+                }
             }
             return;
         }
@@ -2175,6 +2435,10 @@ impl App {
             // drag already committed it on its first change.)
             self.editor.rig_pending = None;
             return; // bone posed into the keyframe
+        }
+        if self.translate_drag.take().is_some() {
+            self.editor.rig_pending = None; // drop an uncommitted select-only grab
+            return; // bone translated
         }
         if self.ref_drag.take().is_some() {
             return; // reference repositioned
@@ -2641,6 +2905,9 @@ impl App {
         }
         if let Some((k, bone, r)) = a.set_key_rotation {
             self.set_key_rotation(k, bone, r);
+        }
+        if let Some(mode) = a.set_gizmo_mode {
+            self.editor.gizmo_mode = mode;
         }
         // Clip length: a drag, so it rides the begin/commit-pending pair like
         // move_key (one undo step per drag) — dispatch after the commit above.
@@ -3791,6 +4058,15 @@ impl App {
                     self.paste_clipboard();
                 }
             }
+            // Animate gizmo mode: R/G switch what a viewport drag transforms
+            // (rotate / grab-translate). Animate-only so they don't clobber
+            // tool hotkeys elsewhere. (Scale joins here in a later slice.)
+            KeyCode::KeyR if pressed && self.in_animate() => {
+                self.editor.gizmo_mode = GizmoMode::Rotate;
+            }
+            KeyCode::KeyG if pressed && self.in_animate() => {
+                self.editor.gizmo_mode = GizmoMode::Translate;
+            }
             // Ctrl+S overwrites the project file (S without Ctrl zooms out).
             KeyCode::KeyS if ctrl && pressed => self.save_project(),
             KeyCode::Delete | KeyCode::Backspace if pressed => self.delete_selection(),
@@ -4001,6 +4277,9 @@ impl ApplicationHandler for App {
                 }
                 if self.pose_drag.is_some() {
                     self.update_pose_drag();
+                }
+                if self.translate_drag.is_some() {
+                    self.update_translate_drag();
                 }
                 if self.ref_drag.is_some() {
                     self.update_ref_drag();

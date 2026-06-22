@@ -173,6 +173,7 @@ pub enum Msg {
     Translation,
     Rotation,
     Scale,
+    GizmoHint,
     // Window title + quit confirmation
     Untitled,
     ConfirmQuitTitle,
@@ -188,7 +189,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 108] = [
+    pub const ALL: [Msg; 109] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -288,6 +289,7 @@ impl Msg {
         Msg::Translation,
         Msg::Rotation,
         Msg::Scale,
+        Msg::GizmoHint,
         Msg::Untitled,
         Msg::ConfirmQuitTitle,
         Msg::ConfirmQuitBody,
@@ -413,6 +415,7 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Translation => "move",
         Msg::Rotation => "rotate",
         Msg::Scale => "scale",
+        Msg::GizmoHint => "gizmo:",
         Msg::Untitled => "untitled",
         Msg::ConfirmQuitTitle => "Unsaved changes",
         Msg::ConfirmQuitBody => "Quit without saving?",
@@ -529,6 +532,7 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Translation => "сдвиг",
         Msg::Rotation => "поворот",
         Msg::Scale => "масштаб",
+        Msg::GizmoHint => "гизмо:",
         Msg::Untitled => "без названия",
         Msg::ConfirmQuitTitle => "Несохранённые изменения",
         Msg::ConfirmQuitBody => "Выйти без сохранения?",

@@ -14,7 +14,7 @@ use roxlap_render::egui;
 use demiurg_core::Quat;
 
 use crate::reference::RefAxis;
-use crate::{Editor, RigMode, Tool};
+use crate::{Editor, GizmoMode, RigMode, Tool};
 
 /// Build stamp shown at the foot of the tool panel: the crate version and
 /// the git commit it was built from (stamped by `build.rs`).
@@ -129,6 +129,8 @@ pub struct UiActions {
     /// Animate: set key `.0`'s bone `.1` full rotation to `.2` (free 3-DOF,
     /// from the inspector's Euler fields).
     pub set_key_rotation: Option<(usize, usize, Quat)>,
+    /// Animate: switch the viewport gizmo mode (rotate / translate).
+    pub set_gizmo_mode: Option<GizmoMode>,
     /// Animate timeline: set the active clip's length (loop-marker ms).
     pub set_clip_length: Option<i32>,
     /// Animate timeline: toggle whether the active clip loops.
@@ -731,6 +733,23 @@ fn clips_panel(
             Msg::PoseUnposeable
         };
         ui.small(t(hint));
+        // Gizmo mode toggle — what a viewport drag transforms. Mirrors the
+        // R / G hotkeys (shown as tooltips).
+        ui.horizontal(|ui| {
+            ui.small(t(Msg::GizmoHint));
+            for (mode, label, key) in [
+                (GizmoMode::Rotate, Msg::Rotation, "R"),
+                (GizmoMode::Translate, Msg::Translation, "G"),
+            ] {
+                if ui
+                    .selectable_label(editor.gizmo_mode == mode, t(label))
+                    .on_hover_text(key)
+                    .clicked()
+                {
+                    actions.set_gizmo_mode = Some(mode);
+                }
+            }
+        });
     }
 }
 
