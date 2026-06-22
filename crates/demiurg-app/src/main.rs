@@ -1864,6 +1864,30 @@ impl App {
         };
         let clip = self.editor.active_clip;
         let bone = self.editor.active_bone;
+        // Bail early on an un-poseable bone (bone_pose_axis re-checks) so the
+        // playhead snap below doesn't fire on a click that won't pose anything.
+        if !self
+            .editor
+            .rig
+            .as_ref()
+            .is_some_and(|r| r.is_poseable(bone))
+        {
+            return;
+        }
+        // Snap the playhead to the key being edited and re-pose *now*, so the
+        // bone we grab — its pivot/axis below, and the live preview — reflects
+        // THIS key, not an interpolated in-between if the playhead had drifted
+        // (Play / scrub). The write targets the key regardless; this keeps the
+        // drag WYSIWYG. (`advance(0)` re-solves in place at the new time.)
+        let key_tim = self
+            .editor
+            .rig
+            .as_ref()
+            .and_then(|r| r.clip_keyframes(clip).get(key).map(|kf| kf.tim));
+        if let (Some(t), Some(kfa)) = (key_tim, self.kfa.as_mut()) {
+            kfa.set_time(t);
+            kfa.advance(0);
+        }
         let Some((o, d)) = self.bone_pointer_ray() else {
             return;
         };
@@ -3048,20 +3072,29 @@ impl App {
                 .is_some_and(|r| k < r.clip_keyframes(clip).len())
         });
         self.editor.selected_key = sel;
-        // Snap the playhead to the selected key's time and pause, so the
-        // viewport shows exactly the pose being edited (posing rotates against
-        // the shown pose; an interpolated in-between would be non-WYSIWYG).
+        // Snap the playhead to the selected key, so the viewport shows exactly
+        // the pose being edited (an interpolated in-between would be non-WYSIWYG).
         if let Some(k) = sel {
-            let tim = self
-                .editor
-                .rig
-                .as_ref()
-                .and_then(|r| r.clip_keyframes(clip).get(k).map(|kf| kf.tim));
-            if let (Some(tim), Some(kfa)) = (tim, self.kfa.as_mut()) {
-                kfa.set_time(tim);
-                self.editor.anim_playing = false;
-                self.editor.rig_dirty = true; // re-pose the preview at the key
-            }
+            self.seek_to_key(k);
+        }
+    }
+
+    /// Snap the playhead to key `k`'s time in the active clip and pause, then
+    /// re-pose the preview there (via `rig_dirty`). Keeps "what's shown" equal
+    /// to "what's edited" whenever an edit targets the selected key — the
+    /// playhead can otherwise have drifted off it (Play / scrub) while the
+    /// selection persisted. No-op if the clip / key is out of range.
+    fn seek_to_key(&mut self, k: usize) {
+        let clip = self.editor.active_clip;
+        let tim = self
+            .editor
+            .rig
+            .as_ref()
+            .and_then(|r| r.clip_keyframes(clip).get(k).map(|kf| kf.tim));
+        if let (Some(tim), Some(kfa)) = (tim, self.kfa.as_mut()) {
+            kfa.set_time(tim);
+            self.editor.anim_playing = false;
+            self.editor.rig_dirty = true; // re-pose the preview at the key
         }
     }
 
@@ -3148,6 +3181,10 @@ impl App {
             .as_mut()
             .is_some_and(|r| r.set_keyframe_angle(clip, k, bone, v));
         if changed {
+            // Show the key being edited (the slider also targets `k`, so snap
+            // the playhead there if it had drifted) — same WYSIWYG fix as the
+            // viewport drag.
+            self.seek_to_key(k);
             self.editor.rig_dirty = true;
         }
     }
