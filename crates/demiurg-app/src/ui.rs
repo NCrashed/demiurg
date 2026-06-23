@@ -1087,8 +1087,9 @@ fn reaches(parents: &[i32], start: i32, child: usize) -> bool {
 #[allow(
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
-    clippy::cast_possible_truncation
-)] // bone counts are tiny
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
+)] // bone counts + mesh dims are tiny
 fn skeleton_panel(
     ui: &mut egui::Ui,
     editor: &mut Editor,
@@ -1167,6 +1168,31 @@ fn skeleton_panel(
             }
         }
     });
+
+    // Mesh pivot (the kv6 pivot): the point of this bone's model that sits on
+    // the joint and which it rotates about. Editable here — with the skeleton
+    // visible — so a mesh can be aligned to its joint on a complex rig; "Move
+    // pivot" drags it in the viewport (mesh follows the cursor, joint fixed).
+    ui.label(t(Msg::Pivot));
+    ui.horizontal(|ui| {
+        for (axis, name) in [(0usize, "x"), (1, "y"), (2, "z")] {
+            ui.colored_label(axis_color(axis), name);
+            let r = ui.add(egui::DragValue::new(&mut bone.model.pivot[axis]).speed(0.5));
+            begin |= r.drag_started() || r.gained_focus();
+            changed |= r.changed();
+        }
+        if ui.button(t(Msg::CenterPivot)).clicked() {
+            let (dx, dy, dz) = bone.model.dims();
+            bone.model.pivot = [dx as f32 * 0.5, dy as f32 * 0.5, dz as f32 * 0.5];
+            begin = true;
+            changed = true;
+        }
+    });
+    // The viewport drag toggle lives on the editor (not the bone), so set it
+    // after the bone borrow above is done with.
+    ui.checkbox(&mut editor.pivot_move_mode, t(Msg::MovePivot))
+        .on_hover_text(t(Msg::MovePivot));
+
     if begin {
         actions.rig_edit_begin = true;
     }

@@ -337,6 +337,27 @@ struct BoneDrag {
     parent_basis: Option<[[f64; 3]; 3]>,
 }
 
+/// An in-progress drag of a bone's **mesh pivot** (Skeleton mode, "Move pivot"):
+/// slides the active bone's mesh relative to its (fixed) joint, in a
+/// screen-parallel plane through the joint. The world delta maps into the
+/// bone's own world basis and adjusts `model.pivot` (negated — raising the
+/// pivot shifts the drawn mesh the opposite way), so the mesh follows the
+/// cursor while the joint stays put.
+struct PivotDrag {
+    /// Bone whose mesh pivot is moving (index into `rig.bones`).
+    bone: usize,
+    /// Drag plane through the bone's joint: a point on it + its (unit) normal.
+    plane_point: [f64; 3],
+    plane_normal: [f64; 3],
+    /// World point where the grab ray met the plane.
+    anchor: [f64; 3],
+    /// `model.pivot` when the drag began (voxel units).
+    base_pivot: [f32; 3],
+    /// The bone's own world basis `[s, h, f]` at grab time, to map a world
+    /// delta into the mesh-local frame the pivot lives in.
+    basis: [[f64; 3]; 3],
+}
+
 /// An in-progress viewport translate drag (Animate, Translate gizmo): drags the
 /// active bone along one of its local axes, writing the selected key's
 /// translation. Pivot, axis and the base translation are frozen at grab time.
@@ -733,6 +754,11 @@ struct Editor {
     /// Which aspect of the rig is being edited (Sculpt / Skeleton /
     /// Animate). Meaningless when `rig` is `None`.
     rig_mode: RigMode,
+    /// Skeleton mode: when on, a left-drag slides the active bone's **mesh
+    /// pivot** (where its model attaches to / rotates about the joint) instead
+    /// of moving the joint. Lets a mesh be aligned to its joint on a complex
+    /// rig. Reset on a mode switch.
+    pivot_move_mode: bool,
     /// Animate mode: which transform a viewport left-drag edits (R/G/S).
     gizmo_mode: GizmoMode,
     /// Animate mode: whether the timeline is playing (advancing time each
@@ -841,6 +867,7 @@ impl Editor {
             rig: None,
             active_bone: 0,
             rig_mode: RigMode::Sculpt,
+            pivot_move_mode: false,
             gizmo_mode: GizmoMode::Rotate,
             anim_playing: true,
             active_clip: 0,
@@ -1259,6 +1286,7 @@ fn main() {
         drag: None,
         ref_drag: None,
         bone_drag: None,
+        pivot_drag: None,
         rotate_drag: None,
         translate_drag: None,
         scale_drag: None,
@@ -1404,6 +1432,7 @@ struct App {
     /// An in-progress drag of the reference layer (Move mode), else `None`.
     ref_drag: Option<RefDrag>,
     bone_drag: Option<BoneDrag>,
+    pivot_drag: Option<PivotDrag>,
     /// An in-progress viewport pose (Animate mode), else `None`.
     /// An in-progress viewport trackball rotate (Animate, Rotate gizmo).
     rotate_drag: Option<RotateDrag>,
@@ -1975,6 +2004,98 @@ impl App {
                 }
                 None => {}
             }
+        }
+        self.editor.rig_dirty = true;
+    }
+
+    /// Begin dragging the active bone's mesh pivot (Skeleton mode, "Move
+    /// pivot"): grab a screen-parallel plane through the bone's joint and
+    /// remember the mesh pivot and the bone's world basis, so the drag slides
+    /// the mesh relative to the (fixed) joint.
+    fn begin_pivot_drag(&mut self) {
+        let bone = self.editor.active_bone;
+        let Some((o, d)) = self.bone_pointer_ray() else {
+            return;
+        };
+        let normal = self.camera.to_roxlap().forward;
+        let Some(kfa) = &self.kfa else {
+            return;
+        };
+        let Some((joint, basis)) = kfa.limb_pose(bone) else {
+            return;
+        };
+        let base_pivot = match self.editor.rig.as_ref().and_then(|r| r.bones.get(bone)) {
+            Some(b) => b.model.pivot,
+            None => return,
+        };
+        let plane_point = [
+            f64::from(joint[0]),
+            f64::from(joint[1]),
+            f64::from(joint[2]),
+        ];
+        let Some(anchor) = ray_plane(o, d, plane_point, normal) else {
+            return;
+        };
+        let basis = basis.map(|a| [f64::from(a[0]), f64::from(a[1]), f64::from(a[2])]);
+        // Capture the pre-drag rig lazily — committed as one undo step on the
+        // first real move (so a select-only click adds nothing).
+        self.editor.rig_begin_edit();
+        self.pivot_drag = Some(PivotDrag {
+            bone,
+            plane_point,
+            plane_normal: normal,
+            anchor,
+            base_pivot,
+            basis,
+        });
+    }
+
+    /// Update a pivot drag: move the mesh to follow the cursor in its plane by
+    /// adjusting the bone's `model.pivot` (mapped into the bone's own basis,
+    /// negated so the drawn mesh tracks the cursor while the joint stays put).
+    #[allow(clippy::cast_possible_truncation)] // world deltas are small
+    fn update_pivot_drag(&mut self) {
+        let Some(drag) = &self.pivot_drag else {
+            return;
+        };
+        let (bone, plane_point, normal, anchor, base_pivot, basis) = (
+            drag.bone,
+            drag.plane_point,
+            drag.plane_normal,
+            drag.anchor,
+            drag.base_pivot,
+            drag.basis,
+        );
+        let Some((o, d)) = self.bone_pointer_ray() else {
+            return;
+        };
+        let Some(cur) = ray_plane(o, d, plane_point, normal) else {
+            return;
+        };
+        let wd = [cur[0] - anchor[0], cur[1] - anchor[1], cur[2] - anchor[2]];
+        // World delta -> mesh-local (the basis is orthonormal, so the inverse
+        // is its transpose). The mesh follows the cursor, so the pivot moves
+        // the opposite way (raising pivot shifts the drawn mesh the other way).
+        let new = [
+            base_pivot[0] - dot3(wd, basis[0]) as f32,
+            base_pivot[1] - dot3(wd, basis[1]) as f32,
+            base_pivot[2] - dot3(wd, basis[2]) as f32,
+        ];
+        // Skip frames that don't actually move the pivot (a click, or the
+        // cursor back at the anchor): no undo step, no write.
+        let cur_pivot = self
+            .editor
+            .rig
+            .as_ref()
+            .and_then(|r| r.bones.get(bone))
+            .map(|b| b.model.pivot);
+        if cur_pivot == Some(new) {
+            return;
+        }
+        // First real motion: fold the pre-drag snapshot into one undo step.
+        self.editor.rig_commit_pending();
+        if let Some(b) = self.editor.rig.as_mut().and_then(|r| r.bones.get_mut(bone)) {
+            b.model.pivot = new;
         }
         self.editor.rig_dirty = true;
     }
@@ -2805,7 +2926,13 @@ impl App {
                 }
             }
             if self.editor.rig_mode == RigMode::Skeleton {
-                self.begin_bone_drag();
+                // "Move pivot" slides the mesh relative to its joint; otherwise
+                // the drag moves the joint itself.
+                if self.editor.pivot_move_mode {
+                    self.begin_pivot_drag();
+                } else {
+                    self.begin_bone_drag();
+                }
             } else {
                 // Animate: the active gizmo mode chooses the transform.
                 match self.editor.gizmo_mode {
@@ -2959,6 +3086,10 @@ impl App {
             // it (a real drag already committed it on its first move).
             self.editor.rig_pending = None;
             return; // bone repositioned
+        }
+        if self.pivot_drag.take().is_some() {
+            self.editor.rig_pending = None; // drop an uncommitted select-only grab
+            return; // mesh pivot moved
         }
         if self.rotate_drag.take().is_some() {
             // A click that never moved leaves an uncommitted pre-edit snapshot;
@@ -3913,6 +4044,8 @@ impl App {
             self.commit_active_bone(); // fold the bone's edits back in
         }
         self.editor.rig_mode = mode;
+        self.editor.pivot_move_mode = false; // a per-Skeleton toggle; reset on switch
+        self.pivot_drag = None;
         if mode == RigMode::Sculpt {
             self.kfa = None;
             self.load_active_bone(true); // restores the active bone + camera
@@ -4952,6 +5085,9 @@ impl ApplicationHandler for App {
                 self.cursor = (position.x, position.y);
                 if self.bone_drag.is_some() {
                     self.update_bone_drag();
+                }
+                if self.pivot_drag.is_some() {
+                    self.update_pivot_drag();
                 }
                 if self.rotate_drag.is_some() {
                     self.update_rotate_drag();
