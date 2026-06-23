@@ -4635,7 +4635,17 @@ impl App {
 
     /// Write the document's working model back into the active bone, so the
     /// rig reflects the edits (called before switching bones or saving).
+    ///
+    /// **Sculpt only.** The document is the working mesh *only* in Sculpt; in
+    /// Skeleton / Animate `select_bone` moves `active_bone` without reloading
+    /// the document, so it holds a stale, unrelated bone's mesh. Committing
+    /// then would overwrite the active bone with that stale mesh — which a
+    /// background autosave (or any rig save) silently did, swapping a bone's
+    /// voxels for another's. Guard it, matching [`Self::rig_state`].
     fn commit_active_bone(&mut self) {
+        if self.editor.rig_mode != RigMode::Sculpt {
+            return;
+        }
         if let Some(rig) = &mut self.editor.rig {
             if let Some(bone) = rig.bones.get_mut(self.editor.active_bone) {
                 bone.model = self.editor.document.model().clone();
