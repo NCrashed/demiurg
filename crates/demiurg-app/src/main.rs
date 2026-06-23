@@ -453,6 +453,44 @@ fn float_selection(cells: &[([i32; 3], u32)], dims: (u32, u32, u32)) -> HashSet<
         .collect()
 }
 
+/// Rotate `cells` 90 degrees in the plane perpendicular to `axis`, about the
+/// cells' bounding-box centre, keeping them on the integer grid: the two
+/// in-plane extents swap and the block stays centred (so a square selection
+/// turns in place). `cw` looks along the `+axis` direction. The `axis`
+/// coordinate of each cell is untouched.
+#[allow(clippy::cast_possible_truncation)] // small voxel coords; centre rounds
+#[allow(clippy::similar_names)] // u/v-axis pairs (umin/vmin, ru/rv) are the math
+fn rotate_cells_90(cells: &mut [([i32; 3], u32)], axis: usize, cw: bool) {
+    if cells.is_empty() {
+        return;
+    }
+    let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+    let (mut umin, mut umax, mut vmin, mut vmax) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
+    for (p, _) in cells.iter() {
+        umin = umin.min(p[u]);
+        umax = umax.max(p[u]);
+        vmin = vmin.min(p[v]);
+        vmax = vmax.max(p[v]);
+    }
+    let (w, h) = (umax - umin + 1, vmax - vmin + 1);
+    // The rotated block is `h` wide x `w` tall; anchor it so its centre matches
+    // the original block's centre.
+    let cu = f64::from(umin + umax) / 2.0;
+    let cv = f64::from(vmin + vmax) / 2.0;
+    let new_umin = (cu - f64::from(h - 1) / 2.0).round() as i32;
+    let new_vmin = (cv - f64::from(w - 1) / 2.0).round() as i32;
+    for (p, _) in cells.iter_mut() {
+        let (ru, rv) = (p[u] - umin, p[v] - vmin);
+        let (ru2, rv2) = if cw {
+            (rv, w - 1 - ru)
+        } else {
+            (h - 1 - rv, ru)
+        };
+        p[u] = new_umin + ru2;
+        p[v] = new_vmin + rv2;
+    }
+}
+
 fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
@@ -759,6 +797,9 @@ struct Editor {
     /// of moving the joint. Lets a mesh be aligned to its joint on a complex
     /// rig. Reset on a mode switch.
     pivot_move_mode: bool,
+    /// Axis the "Rotate 90" selection op turns about (0/1/2 = X/Y/Z; default
+    /// Z, the vertical/turntable axis). A pure editor preference.
+    rotate_axis: usize,
     /// Animate mode: which transform a viewport left-drag edits (R/G/S).
     gizmo_mode: GizmoMode,
     /// Animate mode: whether the timeline is playing (advancing time each
@@ -868,6 +909,7 @@ impl Editor {
             active_bone: 0,
             rig_mode: RigMode::Sculpt,
             pivot_move_mode: false,
+            rotate_axis: 2,
             gizmo_mode: GizmoMode::Rotate,
             anim_playing: true,
             active_clip: 0,
@@ -1769,6 +1811,27 @@ impl App {
         });
         self.editor.dirty = true;
         cells
+    }
+
+    /// Rotate the selection 90 degrees about `rotate_axis` (`cw` = clockwise
+    /// looking along +axis) about its bounding-box centre. The selected voxels
+    /// become a floating layer (lifted from their sources), so the rotation is
+    /// non-destructive and movable until deselect — and a piece that swings out
+    /// of bounds isn't lost (nudge it back in). Re-rotating turns the existing
+    /// float further. No-op with nothing occupied selected and no float.
+    fn rotate_selection(&mut self, cw: bool) {
+        let dims = self.editor.document.dims();
+        let axis = self.editor.rotate_axis;
+        if self.editor.float.is_none() && self.lift_selection_to_float().is_empty() {
+            return;
+        }
+        let Some(f) = self.editor.float.as_mut() else {
+            return;
+        };
+        rotate_cells_90(&mut f.cells, axis, cw);
+        let cells = f.cells.clone();
+        self.editor.selection = float_selection(&cells, dims);
+        self.editor.dirty = true;
     }
 
     /// Update the move drag from the current cursor: snap the cursor ray
@@ -3585,6 +3648,9 @@ impl App {
         if a.extract_to_bone {
             self.extract_selection_to_bone();
         }
+        if let Some(cw) = a.rotate_sel {
+            self.rotate_selection(cw);
+        }
         if a.save {
             self.save_project();
         }
@@ -5261,6 +5327,26 @@ impl ApplicationHandler for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rotate_cells_90_swaps_extents_and_reverses() {
+        // A vertical 1x3 bar in the X-Y plane (axis Z), at z=5.
+        let orig = vec![([0, 0, 5], 1u32), ([0, 1, 5], 2), ([0, 2, 5], 3)];
+        let mut c = orig.clone();
+        rotate_cells_90(&mut c, 2, true); // clockwise about Z
+        // The rotation axis (Z) coordinate is untouched.
+        assert!(c.iter().all(|(p, _)| p[2] == 5));
+        // Extents swap: a 1-wide (X) x 3-tall (Y) bar becomes 3-wide x 1-tall.
+        let xs: Vec<i32> = c.iter().map(|(p, _)| p[0]).collect();
+        let ys: Vec<i32> = c.iter().map(|(p, _)| p[1]).collect();
+        assert_eq!(xs.iter().max().unwrap() - xs.iter().min().unwrap(), 2);
+        assert_eq!(ys.iter().max(), ys.iter().min(), "now a single row in Y");
+        // Colours ride along with their cell.
+        assert_eq!(c.len(), 3);
+        // Counter-clockwise undoes the clockwise turn exactly.
+        rotate_cells_90(&mut c, 2, false);
+        assert_eq!(c, orig);
+    }
 
     #[test]
     fn float_selection_keeps_only_in_bounds_cells() {

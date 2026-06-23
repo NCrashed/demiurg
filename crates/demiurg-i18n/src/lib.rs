@@ -80,6 +80,9 @@ pub enum Msg {
     Colour,
     ModelColours,
     Mirror,
+    Rotate,
+    RotateCw,
+    RotateCcw,
     Pivot,
     CenterPivot,
     MovePivot,
@@ -194,7 +197,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 114] = [
+    pub const ALL: [Msg; 117] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -208,6 +211,9 @@ impl Msg {
         Msg::Colour,
         Msg::ModelColours,
         Msg::Mirror,
+        Msg::Rotate,
+        Msg::RotateCw,
+        Msg::RotateCcw,
         Msg::Pivot,
         Msg::CenterPivot,
         Msg::MovePivot,
@@ -337,6 +343,9 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Colour => "Colour",
         Msg::ModelColours => "Colours in model",
         Msg::Mirror => "Mirror",
+        Msg::Rotate => "Rotate 90",
+        Msg::RotateCw => "Clockwise",
+        Msg::RotateCcw => "Counter-clockwise",
         Msg::Pivot => "Pivot",
         Msg::CenterPivot => "Center",
         Msg::MovePivot => "Move pivot",
@@ -459,6 +468,9 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Colour => "Цвет",
         Msg::ModelColours => "Цвета модели",
         Msg::Mirror => "Зеркало",
+        Msg::Rotate => "Поворот 90",
+        Msg::RotateCw => "По часовой",
+        Msg::RotateCcw => "Против часовой",
         Msg::Pivot => "Опорная точка",
         Msg::CenterPivot => "По центру",
         Msg::MovePivot => "Двигать опору",

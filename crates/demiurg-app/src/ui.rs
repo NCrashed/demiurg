@@ -70,6 +70,9 @@ pub struct UiActions {
     pub remove_reference: bool,
     /// Extract the current selection into a new child bone (rig slicing).
     pub extract_to_bone: bool,
+    /// Rotate the selection 90 degrees about `editor.rotate_axis`:
+    /// `Some(true)` = clockwise, `Some(false)` = counter-clockwise.
+    pub rotate_sel: Option<bool>,
     /// Save the project (Ctrl+S): overwrite the known path or prompt.
     pub save: bool,
     /// Save the project to a new path (dialog).
@@ -1217,6 +1220,7 @@ fn skeleton_panel(
 /// (editing the active bone's mesh): tool picker, paint colour, symmetry,
 /// pivot, model size, selection, and the reference-image guide.
 #[allow(clippy::cast_precision_loss)] // pivot is centred from small voxel dims
+#[allow(clippy::too_many_lines)] // a flat builder of the model-editing sections
 fn voxel_tools_panel(
     ui: &mut egui::Ui,
     editor: &mut Editor,
@@ -1283,6 +1287,35 @@ fn voxel_tools_panel(
                 &mut editor.document.mirror[axis],
                 egui::RichText::new(name).color(axis_color(axis)),
             );
+        }
+    });
+
+    // Rotate the selection 90 degrees about a chosen axis. Acts on the current
+    // selection (or a floating layer), so it needs one to do anything.
+    ui.separator();
+    ui.label(t(Msg::Rotate));
+    let can_rotate = !editor.selection.is_empty() || editor.float.is_some();
+    ui.horizontal(|ui| {
+        for (axis, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
+            ui.selectable_value(
+                &mut editor.rotate_axis,
+                axis,
+                egui::RichText::new(name).color(axis_color(axis)),
+            );
+        }
+        if ui
+            .add_enabled(can_rotate, egui::Button::new("⟲"))
+            .on_hover_text(t(Msg::RotateCcw))
+            .clicked()
+        {
+            actions.rotate_sel = Some(false);
+        }
+        if ui
+            .add_enabled(can_rotate, egui::Button::new("⟳"))
+            .on_hover_text(t(Msg::RotateCw))
+            .clicked()
+        {
+            actions.rotate_sel = Some(true);
         }
     });
 
