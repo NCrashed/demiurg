@@ -119,6 +119,7 @@ pub enum Msg {
     OpenRecent,
     ClearRecent,
     OpenReference,
+    PasteReference,
     Save,
     SaveAs,
     ExportKv6,
@@ -191,7 +192,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 111] = [
+    pub const ALL: [Msg; 112] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -240,6 +241,7 @@ impl Msg {
         Msg::OpenRecent,
         Msg::ClearRecent,
         Msg::OpenReference,
+        Msg::PasteReference,
         Msg::Save,
         Msg::SaveAs,
         Msg::ExportKv6,
@@ -366,6 +368,7 @@ const fn en(msg: Msg) -> &'static str {
         Msg::OpenRecent => "Open recent",
         Msg::ClearRecent => "Clear recent",
         Msg::OpenReference => "Open reference image…",
+        Msg::PasteReference => "Paste image (Ctrl+V)",
         Msg::Save => "Save",
         Msg::SaveAs => "Save As…",
         Msg::ExportKv6 => "Export .kv6…",
@@ -485,6 +488,7 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::OpenRecent => "Открыть недавние",
         Msg::ClearRecent => "Очистить недавние",
         Msg::OpenReference => "Открыть опорное изображение…",
+        Msg::PasteReference => "Вставить из буфера (Ctrl+V)",
         Msg::Save => "Сохранить",
         Msg::SaveAs => "Сохранить как…",
         Msg::ExportKv6 => "Экспорт .kv6…",

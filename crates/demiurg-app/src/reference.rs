@@ -49,18 +49,48 @@ pub struct Reference {
     /// Drawing opacity in `0.0..=1.0` (scales the sprite's texel alpha), so a
     /// bright reference can be dimmed to a faint guide. `1.0` = as loaded.
     pub opacity: f32,
+    /// World size of one texel, in voxels. `1.0` = 1 texel maps to 1 voxel
+    /// (the default); raise it to blow a small guide up to the model's size,
+    /// lower it to shrink an oversized one. Affects only how the sprite is
+    /// projected, not the stored pixels.
+    pub scale: f32,
 }
 
 impl Reference {
-    /// Decode image `bytes` into a reference. `name` labels it in the panel.
+    /// Decode encoded image `bytes` (any supported codec) into a reference.
+    /// `name` labels it in the panel.
     ///
     /// # Errors
     /// A message if the bytes aren't a decodable image.
     pub fn load(bytes: &[u8], name: String) -> Result<Reference, String> {
-        let img = downscale(image::load_from_memory(bytes).map_err(|e| e.to_string())?);
-        let rgba = img.to_rgba8();
+        Ok(Self::from_image(
+            image::load_from_memory(bytes).map_err(|e| e.to_string())?,
+            name,
+        ))
+    }
+
+    /// Build a reference from a raw, row-major RGBA8 buffer (e.g. the system
+    /// clipboard's straight-RGBA image, pasted in as a reference).
+    ///
+    /// # Errors
+    /// A message if `rgba` isn't `width * height * 4` bytes.
+    pub fn from_rgba(
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        name: String,
+    ) -> Result<Reference, String> {
+        let buf = image::RgbaImage::from_raw(width, height, rgba)
+            .ok_or_else(|| "pixel buffer doesn't match its dimensions".to_string())?;
+        Ok(Self::from_image(DynamicImage::ImageRgba8(buf), name))
+    }
+
+    /// Shared constructor: downscale to [`MAX_DIM`] and place at the defaults
+    /// (Front plane, no offset/flip, fully opaque, 1 texel = 1 voxel).
+    fn from_image(img: DynamicImage, name: String) -> Reference {
+        let rgba = downscale(img).to_rgba8();
         let (width, height) = rgba.dimensions();
-        Ok(Reference {
+        Reference {
             rgba: rgba.into_raw(),
             width,
             height,
@@ -73,7 +103,8 @@ impl Reference {
             flip_v: false,
             visible: true,
             opacity: 1.0,
-        })
+            scale: 1.0,
+        }
     }
 
     /// The straight-RGBA pixel buffer, for `SceneRenderer::upload_image`.
@@ -111,14 +142,17 @@ impl Reference {
 
     /// World geometry for the image sprite: the top-left corner (image texel
     /// `(0, 0)`), the world `u`/`v` directions its columns/rows run along,
-    /// and its size (1 texel = 1 voxel). Placed at the plane's `depth` and
-    /// in-plane `offset`, shifted by `-pivot` to align with the model. Flips
-    /// move the corner to the opposite edge and reverse the axis, so the
+    /// and its size (1 texel = `scale` voxels). Placed at the plane's `depth`
+    /// and in-plane `offset`, shifted by `-pivot` to align with the model.
+    /// Flips move the corner to the opposite edge and reverse the axis, so the
     /// sprite stays a positive-size quad.
     #[must_use]
     #[allow(clippy::cast_precision_loss)] // image dims + voxel coords are small
     pub fn placement(&self, pivot: [f32; 3]) -> ([f32; 3], [f32; 3], [f32; 3], [f32; 2]) {
-        let (w, h) = (self.width as f32, self.height as f32);
+        let (w, h) = (
+            self.width as f32 * self.scale,
+            self.height as f32 * self.scale,
+        );
         // Corner voxel (column 0, row 0) and the world column/row axes.
         let (corner, mut u, mut v) = match self.axis {
             RefAxis::Front => ([self.offset_u, self.depth, self.offset_v], X, Z),
@@ -154,16 +188,21 @@ fn scale(a: [f32; 3], s: f32) -> [f32; 3] {
     [a[0] * s, a[1] * s, a[2] * s]
 }
 
-/// Whether a path's extension is a supported reference-image format (used
-/// for drag-and-drop routing).
+/// Whether a path's extension is a document (model / rig) format demiurg
+/// opens as the working document. Used to route drag-and-drop: a dropped
+/// file is a document if its extension says so, otherwise it's treated as a
+/// reference image. The reference decoder ([`Reference::load`]) sniffs the
+/// bytes, so a dropped image needn't carry an image extension at all — which
+/// is what lets a `.webp` (or anything) dragged straight out of a browser,
+/// often a temp file with an odd or missing extension, load as a reference.
 #[must_use]
-pub fn is_image(path: &Path) -> bool {
+pub fn is_document(path: &Path) -> bool {
     matches!(
         path.extension()
             .and_then(|e| e.to_str())
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("png" | "jpg" | "jpeg" | "bmp" | "gif" | "tga" | "webp")
+        Some("demiurg" | "rkc" | "kv6" | "vox")
     )
 }
 
@@ -199,6 +238,7 @@ mod tests {
             flip_v: false,
             visible: true,
             opacity: 1.0,
+            scale: 1.0,
         }
     }
 
@@ -240,6 +280,42 @@ mod tests {
         assert_eq!(origin, [4.0, 0.0, 6.0]);
         assert_eq!(u, [-1.0, 0.0, 0.0]);
         assert_eq!(v, [0.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact scaled placement
+    fn scale_grows_the_sprite_size_and_flip_corner() {
+        let mut r = make(4, 6);
+        r.scale = 2.0;
+        // Size is the image dims times the scale; the corner is unflipped.
+        let (origin, _, _, size) = r.placement([0.0; 3]);
+        assert_eq!(origin, [0.0, 0.0, 0.0]);
+        assert_eq!(size, [8.0, 12.0]);
+        // A flip moves the corner to the *scaled* far edge.
+        r.flip_h = true;
+        r.flip_v = true;
+        let (origin, u, v, _) = r.placement([0.0; 3]);
+        assert_eq!(origin, [8.0, 0.0, 12.0]);
+        assert_eq!(u, [-1.0, 0.0, 0.0]);
+        assert_eq!(v, [0.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact default scale
+    fn from_rgba_keeps_pixels_and_defaults() {
+        // 2×1: opaque red, opaque green. Round-trips through the raw-RGBA path.
+        let r = Reference::from_rgba(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255], "clip".into())
+            .expect("valid buffer");
+        assert_eq!((r.width, r.height), (2, 1));
+        assert_eq!(r.texel(0, 0), Some(0x80ff_0000));
+        assert_eq!(r.texel(1, 0), Some(0x8000_ff00));
+        assert_eq!(r.scale, 1.0, "fresh paste is unscaled");
+    }
+
+    #[test]
+    fn from_rgba_rejects_a_mismatched_buffer() {
+        // 2×2 needs 16 bytes; give 4 — must error, not panic.
+        assert!(Reference::from_rgba(2, 2, vec![0; 4], "clip".into()).is_err());
     }
 
     #[test]

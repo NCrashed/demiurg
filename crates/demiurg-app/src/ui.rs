@@ -64,6 +64,8 @@ pub struct UiActions {
     pub clear_recent: bool,
     /// Open a reference image (file dialog).
     pub open_reference: bool,
+    /// Paste an image from the system clipboard as the reference.
+    pub paste_reference: bool,
     /// Remove the current reference image.
     pub remove_reference: bool,
     /// Save the project (Ctrl+S): overwrite the known path or prompt.
@@ -1292,6 +1294,11 @@ fn reference_panel(
         if ui.button(t(Msg::OpenReference)).clicked() {
             actions.open_reference = true;
         }
+        // A browser can't drop an image onto the window, so offer a paste:
+        // "Copy image" in the browser, then this (or Ctrl+V).
+        if ui.button(t(Msg::PasteReference)).clicked() {
+            actions.paste_reference = true;
+        }
         return;
     }
 
@@ -1324,6 +1331,19 @@ fn reference_panel(
         ui.horizontal(|ui| {
             ui.label(t(Msg::Opacity));
             ui.add(egui::Slider::new(&mut r.opacity, 0.0..=1.0).show_value(false));
+        });
+        // Scale: world voxels per texel. Fit a guide to the model without
+        // touching the stored pixels (the sprite reprojects every frame, so no
+        // texture rebuild). Drag is multiplicative-ish via a small speed; the
+        // field also accepts a typed value.
+        ui.horizontal(|ui| {
+            ui.label(t(Msg::Scale));
+            ui.add(
+                egui::DragValue::new(&mut r.scale)
+                    .range(0.01..=64.0)
+                    .speed(0.02)
+                    .max_decimals(3),
+            );
         });
         ui.horizontal(|ui| {
             ui.checkbox(&mut r.visible, t(Msg::Show));

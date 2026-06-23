@@ -932,7 +932,19 @@ impl Editor {
     /// Load image `bytes` as the reference layer (replacing any current one);
     /// the sprite texture re-uploads next frame.
     fn set_reference(&mut self, bytes: &[u8], name: String) {
-        match Reference::load(bytes, name) {
+        self.install_reference(Reference::load(bytes, name));
+    }
+
+    /// Install a raw RGBA8 buffer (the system clipboard's straight-RGBA image)
+    /// as the reference layer.
+    fn set_reference_rgba(&mut self, width: u32, height: u32, rgba: Vec<u8>, name: String) {
+        self.install_reference(Reference::from_rgba(width, height, rgba, name));
+    }
+
+    /// Adopt a freshly built reference (or log the decode error), flagging the
+    /// sprite texture for re-upload.
+    fn install_reference(&mut self, made: Result<Reference, String>) {
+        match made {
             Ok(r) => {
                 self.reference = Some(r);
                 self.ref_move_mode = false; // start in normal editing
@@ -2902,14 +2914,16 @@ impl App {
         }
         let hit = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
         let rel = [hit[0] - origin[0], hit[1] - origin[1], hit[2] - origin[2]];
-        // `u`/`v` are unit, sized 1 texel = 1 voxel, so the dot products are
-        // the column/row directly (and already account for any flip).
+        // `u`/`v` are unit; `size` is the sprite's scaled world extent, so the
+        // dot products give the world distance along each axis (already
+        // accounting for any flip). Divide by `scale` to map back to a texel.
         let (cu, cv) = (dot3(rel, u), dot3(rel, v));
         if cu < 0.0 || cu >= f64::from(size[0]) || cv < 0.0 || cv >= f64::from(size[1]) {
             return None;
         }
+        let inv = 1.0 / f64::from(r.scale);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // bounds-checked above
-        let color = r.texel(cu as u32, cv as u32)?;
+        let color = r.texel((cu * inv) as u32, (cv * inv) as u32)?;
         Some((t, color))
     }
 
@@ -3325,6 +3339,9 @@ impl App {
         }
         if a.open_reference {
             self.open_dialog(DialogKind::OpenReference);
+        }
+        if a.paste_reference {
+            self.paste_reference();
         }
         if a.remove_reference {
             self.editor.reference = None;
@@ -3751,6 +3768,29 @@ impl App {
         event_loop.exit();
     }
 
+    /// Paste an image from the system clipboard as the reference layer. The
+    /// portable way to pull a web image in: a browser can't drop one onto the
+    /// window (winit delivers only local file paths, and nothing on Wayland),
+    /// but "Copy image" → Ctrl+V works. A clipboard without a raster image
+    /// (empty, or just text/a URL) is a quiet no-op.
+    fn paste_reference(&mut self) {
+        let img = match arboard::Clipboard::new().and_then(|mut c| c.get_image()) {
+            Ok(img) => img,
+            Err(e) => {
+                eprintln!("demiurg: clipboard image: {e}");
+                return;
+            }
+        };
+        // arboard hands back straight (un-premultiplied) row-major RGBA8.
+        #[allow(clippy::cast_possible_truncation)] // clipboard image dims fit u32
+        self.editor.set_reference_rgba(
+            img.width as u32,
+            img.height as u32,
+            img.bytes.into_owned(),
+            "clipboard".to_string(),
+        );
+    }
+
     /// Read an image file and install it as the reference layer.
     fn load_reference(&mut self, path: &Path) {
         match std::fs::read(path) {
@@ -3790,18 +3830,20 @@ impl App {
         }
     }
 
-    /// Route a dropped file: an image becomes the reference layer; an
-    /// `.rkc` opens as the KFA rig; a `.kv6` / `.vox` / `.demiurg` opens as
-    /// the model; anything else is ignored.
+    /// Route a dropped file: a `.demiurg` / `.rkc` / `.kv6` / `.vox` opens as
+    /// the document (model or KFA rig); anything else is loaded as the
+    /// reference layer.
     fn on_dropped_file(&mut self, path: &Path) {
-        // A reference image is an overlay (not a document); everything else
-        // routes through the same loader as File ▸ Open… (dispatches on the
-        // extension, including a rigged `.demiurg` / `.rkc`).
-        if reference::is_image(path) {
+        // A document routes through the same loader as File ▸ Open…
+        // (dispatches on the extension). Everything else is treated as a
+        // reference overlay (not a document): the decoder sniffs the bytes, so
+        // an image dragged out of a browser — typically a temp file with an
+        // odd or missing extension, e.g. a `.webp` — still loads.
+        if reference::is_document(path) {
+            self.open_and_record(path.to_path_buf());
+        } else {
             self.load_reference(path);
-            return;
         }
-        self.open_and_record(path.to_path_buf());
     }
 
     /// Replace the document model, rebuild the sprite, refresh the
@@ -4690,9 +4732,14 @@ impl App {
                 }
             }
             KeyCode::KeyX if pressed && ctrl && self.in_animate() => self.cut_key(),
+            // Ctrl+V: keyframe pose in Animate; the copied voxel selection if
+            // there is one; otherwise fall through to a clipboard image, so a
+            // web image copied in a browser pastes straight in as a reference.
             KeyCode::KeyV if pressed && ctrl => {
                 if self.in_animate() {
                     self.paste_key();
+                } else if self.editor.clipboard.is_empty() {
+                    self.paste_reference();
                 } else {
                     self.paste_clipboard();
                 }

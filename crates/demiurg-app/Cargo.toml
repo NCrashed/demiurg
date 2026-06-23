@@ -35,6 +35,15 @@ image = { version = "0.25", default-features = false, features = [
     "tga",
     "webp",
 ] }
+# System clipboard, for "paste image as reference" (Ctrl+V). Browsers can't
+# hand a dragged image to winit (it delivers only local file paths, and
+# nothing at all on Wayland), so paste is the portable way to pull a web
+# image in. `wayland-data-control` adds the native Wayland clipboard path
+# (wlr-data-control) with an X11 fallback, so it works on both backends.
+arboard = { version = "3.6", default-features = false, features = [
+    "image-data",
+    "wayland-data-control",
+] }
 
 [lints]
 workspace = true
