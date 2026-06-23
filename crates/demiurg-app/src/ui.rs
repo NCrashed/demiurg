@@ -68,6 +68,8 @@ pub struct UiActions {
     pub paste_reference: bool,
     /// Remove the current reference image.
     pub remove_reference: bool,
+    /// Extract the current selection into a new child bone (rig slicing).
+    pub extract_to_bone: bool,
     /// Save the project (Ctrl+S): overwrite the known path or prompt.
     pub save: bool,
     /// Save the project to a new path (dialog).
@@ -532,6 +534,15 @@ fn selection_panel(
             actions.paste_sel = true;
         }
     });
+    // Rig slicing: carve the selection out of this bone's mesh into a new child
+    // bone (it keeps its place at rest). Only meaningful while editing a rig.
+    if editor.rig.is_some()
+        && ui
+            .add_enabled(has_sel, egui::Button::new(t(Msg::ExtractToBone)))
+            .clicked()
+    {
+        actions.extract_to_bone = true;
+    }
 }
 
 /// The Rig section (rig mode): the character name, the Sculpt / Animate

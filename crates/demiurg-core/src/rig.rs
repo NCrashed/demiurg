@@ -178,6 +178,33 @@ impl Rig {
         n
     }
 
+    /// Append `model` as a new child bone of `parent` (`-1` = root), named
+    /// `name`, with a free Z-hinge whose joint sits at the parent's origin
+    /// (`p = [ZERO, ZERO]`), and a fresh `0` column in every skeletal clip so
+    /// `frmval[*].len()` stays equal to `bones.len()`. Returns the new index.
+    ///
+    /// Unlike [`Self::add_bone`] the caller supplies the whole mesh and its
+    /// pivot — used to extract a carved-out selection into its own bone: with
+    /// the joint at the parent origin and the mesh pivot pre-offset to match,
+    /// the piece keeps its exact place at rest (the artist then tunes the
+    /// joint / pivot).
+    pub fn add_child_mesh(&mut self, parent: i32, name: String, model: VoxelModel) -> usize {
+        let n = self.bones.len();
+        self.bones.push(RigBone {
+            name,
+            model,
+            hinge: free_hinge(parent, Z_AXIS, ZERO),
+        });
+        for clip in &mut self.clips {
+            if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
+                for row in frmval {
+                    row.push(BoneXform::IDENTITY);
+                }
+            }
+        }
+        n
+    }
+
     /// Delete bone `i`, keeping the rig consistent. Children of `i` are
     /// reparented to `i`'s parent so the subtree survives; every
     /// `hinge.parent` index is remapped for the removal, and column `i` is
@@ -1024,6 +1051,36 @@ mod tests {
         // No-ops.
         assert!(!rig.move_bone(1, 1));
         assert!(!rig.move_bone(0, 9));
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact pivot literal
+    fn add_child_mesh_appends_a_child_and_grows_clip_columns() {
+        let mut rig = Rig {
+            name: "t".to_string(),
+            root: [0.0; 3],
+            bones: vec![bone("body", -1, 0x80ff_0000)],
+            clips: vec![clip(1)],
+        };
+        let mut part = VoxelModel::new(2, 2, 2);
+        part.set(0, 0, 0, 0x8000_ff00);
+        part.pivot = [1.5, 0.0, -2.0]; // carried verbatim (no clamp)
+        let idx = rig.add_child_mesh(0, "arm".to_string(), part);
+        assert_eq!(idx, 1);
+        assert_eq!(rig.bones.len(), 2);
+        assert_eq!(rig.bones[1].name, "arm");
+        assert_eq!(rig.bones[1].hinge.parent, 0);
+        // Joint at the parent origin (p[1] == 0) so the supplied pivot places it.
+        assert_eq!(rig.bones[1].hinge.p[1], ZERO);
+        assert_eq!(rig.bones[1].model.pivot, [1.5, 0.0, -2.0]);
+        // Free range + a real axis, so the new bone is immediately poseable.
+        assert_eq!(rig.bones[1].hinge.vmin, i16::MIN);
+        assert_eq!(rig.bones[1].hinge.vmax, i16::MAX);
+        // Every clip grew one trailing column; reload stays consistent.
+        let frmval = skeletal(&rig.clips[0]);
+        assert!(frmval.iter().all(|row| row.len() == 2));
+        let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("child stays consistent");
+        assert_eq!(back.bones.len(), 2);
     }
 
     #[test]

@@ -3205,6 +3205,74 @@ impl App {
         self.editor.selection.clear();
     }
 
+    /// Extract the selected voxels into a new child bone of the active bone:
+    /// the carved-out piece leaves the current mesh and becomes its own bone,
+    /// placed so it sits exactly where it was at rest (the artist then tunes
+    /// its joint / pivot). The convenient way to slice a model into a skeleton.
+    /// No-op outside a rig's Sculpt mode, or with no occupied selected voxels.
+    #[allow(clippy::cast_precision_loss)] // voxel coords are tiny; exact in f32
+    fn extract_selection_to_bone(&mut self) {
+        if self.editor.rig.is_none() || self.editor.rig_mode != RigMode::Sculpt {
+            return;
+        }
+        self.commit_float(); // read real voxels, not a floating layer
+        // Occupied (colour-bearing) selected voxels.
+        let model = self.editor.document.model();
+        let picked: Vec<[u32; 3]> = self
+            .editor
+            .selection
+            .iter()
+            .copied()
+            .filter(|&c| model.get(c[0], c[1], c[2]) != 0)
+            .collect();
+        if picked.is_empty() {
+            return;
+        }
+        // Bounding box of the picked voxels — the child mesh is cropped to it.
+        let mut min = [u32::MAX; 3];
+        let mut max = [0u32; 3];
+        for c in &picked {
+            for a in 0..3 {
+                min[a] = min[a].min(c[a]);
+                max[a] = max[a].max(c[a]);
+            }
+        }
+        let mut child = VoxelModel::new(
+            max[0] - min[0] + 1,
+            max[1] - min[1] + 1,
+            max[2] - min[2] + 1,
+        );
+        for &c in &picked {
+            child.set(
+                c[0] - min[0],
+                c[1] - min[1],
+                c[2] - min[2],
+                model.get(c[0], c[1], c[2]),
+            );
+        }
+        // Pivot offset by the crop so the piece keeps its parent-relative place
+        // (the new bone's joint sits at the parent origin — see `add_child_mesh`).
+        let pp = self.editor.document.pivot();
+        child.pivot = [
+            pp[0] - min[0] as f32,
+            pp[1] - min[1] as f32,
+            pp[2] - min[2] as f32,
+        ];
+        // One undo step: snapshot the full pre-extraction rig (the working mesh
+        // is folded in by `rig_state`), then carve + add the child.
+        self.editor.rig_checkpoint();
+        let clear: Vec<([u32; 3], u32)> = picked.iter().map(|&c| (c, 0)).collect();
+        self.editor.document.set_cells(clear); // hole the parent mesh
+        self.commit_active_bone(); // fold the holed mesh back into the bone
+        let parent = i32::try_from(self.editor.active_bone).unwrap_or(-1);
+        if let Some(rig) = self.editor.rig.as_mut() {
+            let name = format!("part {}", rig.bones.len());
+            rig.add_child_mesh(parent, name, child);
+        }
+        self.editor.selection.clear();
+        self.editor.dirty = true; // refresh the parent view (now holed)
+    }
+
     /// Copy the occupied selected voxels to the clipboard at their
     /// absolute positions, so a paste lands back where they came from.
     /// Settles any floating layer first, so the copy reads real voxels.
@@ -3478,6 +3546,9 @@ impl App {
             self.editor.reference = None;
             self.editor.ref_move_mode = false;
             self.editor.ref_image_dirty = true;
+        }
+        if a.extract_to_bone {
+            self.extract_selection_to_bone();
         }
         if a.save {
             self.save_project();
