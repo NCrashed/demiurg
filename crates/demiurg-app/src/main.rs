@@ -3250,14 +3250,49 @@ impl App {
                 model.get(c[0], c[1], c[2]),
             );
         }
-        // Pivot offset by the crop so the piece keeps its parent-relative place
-        // (the new bone's joint sits at the parent origin — see `add_child_mesh`).
+        // Default joint: the centre of the *cut* — the picked voxels that touch
+        // a voxel staying in the parent — so the new bone rotates about where it
+        // joins (a shoulder / hip). Falls back to the piece's own centre when it
+        // has no seam (the whole bone selected, or an isolated chunk). Voxel
+        // centres (`+0.5`) so the joint sits mid-voxel.
+        let is_seam = |c: [u32; 3]| {
+            (0..3).any(|a| {
+                [false, true].iter().any(|&plus| {
+                    let mut n = c;
+                    if plus {
+                        n[a] += 1;
+                    } else if n[a] == 0 {
+                        return false;
+                    } else {
+                        n[a] -= 1;
+                    }
+                    // A neighbour occupied in the parent but NOT carved out (an
+                    // out-of-bounds neighbour reads 0, so it's never a seam).
+                    model.get(n[0], n[1], n[2]) != 0 && !self.editor.selection.contains(&n)
+                })
+            })
+        };
+        let seam: Vec<[u32; 3]> = picked.iter().copied().filter(|&c| is_seam(c)).collect();
+        let pts = if seam.is_empty() { &picked } else { &seam };
+        let n = pts.len() as f32;
+        let mut sc = [0f32; 3];
+        for p in pts {
+            for a in 0..3 {
+                sc[a] += p[a] as f32 + 0.5;
+            }
+        }
+        sc = [sc[0] / n, sc[1] / n, sc[2] / n];
+        // Pivot offset by the crop so the piece keeps its place, with its pivot
+        // at the seam centre; the joint places that seam point in the parent
+        // frame (parent-local = relative to the parent's mesh pivot). Both use
+        // the same `sc`, so the piece stays exactly put (see `add_child_mesh`).
         let pp = self.editor.document.pivot();
         child.pivot = [
-            pp[0] - min[0] as f32,
-            pp[1] - min[1] as f32,
-            pp[2] - min[2] as f32,
+            sc[0] - min[0] as f32,
+            sc[1] - min[1] as f32,
+            sc[2] - min[2] as f32,
         ];
+        let joint = [sc[0] - pp[0], sc[1] - pp[1], sc[2] - pp[2]];
         // One undo step: snapshot the full pre-extraction rig (the working mesh
         // is folded in by `rig_state`), then carve + add the child.
         self.editor.rig_checkpoint();
@@ -3267,7 +3302,7 @@ impl App {
         let parent = i32::try_from(self.editor.active_bone).unwrap_or(-1);
         if let Some(rig) = self.editor.rig.as_mut() {
             let name = format!("part {}", rig.bones.len());
-            rig.add_child_mesh(parent, name, child);
+            rig.add_child_mesh(parent, name, child, joint);
         }
         self.editor.selection.clear();
         self.editor.dirty = true; // refresh the parent view (now holed)

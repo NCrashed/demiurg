@@ -179,21 +179,33 @@ impl Rig {
     }
 
     /// Append `model` as a new child bone of `parent` (`-1` = root), named
-    /// `name`, with a free Z-hinge whose joint sits at the parent's origin
-    /// (`p = [ZERO, ZERO]`), and a fresh `0` column in every skeletal clip so
-    /// `frmval[*].len()` stays equal to `bones.len()`. Returns the new index.
+    /// `name`, with a free Z-hinge whose parent-side joint sits at `joint`
+    /// (parent-local, relative to the parent's mesh pivot), and a fresh `0`
+    /// column in every skeletal clip so `frmval[*].len()` stays equal to
+    /// `bones.len()`. Returns the new index.
     ///
-    /// Unlike [`Self::add_bone`] the caller supplies the whole mesh and its
-    /// pivot — used to extract a carved-out selection into its own bone: with
-    /// the joint at the parent origin and the mesh pivot pre-offset to match,
-    /// the piece keeps its exact place at rest (the artist then tunes the
-    /// joint / pivot).
-    pub fn add_child_mesh(&mut self, parent: i32, name: String, model: VoxelModel) -> usize {
+    /// Unlike [`Self::add_bone`] the caller supplies the whole mesh, its pivot,
+    /// and the joint — used to extract a carved-out selection into its own
+    /// bone: with the joint at the cut and the mesh pivot pre-offset to match,
+    /// the piece keeps its exact place at rest and rotates about the seam (the
+    /// artist then tunes both).
+    pub fn add_child_mesh(
+        &mut self,
+        parent: i32,
+        name: String,
+        model: VoxelModel,
+        joint: [f32; 3],
+    ) -> usize {
         let n = self.bones.len();
+        let joint = Point3 {
+            x: joint[0],
+            y: joint[1],
+            z: joint[2],
+        };
         self.bones.push(RigBone {
             name,
             model,
-            hinge: free_hinge(parent, Z_AXIS, ZERO),
+            hinge: free_hinge(parent, Z_AXIS, joint),
         });
         for clip in &mut self.clips {
             if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
@@ -1065,13 +1077,20 @@ mod tests {
         let mut part = VoxelModel::new(2, 2, 2);
         part.set(0, 0, 0, 0x8000_ff00);
         part.pivot = [1.5, 0.0, -2.0]; // carried verbatim (no clamp)
-        let idx = rig.add_child_mesh(0, "arm".to_string(), part);
+        let idx = rig.add_child_mesh(0, "arm".to_string(), part, [2.5, 1.0, 3.0]);
         assert_eq!(idx, 1);
         assert_eq!(rig.bones.len(), 2);
         assert_eq!(rig.bones[1].name, "arm");
         assert_eq!(rig.bones[1].hinge.parent, 0);
-        // Joint at the parent origin (p[1] == 0) so the supplied pivot places it.
-        assert_eq!(rig.bones[1].hinge.p[1], ZERO);
+        // The supplied joint lands on the parent-side velcro p[1].
+        assert_eq!(
+            rig.bones[1].hinge.p[1],
+            Point3 {
+                x: 2.5,
+                y: 1.0,
+                z: 3.0
+            }
+        );
         assert_eq!(rig.bones[1].model.pivot, [1.5, 0.0, -2.0]);
         // Free range + a real axis, so the new bone is immediately poseable.
         assert_eq!(rig.bones[1].hinge.vmin, i16::MIN);
