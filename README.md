@@ -12,11 +12,12 @@ designed but not yet shipped (one codebase, see [DESIGN.md](./DESIGN.md)).
 
 ## Status
 
-**v0.5.0 — model + skeletal-animation editor for artists.** The native model
-editor (tools, selection + move, palette, mirror, pivot, resizing, undo/redo,
-reference-image tracing, project save and engine-format export) plus a new
-**skeletal-animation editor** — rig a model into bones and animate it with
-keyframes, posed in the viewport and exported to `.rkc` (DESIGN.md M2 + M4).
+**v0.6.0 — model + skeletal-animation editor for artists.** The native model
+editor (tools, selection + move + 90° rotate, palette, mirror, pivot, resizing,
+undo/redo, reference-image tracing, project save and engine-format export) plus a
+**skeletal-animation editor** — rig a model into bones (slice a selection
+straight into a bone) and animate it with keyframes, posed in the viewport and
+exported to `.rkc` (DESIGN.md M2 + M4).
 
 Animation is a **preview**: the `.rkc` format and the rig UI may still change.
 See [Skeletal animation](#skeletal-animation-preview) below. Voxel-video
@@ -58,14 +59,16 @@ demiurg [path.kv6 | path.vox | path.demiurg | path.rkc]    # no path -> a blank 
   select. Left mouse applies the tool; `Ctrl`+click eyedrops a colour.
 - **Select** (`8`): click or drag a marquee; `Shift` adds, `Alt` removes. Drag a
   selected voxel's face to move the selection; `Delete`, `Ctrl+C`/`Ctrl+V`
-  copy/paste, `Esc` deselects.
+  copy/paste, `Esc` deselects. The Rotate panel turns the selection 90°
+  clockwise / counter-clockwise about a chosen axis.
 - **Camera**: right-drag orbits, middle-drag (or `Shift`+right) pans, wheel /
   `W`/`S` zoom, `Home` recenters; the **Views** panel and numpad `1`/`3`/`7`
   snap to axis views (`Ctrl` for the opposite face).
 - **Edit**: `Ctrl+Z` undo, `Ctrl+Y` / `Ctrl+Shift+Z` redo.
-- **Reference image**: File ▸ Open reference image, or drag a PNG/BMP/JPG/GIF/
-  TGA/WEBP onto the window — pixel art becomes a flat 1-voxel-thick guide to
-  trace from (non-destructive; place/flip/hide it in the Reference panel).
+- **Reference image**: File ▸ Open reference image, drag a PNG/BMP/JPG/GIF/
+  TGA/WEBP onto the window, or **paste one from the clipboard** (`Ctrl+V` — e.g.
+  copied from a browser) — pixel art becomes a flat 1-voxel-thick guide to trace
+  from (non-destructive; place/scale/flip/hide it in the Reference panel).
   Dropping a `.kv6`/`.vox`/`.demiurg` opens it as the model (and a `.rkc` as a
   rig).
 - **Render**: CPU renderer by default (reliable everywhere); `--gpu` (or
@@ -86,9 +89,10 @@ pose it across keyframes, and export to roxlap's `.rkc` format.
 - **Start a rig**: File ▸ New rig (one root bone) or Convert to rig (wrap the
   current model as a one-bone rig). Opening a `.rkc` continues editing one.
 - **Rig sub-modes** (Rig panel): **Sculpt** edits the active bone's mesh with the
-  normal voxel tools; **Skeleton** sets each bone's joint, parent and rotation
-  axis (drag a bone in the viewport to position it); **Animate** previews and
-  poses the clip.
+  normal voxel tools (and "Extract to bone" carves a selection out into a new
+  child bone — the quick way to slice a model into a skeleton); **Skeleton** sets
+  each bone's joint, parent, rotation axis and mesh pivot (drag a bone, or its
+  pivot, in the viewport); **Animate** previews and poses the clip.
 - **Posing** (Animate mode): click a bone to select it, then left-drag in the
   viewport to transform it on the selected keyframe. `R` / `G` / `S` switch the
   gizmo between **rotate** (trackball / ring), **move** and **scale**.

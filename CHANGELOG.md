@@ -7,6 +7,36 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-23
+
+Rigging quality-of-life: slice a model into a skeleton faster, place each bone's
+pivot where it belongs, and bring reference art in from anywhere.
+
+### Added
+
+- **Extract a selection into a child bone** — in a rig's Sculpt mode, select a
+  region and "Extract to bone" carves it out of the current mesh into a new child
+  bone, left exactly where it was. Its joint defaults to the centre of the cut,
+  so it rotates about where it joins (a shoulder / hip). The fast way to slice a
+  whole model into a skeleton.
+- **Edit a bone's mesh pivot in Skeleton mode** — the point a bone's mesh sits on
+  and rotates about is now editable while the skeleton is in view: numeric X/Y/Z
+  fields + Center, or a "Move pivot" toggle to drag the mesh against its joint.
+- **Rotate the selection 90°** — a Rotate panel turns the selected voxels a
+  quarter turn clockwise or counter-clockwise about a chosen X/Y/Z axis. The
+  result floats so it can be nudged into place before it settles.
+- **Paste a reference image from the clipboard** (`Ctrl+V`, or the Reference
+  panel button) — copy an image in a browser or any app and paste it straight in
+  as a tracing guide, since a browser can't drop one onto the window.
+- **Scale a reference image** — a Scale control sizes a guide to the model
+  without re-importing it.
+
+### Fixed
+
+- A bone's voxels could suddenly be replaced by another bone's (most visibly an
+  extracted bone reverting to the one it was cut from) when the background
+  autosave fired while a different bone was selected in Skeleton or Animate.
+
 ## [0.5.0] - 2026-06-22
 
 Skeletal animation (preview): rig a model into bones and animate it with
