@@ -185,40 +185,34 @@ impl ModelView {
         anginc: f32,
     ) -> Vec<u32> {
         use roxlap_core::OpticastSettings;
-        use roxlap_core::rasterizer::ScratchPool;
+        use roxlap_scene::render::{CpuFog, render_scene_composed};
 
         let cam = camera.to_roxlap();
         let pixels = (width as usize) * (height as usize);
         let mut fb = vec![sky_color; pixels];
         let mut zb = vec![f32::INFINITY; pixels];
 
-        // anginc < 1 casts ~1/anginc more rays than pixels, so the radar /
-        // angstart scratch (sized ~per-pixel) must be inflated to match, or
-        // hrend indexes out of bounds. Cap the oversample so the buffers
-        // stay a sane size.
-        // `anginc.clamp(0.125, 1.0)` makes the reciprocal a finite positive in
-        // 1.0..=8.0, so the ceil-to-u32 can't truncate or lose a sign.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let oversample = (1.0 / anginc.clamp(0.125, 1.0)).ceil() as u32;
-        let pool_xres = width.saturating_mul(oversample).saturating_add(8);
-        let mut pool = ScratchPool::new(pool_xres, height, roxlap_scene::CHUNK_SIZE_XY);
-        pool.set_skycast(i32::from_ne_bytes(sky_color.to_ne_bytes()), 0);
-        pool.set_fog(0, 0);
-        pool.set_treat_z_max_as_air(true);
-        let [top, bot, left, right, up, down] = side_shades;
-        pool.set_side_shades(top, bot, left, right, up, down);
-
         let mut settings = OpticastSettings::for_oracle_framebuffer(width, height);
         // Ray-plane density: anginc < 1 supersamples the angular fan
         // (more ray planes), anginc > 1 coarsens it. 1.0 is the baseline.
         settings.anginc = anginc.max(0.05);
-        roxlap_scene::render::render_scene_composed(
+
+        // The DDA scratch pool is owned by the renderer now (roxlap RF.1); we
+        // pass per-frame fog + per-face shading by value instead. Fog is off
+        // (matches the old `pool.set_fog(0, 0)`); `sky_color` carries the
+        // skycast colour, and `treat_z_max_as_air` is the renderer default.
+        let fog = CpuFog {
+            color: sky_color & 0x00FF_FFFF,
+            max_scan_dist: 0,
+            side_shades,
+        };
+        render_scene_composed(
             &mut fb,
             &mut zb,
             width as usize,
             width,
             height,
-            &mut pool,
+            fog,
             &mut self.scene,
             &cam,
             &settings,

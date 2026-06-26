@@ -49,7 +49,6 @@ use demiurg_view::{
     AXIS_COLORS, KfaView, Line3, ModelView, OrbitCamera, PickHit, RenderMode, ViewDir, pick_voxel,
 };
 use roxlap_core::opticast::OpticastSettings;
-use roxlap_core::sprite::SpriteLighting;
 use roxlap_render::{
     FrameParams, ImageFacing, ImageId, ImageSprite, RenderOptions, SceneRenderer, egui,
 };
@@ -64,9 +63,6 @@ use winit::window::{Window, WindowId};
 /// Packed `0x00RRGGBB` sky/clear colour — a calm muted slate-blue: light
 /// enough to read as sky, not the glaring cyan it started as.
 const SKY_COLOR: u32 = 0x005a_6b7a;
-/// Sprite material colour (`R==G==B` so the cheap shading path applies);
-/// a darker grey keeps the model from rendering blown-out bright.
-const SPRITE_MATERIAL: u32 = 0x0080_8080;
 /// Default canvas size for a new model.
 const NEW_DIMS: u32 = 32;
 /// The render mode the editor opens in — the voxel grid, whose per-face
@@ -4872,15 +4868,9 @@ impl App {
         // Live ray-plane density (CPU backend); `[` / `]` adjust it.
         settings.anginc = self.editor.anginc;
         // Lit (lightmode 1) by default for directional shading; the View
-        // menu can switch it to flat (lightmode 0). `R==G==B` material
-        // takes the cheap shading path either way.
-        let sprite_lighting = SpriteLighting {
-            kv6col: SPRITE_MATERIAL,
-            lightmode: u32::from(self.editor.lighting),
-            lights: &[],
-        };
-        // Per-face shading applies to the voxel-grid render only (the
-        // sprite path shades per voxel, not per face).
+        // menu can switch it to flat (no per-face shading). Sprites are now
+        // drawn flat-lit by the renderer (roxlap RF.1 dropped host-supplied
+        // sprite lighting), so the toggle only affects the voxel-grid render.
         let side_shades = match self.editor.render_mode {
             RenderMode::Voxel if self.editor.lighting => VOXEL_SIDE_SHADES,
             _ => [0; 6],
@@ -4895,7 +4885,7 @@ impl App {
             gpu_mip_scan_dist: 64.0,
             gpu_max_outer_steps: 64,
             gpu_fov_y_rad: 1.2,
-            sprite_lighting: Some(&sprite_lighting),
+            draw_sprites: true,
             side_shades,
         };
 

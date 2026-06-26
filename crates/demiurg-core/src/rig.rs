@@ -6,7 +6,9 @@
 //! The editor edits a [`Rig`] (one [`VoxelModel`] per bone, with the
 //! existing tools); rendering and saving go through [`Rig::to_character`].
 
-use roxlap_formats::character::{self, Bone as CharBone, Character, Clip, ClipData, MeshRef};
+use roxlap_formats::character::{
+    self, Attachment, Bone as CharBone, Character, Clip, ClipData, MeshRef,
+};
 use roxlap_formats::kfa::{Hinge, Point3, Seq};
 use roxlap_formats::xform::BoneXform;
 
@@ -57,8 +59,10 @@ pub struct Keyframe {
 }
 
 impl Rig {
-    /// Compile to an engine [`Character`]: each bone's mesh becomes a `KV6`
-    /// (one mesh per bone, referenced `MeshRef::Static(i)`).
+    /// Compile to an engine [`Character`]: each bone's mesh becomes a `KV6`,
+    /// carried as a single static attachment (`MeshRef::Static(i)` at the
+    /// identity offset — the editor models one static mesh per bone; the
+    /// engine's animated voxel clips aren't authored here yet).
     #[must_use]
     pub fn to_character(&self) -> Character {
         let meshes = self.bones.iter().map(|b| b.model.to_kv6()).collect();
@@ -68,7 +72,7 @@ impl Rig {
             .enumerate()
             .map(|(i, b)| CharBone {
                 name: b.name.clone(),
-                mesh: MeshRef::Static(i),
+                attachments: vec![Attachment::static_mesh(i)],
                 hinge: b.hinge,
             })
             .collect();
@@ -78,28 +82,42 @@ impl Rig {
             meshes,
             bones,
             clips: self.clips.clone(),
+            voxel_clips: Vec::new(),
             extra_chunks: Vec::new(),
         }
     }
 
-    /// Build from an engine [`Character`], decompiling each bone's `KV6` to
-    /// an editable [`VoxelModel`].
+    /// Build from an engine [`Character`], decompiling each bone's first
+    /// static-mesh attachment to an editable [`VoxelModel`].
+    ///
+    /// The editor models a single static mesh per bone, so only the first
+    /// [`MeshRef::Static`] attachment is loaded; a bone that draws only an
+    /// animated voxel clip (or nothing) gets an empty editable mesh.
     ///
     /// # Errors
-    /// A message if a bone's static mesh index is out of range.
+    /// A message if a static attachment's mesh index is out of range.
     pub fn from_character(c: &Character) -> Result<Self, String> {
         let bones = c
             .bones
             .iter()
             .map(|b| {
-                let MeshRef::Static(i) = b.mesh;
-                let kv6 = c
-                    .meshes
-                    .get(i)
-                    .ok_or_else(|| format!("bone {:?}: mesh index {i} out of range", b.name))?;
+                let mesh_id = b.attachments.iter().find_map(|a| match a.target {
+                    MeshRef::Static(i) => Some(i),
+                    MeshRef::Clip(_) => None,
+                });
+                let model = match mesh_id {
+                    Some(i) => {
+                        let kv6 = c.meshes.get(i).ok_or_else(|| {
+                            format!("bone {:?}: mesh index {i} out of range", b.name)
+                        })?;
+                        VoxelModel::from_kv6(kv6)
+                    }
+                    // Pure-transform / clip-only bone: an empty editable mesh.
+                    None => VoxelModel::new(1, 1, 1),
+                };
                 Ok(RigBone {
                     name: b.name.clone(),
-                    model: VoxelModel::from_kv6(kv6),
+                    model,
                     hinge: b.hinge,
                 })
             })

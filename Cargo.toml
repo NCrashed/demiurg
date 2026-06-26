@@ -29,10 +29,14 @@ demiurg-core = { path = "crates/demiurg-core", version = "0.6.0" }
 demiurg-i18n = { path = "crates/demiurg-i18n", version = "0.6.0" }
 demiurg-view = { path = "crates/demiurg-view", version = "0.6.0" }
 
-# demiurg depends on roxlap ONLY (see DESIGN.md §1). crates.io 0.13.0 adds the
-# `roxlap_formats::character` rigged-character container (TRS keyframes) the
-# KFA-animation editor needs, on top of the 0.12 kv6 normals / .vxl export /
-# draw_lines / image sprites.
+# demiurg depends on roxlap ONLY (see DESIGN.md §1).
+#
+# TEMPORARILY pinned to the LOCAL roxlap checkout (master, 0.14.0) while we
+# adapt the editor to its new animated-clips API and renderer: we co-develop
+# the engine and the editor together until the API settles, then bump roxlap,
+# publish it, and restore version pins here before releasing demiurg.
+# (Published baseline is crates.io 0.13.0 — the `roxlap_formats::character`
+# rigged-character container with TRS keyframes.)
 #
 # roxlap-formats: kv6/character/kfa read/write + shaded surface extraction.
 # roxlap-core:    Camera, OpticastSettings, SpriteLighting, kfa_draw.
@@ -40,10 +44,10 @@ demiurg-view = { path = "crates/demiurg-view", version = "0.6.0" }
 # roxlap-render:  unified CPU/GPU facade (SceneRenderer, draw_lines, sprites,
 #                 image sprites, set_kfa_sprites/update_kfa_poses).
 # roxlap-voxvideo lands at M5.
-roxlap-formats = "0.13.0"
-roxlap-core = "0.13.0"
-roxlap-scene = "0.13.0"
-roxlap-render = "0.13.0"
+roxlap-formats = { path = "../roxlap/crates/roxlap-formats" }
+roxlap-core = { path = "../roxlap/crates/roxlap-core" }
+roxlap-scene = { path = "../roxlap/crates/roxlap-scene" }
+roxlap-render = { path = "../roxlap/crates/roxlap-render" }
 
 # Render-side world math (f64 orbit camera). Mirrors roxlap's pin so
 # the workspaces share one glam.
