@@ -31,7 +31,7 @@ pub mod rig;
 pub mod vox;
 
 pub use edit::Document;
-pub use rig::{KeyXform, Keyframe, Quat, Rig, RigBone};
+pub use rig::{KeyXform, Keyframe, Quat, Rig, RigAttachment, RigBone};
 
 /// A dense, editable voxel model: the in-memory document the editor
 /// mutates and previews.

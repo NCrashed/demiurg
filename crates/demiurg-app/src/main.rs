@@ -356,6 +356,27 @@ struct PivotDrag {
     basis: [[f64; 3]; 3],
 }
 
+/// An in-progress drag of an extra attachment's offset (Skeleton mode, "Move
+/// attachment"): slides the attachment in a screen-parallel plane through its
+/// posed position. The world delta maps into the bone's world basis and is
+/// added to `offset.t` (the offset translation lives in the bone's frame).
+struct AttachDrag {
+    /// Bone the attachment hangs off (index into `rig.bones`).
+    bone: usize,
+    /// Which extra (index into `bone.extras`).
+    extra: usize,
+    /// Drag plane through the attachment's posed position + its (unit) normal.
+    plane_point: [f64; 3],
+    plane_normal: [f64; 3],
+    /// World point where the grab ray met the plane.
+    anchor: [f64; 3],
+    /// `offset.t` when the drag began.
+    base_t: [f32; 3],
+    /// The bone's world basis `[s, h, f]` at grab time, to map a world delta
+    /// into the bone-local frame the offset translation lives in.
+    basis: [[f64; 3]; 3],
+}
+
 /// An in-progress viewport translate drag (Animate, Translate gizmo): drags the
 /// active bone along one of its local axes, writing the selected key's
 /// translation. Pivot, axis and the base translation are frozen at grab time.
@@ -799,6 +820,10 @@ struct Editor {
     /// of moving the joint. Lets a mesh be aligned to its joint on a complex
     /// rig. Reset on a mode switch.
     pivot_move_mode: bool,
+    /// Skeleton mode: when on (and an extra attachment is active), a left-drag
+    /// slides that attachment's `offset` translation in the bone's frame, so an
+    /// accessory can be placed against the posed bone. Reset on a mode switch.
+    attach_move_mode: bool,
     /// Axis the "Rotate 90" selection op turns about (0/1/2 = X/Y/Z; default
     /// Z, the vertical/turntable axis). A pure editor preference.
     rotate_axis: usize,
@@ -913,6 +938,7 @@ impl Editor {
             active_attachment: 0,
             rig_mode: RigMode::Sculpt,
             pivot_move_mode: false,
+            attach_move_mode: false,
             rotate_axis: 2,
             gizmo_mode: GizmoMode::Rotate,
             anim_playing: true,
@@ -1351,6 +1377,7 @@ fn main() {
         ref_drag: None,
         bone_drag: None,
         pivot_drag: None,
+        attach_drag: None,
         rotate_drag: None,
         translate_drag: None,
         scale_drag: None,
@@ -1497,6 +1524,7 @@ struct App {
     ref_drag: Option<RefDrag>,
     bone_drag: Option<BoneDrag>,
     pivot_drag: Option<PivotDrag>,
+    attach_drag: Option<AttachDrag>,
     /// An in-progress viewport pose (Animate mode), else `None`.
     /// An in-progress viewport trackball rotate (Animate, Rotate gizmo).
     rotate_drag: Option<RotateDrag>,
@@ -2181,6 +2209,110 @@ impl App {
         self.editor.rig_commit_pending();
         if let Some(b) = self.editor.rig.as_mut().and_then(|r| r.bones.get_mut(bone)) {
             b.model.pivot = new;
+        }
+        self.editor.rig_dirty = true;
+    }
+
+    /// Begin dragging the active extra attachment's offset (Skeleton mode,
+    /// "Move attachment"): grab a screen-parallel plane through the
+    /// attachment's posed position and remember its `offset.t` + the bone's
+    /// world basis, so the drag slides it in the bone's frame.
+    fn begin_attach_drag(&mut self) {
+        let bone = self.editor.active_bone;
+        // Only an extra (attachment 1..) has an offset to move.
+        let Some(extra) = self.editor.active_attachment.checked_sub(1) else {
+            return;
+        };
+        let Some((o, d)) = self.bone_pointer_ray() else {
+            return;
+        };
+        let normal = self.camera.to_roxlap().forward;
+        let Some(kfa) = &self.kfa else {
+            return;
+        };
+        let Some((bp, [bs, bh, bf])) = kfa.limb_pose(bone) else {
+            return;
+        };
+        let off = match self
+            .editor
+            .rig
+            .as_ref()
+            .and_then(|r| r.bones.get(bone))
+            .and_then(|b| b.extras.get(extra))
+        {
+            Some(a) => a.offset,
+            None => return,
+        };
+        // The attachment's posed world position (bone transform ∘ offset).
+        let (_, _, _, pos) = compose_attachment(bs, bh, bf, bp, &off);
+        let plane_point = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
+        let Some(anchor) = ray_plane(o, d, plane_point, normal) else {
+            return;
+        };
+        let basis = [bs, bh, bf].map(|a| [f64::from(a[0]), f64::from(a[1]), f64::from(a[2])]);
+        self.editor.rig_begin_edit();
+        self.attach_drag = Some(AttachDrag {
+            bone,
+            extra,
+            plane_point,
+            plane_normal: normal,
+            anchor,
+            base_t: off.t,
+            basis,
+        });
+    }
+
+    /// Update an attachment drag: move the attachment to follow the cursor in
+    /// its plane by adding the world delta (mapped into the bone's basis) to
+    /// `offset.t`.
+    #[allow(clippy::cast_possible_truncation)] // world deltas are small
+    fn update_attach_drag(&mut self) {
+        let Some(drag) = &self.attach_drag else {
+            return;
+        };
+        let (bone, extra, plane_point, normal, anchor, base_t, basis) = (
+            drag.bone,
+            drag.extra,
+            drag.plane_point,
+            drag.plane_normal,
+            drag.anchor,
+            drag.base_t,
+            drag.basis,
+        );
+        let Some((o, d)) = self.bone_pointer_ray() else {
+            return;
+        };
+        let Some(cur) = ray_plane(o, d, plane_point, normal) else {
+            return;
+        };
+        let wd = [cur[0] - anchor[0], cur[1] - anchor[1], cur[2] - anchor[2]];
+        // World delta -> bone-local (orthonormal basis ⇒ inverse is dots). The
+        // offset translation maps through the bone basis, so the attachment
+        // follows the cursor when the offset moves the same way (positive).
+        let new = [
+            base_t[0] + dot3(wd, basis[0]) as f32,
+            base_t[1] + dot3(wd, basis[1]) as f32,
+            base_t[2] + dot3(wd, basis[2]) as f32,
+        ];
+        let cur_t = self
+            .editor
+            .rig
+            .as_ref()
+            .and_then(|r| r.bones.get(bone))
+            .and_then(|b| b.extras.get(extra))
+            .map(|a| a.offset.t);
+        if cur_t == Some(new) {
+            return; // no movement: no undo step, no write
+        }
+        self.editor.rig_commit_pending();
+        if let Some(a) = self
+            .editor
+            .rig
+            .as_mut()
+            .and_then(|r| r.bones.get_mut(bone))
+            .and_then(|b| b.extras.get_mut(extra))
+        {
+            a.offset.t = new;
         }
         self.editor.rig_dirty = true;
     }
@@ -3005,15 +3137,20 @@ impl App {
             // edit — UNLESS the cursor is on a gizmo axis handle of the active
             // bone, which takes priority (so a handle overlapping another bone's
             // sprite is still grabbable, not a bone switch).
-            if !self.cursor_on_active_gizmo_axis() {
+            // "Move attachment" drags the active bone's attachment, so don't
+            // let a click switch bones out from under it.
+            if !self.editor.attach_move_mode && !self.cursor_on_active_gizmo_axis() {
                 if let Some(i) = self.pick_bone_screen() {
                     self.select_bone(i);
                 }
             }
             if self.editor.rig_mode == RigMode::Skeleton {
-                // "Move pivot" slides the mesh relative to its joint; otherwise
-                // the drag moves the joint itself.
-                if self.editor.pivot_move_mode {
+                // "Move attachment" slides the active extra's offset; "Move
+                // pivot" slides the mesh relative to its joint; otherwise the
+                // drag moves the joint itself.
+                if self.editor.attach_move_mode && self.editor.active_attachment > 0 {
+                    self.begin_attach_drag();
+                } else if self.editor.pivot_move_mode {
                     self.begin_pivot_drag();
                 } else {
                     self.begin_bone_drag();
@@ -3175,6 +3312,10 @@ impl App {
         if self.pivot_drag.take().is_some() {
             self.editor.rig_pending = None; // drop an uncommitted select-only grab
             return; // mesh pivot moved
+        }
+        if self.attach_drag.take().is_some() {
+            self.editor.rig_pending = None;
+            return; // attachment offset moved
         }
         if self.rotate_drag.take().is_some() {
             // A click that never moved leaves an uncommitted pre-edit snapshot;
@@ -4251,7 +4392,9 @@ impl App {
         }
         self.editor.rig_mode = mode;
         self.editor.pivot_move_mode = false; // a per-Skeleton toggle; reset on switch
+        self.editor.attach_move_mode = false;
         self.pivot_drag = None;
+        self.attach_drag = None;
         if mode == RigMode::Sculpt {
             self.kfa = None;
             self.load_active_bone(true); // restores the active bone + camera
@@ -4714,12 +4857,13 @@ impl App {
         self.load_active_bone(true);
     }
 
-    /// Switch which attachment of the active bone Sculpt edits (`0` = primary,
-    /// `1..` = an extra). Commits the current attachment's edits first, then
-    /// loads the chosen one's mesh. No-op outside Sculpt or for an out-of-range
-    /// index.
+    /// Switch which attachment of the active bone is active (`0` = primary,
+    /// `1..` = an extra). In Sculpt this swaps the working mesh (commit the
+    /// current, load the chosen); in Skeleton / Animate it only records the
+    /// choice (used to pick which extra the "Move attachment" drag targets).
+    /// No-op for an out-of-range index.
     fn select_attachment(&mut self, i: usize) {
-        if self.editor.rig_mode != RigMode::Sculpt || i == self.editor.active_attachment {
+        if i == self.editor.active_attachment {
             return;
         }
         let count = self
@@ -4729,6 +4873,10 @@ impl App {
             .and_then(|r| r.bones.get(self.editor.active_bone))
             .map_or(0, RigBone::attachment_count);
         if i >= count {
+            return;
+        }
+        if self.editor.rig_mode != RigMode::Sculpt {
+            self.editor.active_attachment = i;
             return;
         }
         self.commit_active_bone();
@@ -5043,7 +5191,9 @@ impl App {
                 renderer.drop_image(id);
             }
             if let Some(r) = &self.editor.reference {
-                self.ref_image = Some(renderer.upload_image(r.rgba(), r.width, r.height));
+                // `upload_image` is fallible (roxlap); `None` just leaves the
+                // reference undrawn this frame.
+                self.ref_image = renderer.upload_image(r.rgba(), r.width, r.height);
             }
             self.editor.ref_image_dirty = false;
         }
@@ -5410,6 +5560,9 @@ impl ApplicationHandler for App {
                 }
                 if self.pivot_drag.is_some() {
                     self.update_pivot_drag();
+                }
+                if self.attach_drag.is_some() {
+                    self.update_attach_drag();
                 }
                 if self.rotate_drag.is_some() {
                     self.update_rotate_drag();

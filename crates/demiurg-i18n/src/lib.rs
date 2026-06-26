@@ -86,6 +86,7 @@ pub enum Msg {
     Pivot,
     CenterPivot,
     MovePivot,
+    MoveAttachment,
     Size,
     Crop,
     Resize,
@@ -201,7 +202,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 121] = [
+    pub const ALL: [Msg; 122] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -225,6 +226,7 @@ impl Msg {
         Msg::Pivot,
         Msg::CenterPivot,
         Msg::MovePivot,
+        Msg::MoveAttachment,
         Msg::Size,
         Msg::Crop,
         Msg::Resize,
@@ -361,6 +363,7 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Pivot => "Pivot",
         Msg::CenterPivot => "Center",
         Msg::MovePivot => "Move pivot",
+        Msg::MoveAttachment => "Move attachment",
         Msg::Size => "Size",
         Msg::Crop => "Crop to content",
         Msg::Resize => "Resize",
@@ -490,6 +493,7 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Pivot => "Опорная точка",
         Msg::CenterPivot => "По центру",
         Msg::MovePivot => "Двигать опору",
+        Msg::MoveAttachment => "Двигать привязку",
         Msg::Size => "Размер",
         Msg::Crop => "Обрезать по содержимому",
         Msg::Resize => "Изменить размер",

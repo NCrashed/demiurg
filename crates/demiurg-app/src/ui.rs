@@ -1111,6 +1111,8 @@ fn reaches(parents: &[i32], start: i32, child: usize) -> bool {
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss
 )] // bone counts + mesh dims are tiny
+#[allow(clippy::too_many_lines)] // a flat builder of the skeleton sections
+#[allow(clippy::many_single_char_names)] // x/y/z + b/c begin-changed pairs
 fn skeleton_panel(
     ui: &mut egui::Ui,
     editor: &mut Editor,
@@ -1214,6 +1216,45 @@ fn skeleton_panel(
     ui.checkbox(&mut editor.pivot_move_mode, t(Msg::MovePivot))
         .on_hover_text(t(Msg::MovePivot));
 
+    // Extra attachments: pick which one the "Move attachment" drag targets and
+    // tune its offset against the posed view. Only when the bone has extras.
+    let attach_count = editor
+        .rig
+        .as_ref()
+        .and_then(|r| r.bones.get(active))
+        .map_or(1, demiurg_core::RigBone::attachment_count);
+    if attach_count > 1 {
+        ui.separator();
+        ui.label(t(Msg::Attachments));
+        let cur = editor.active_attachment;
+        ui.horizontal_wrapped(|ui| {
+            for i in 0..attach_count {
+                let label = if i == 0 {
+                    t(Msg::PrimaryMesh).to_string()
+                } else {
+                    format!("{} {i}", t(Msg::Attachment))
+                };
+                if ui.selectable_label(i == cur, label).clicked() {
+                    actions.select_attachment = Some(i);
+                }
+            }
+        });
+        ui.checkbox(&mut editor.attach_move_mode, t(Msg::MoveAttachment))
+            .on_hover_text(t(Msg::MoveAttachment));
+        if cur > 0 {
+            if let Some(att) = editor
+                .rig
+                .as_mut()
+                .and_then(|r| r.bones.get_mut(active))
+                .and_then(|b| b.extras.get_mut(cur - 1))
+            {
+                let (b, c) = attachment_offset_fields(ui, att, t);
+                begin |= b;
+                changed |= c;
+            }
+        }
+    }
+
     if begin {
         actions.rig_edit_begin = true;
     }
@@ -1296,22 +1337,11 @@ fn attachments_panel(
             .and_then(|r| r.bones.get_mut(active_bone))
             .and_then(|b| b.extras.get_mut(active - 1))
         {
-            let (b0, c0) = vec3_drag_row(ui, t(Msg::Translation), &mut att.offset.t, 0.5);
-            // Rotation as Euler degrees (gimbal-limited near ±90° pitch).
-            let mut euler = att.offset.r.to_euler().map(f32::to_degrees);
-            let (b1, c1) = vec3_drag_row(ui, t(Msg::Rotation), &mut euler, 1.0);
-            if c1 {
-                att.offset.r = Quat::from_euler(
-                    euler[0].to_radians(),
-                    euler[1].to_radians(),
-                    euler[2].to_radians(),
-                );
-            }
-            let (b2, c2) = vec3_drag_row(ui, t(Msg::Scale), &mut att.offset.s, 0.01);
-            if b0 || b1 || b2 {
+            let (begin, changed) = attachment_offset_fields(ui, att, t);
+            if begin {
                 actions.rig_edit_begin = true;
             }
-            if c0 || c1 || c2 {
+            if changed {
                 actions.rig_edit_changed = true;
                 rebuild = true;
             }
@@ -1320,6 +1350,30 @@ fn attachments_panel(
     if rebuild {
         editor.rig_dirty = true;
     }
+}
+
+/// Numeric editor for an attachment's local offset — translate / rotate
+/// (Euler degrees) / scale rows. Returns `(begin, changed)` (one undo step per
+/// drag). Shared by the Sculpt attachments panel and the Skeleton "Move
+/// attachment" controls.
+fn attachment_offset_fields(
+    ui: &mut egui::Ui,
+    att: &mut demiurg_core::RigAttachment,
+    t: &impl Fn(Msg) -> &'static str,
+) -> (bool, bool) {
+    let (b0, c0) = vec3_drag_row(ui, t(Msg::Translation), &mut att.offset.t, 0.5);
+    // Rotation as Euler degrees (gimbal-limited near ±90° pitch).
+    let mut euler = att.offset.r.to_euler().map(f32::to_degrees);
+    let (b1, c1) = vec3_drag_row(ui, t(Msg::Rotation), &mut euler, 1.0);
+    if c1 {
+        att.offset.r = Quat::from_euler(
+            euler[0].to_radians(),
+            euler[1].to_radians(),
+            euler[2].to_radians(),
+        );
+    }
+    let (b2, c2) = vec3_drag_row(ui, t(Msg::Scale), &mut att.offset.s, 0.01);
+    (b0 || b1 || b2, c0 || c1 || c2)
 }
 
 /// The voxel-editing tools — shown in plain Model mode and in Rig ▸ Sculpt
