@@ -58,6 +58,55 @@ pub struct RigAttachment {
     pub offset: BoneXform,
 }
 
+impl RigBone {
+    /// Number of attachments: the primary mesh plus every extra.
+    #[must_use]
+    pub fn attachment_count(&self) -> usize {
+        1 + self.extras.len()
+    }
+
+    /// The mesh of attachment `i` — `0` is the primary [`Self::model`], `1..`
+    /// index into [`Self::extras`]. `None` if out of range.
+    #[must_use]
+    pub fn attachment_model(&self, i: usize) -> Option<&VoxelModel> {
+        if i == 0 {
+            Some(&self.model)
+        } else {
+            self.extras.get(i - 1).map(|e| &e.model)
+        }
+    }
+
+    /// Mutable [`Self::attachment_model`].
+    pub fn attachment_model_mut(&mut self, i: usize) -> Option<&mut VoxelModel> {
+        if i == 0 {
+            Some(&mut self.model)
+        } else {
+            self.extras.get_mut(i - 1).map(|e| &mut e.model)
+        }
+    }
+
+    /// Append a new extra attachment (a small default mesh at the identity
+    /// offset) and return its attachment index (`attachment_count() - 1`).
+    pub fn add_extra(&mut self) -> usize {
+        self.extras.push(RigAttachment {
+            model: default_bone_model(),
+            offset: BoneXform::IDENTITY,
+        });
+        self.attachment_count() - 1
+    }
+
+    /// Remove extra attachment `i` (an attachment index `1..`). Returns
+    /// `false` for the primary (`0`) or an out-of-range index — the primary
+    /// can't be removed.
+    pub fn remove_extra(&mut self, i: usize) -> bool {
+        if i == 0 || i > self.extras.len() {
+            return false;
+        }
+        self.extras.remove(i - 1);
+        true
+    }
+}
+
 /// One animation keyframe in **normalized** form: an absolute timestamp and a
 /// full-skeleton pose (one [`BoneXform`] per bone — translation, quaternion
 /// rotation, scale).

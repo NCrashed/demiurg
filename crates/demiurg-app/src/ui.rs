@@ -84,6 +84,13 @@ pub struct UiActions {
     pub export_rkc: bool,
     /// Switch the active rig bone (index into `rig.bones`).
     pub select_bone: Option<usize>,
+    /// Switch the active attachment of the active bone (`0` = primary mesh,
+    /// `1..` = an extra).
+    pub select_attachment: Option<usize>,
+    /// Add a new extra attachment to the active bone.
+    pub add_attachment: bool,
+    /// Remove the active (extra) attachment from the active bone.
+    pub remove_attachment: bool,
     /// Append a new bone as a child of the active bone.
     pub add_bone: bool,
     /// Append a 3-axis (ball) joint under the active bone.
@@ -1216,6 +1223,105 @@ fn skeleton_panel(
     }
 }
 
+/// One labelled row of three axis-coloured `DragValue`s editing `v`. Returns
+/// `(begin, changed)`: `begin` = an interaction started this frame (capture the
+/// pre-edit undo snapshot), `changed` = a value actually moved.
+fn vec3_drag_row(ui: &mut egui::Ui, label: &str, v: &mut [f32; 3], speed: f64) -> (bool, bool) {
+    let (mut begin, mut changed) = (false, false);
+    ui.horizontal(|ui| {
+        ui.label(label);
+        for (axis, c) in v.iter_mut().enumerate() {
+            ui.colored_label(axis_color(axis), ["x", "y", "z"][axis]);
+            let r = ui.add(egui::DragValue::new(c).speed(speed));
+            begin |= r.drag_started() || r.gained_focus();
+            changed |= r.changed();
+        }
+    });
+    (begin, changed)
+}
+
+/// The Attachments section (Rig ▸ Sculpt): pick which of the active bone's
+/// meshes to sculpt — the primary mesh or an extra attachment — add / remove
+/// extras, and set the active extra's local offset (translate / rotate /
+/// scale) in the bone's frame. Selection / add / remove are deferred to the
+/// host (they swap the working mesh); the offset mutates the rig directly,
+/// one undo step per field drag (the inline begin/commit-pending pair).
+fn attachments_panel(
+    ui: &mut egui::Ui,
+    editor: &mut Editor,
+    actions: &mut UiActions,
+    t: &impl Fn(Msg) -> &'static str,
+) {
+    let active_bone = editor.active_bone;
+    let active = editor.active_attachment;
+    let Some(count) = editor
+        .rig
+        .as_ref()
+        .and_then(|r| r.bones.get(active_bone))
+        .map(demiurg_core::RigBone::attachment_count)
+    else {
+        return;
+    };
+
+    ui.separator();
+    ui.label(t(Msg::Attachments));
+    for i in 0..count {
+        let label = if i == 0 {
+            t(Msg::PrimaryMesh).to_string()
+        } else {
+            format!("{} {i}", t(Msg::Attachment))
+        };
+        if ui.selectable_label(i == active, label).clicked() {
+            actions.select_attachment = Some(i);
+        }
+    }
+    ui.horizontal(|ui| {
+        if ui.button(t(Msg::AddAttachment)).clicked() {
+            actions.add_attachment = true;
+        }
+        if ui
+            .add_enabled(active > 0, egui::Button::new(t(Msg::Remove)))
+            .clicked()
+        {
+            actions.remove_attachment = true;
+        }
+    });
+
+    // The active extra's local offset (the primary is fixed at identity).
+    let mut rebuild = false;
+    if active > 0 {
+        if let Some(att) = editor
+            .rig
+            .as_mut()
+            .and_then(|r| r.bones.get_mut(active_bone))
+            .and_then(|b| b.extras.get_mut(active - 1))
+        {
+            let (b0, c0) = vec3_drag_row(ui, t(Msg::Translation), &mut att.offset.t, 0.5);
+            // Rotation as Euler degrees (gimbal-limited near ±90° pitch).
+            let mut euler = att.offset.r.to_euler().map(f32::to_degrees);
+            let (b1, c1) = vec3_drag_row(ui, t(Msg::Rotation), &mut euler, 1.0);
+            if c1 {
+                att.offset.r = Quat::from_euler(
+                    euler[0].to_radians(),
+                    euler[1].to_radians(),
+                    euler[2].to_radians(),
+                );
+            }
+            let (b2, c2) = vec3_drag_row(ui, t(Msg::Scale), &mut att.offset.s, 0.01);
+            if b0 || b1 || b2 {
+                actions.rig_edit_begin = true;
+            }
+            if c0 || c1 || c2 {
+                actions.rig_edit_changed = true;
+                rebuild = true;
+            }
+        }
+    }
+    if rebuild {
+        editor.rig_dirty = true;
+    }
+}
+
 /// The voxel-editing tools — shown in plain Model mode and in Rig ▸ Sculpt
 /// (editing the active bone's mesh): tool picker, paint colour, symmetry,
 /// pivot, model size, selection, and the reference-image guide.
@@ -1247,6 +1353,12 @@ fn voxel_tools_panel(
     }
     if editor.tool == Tool::Sphere {
         ui.add(egui::Slider::new(&mut editor.radius, 0..=8).text(t(Msg::Radius)));
+    }
+
+    // Rig: which of the active bone's meshes the tools sculpt (primary or an
+    // extra attachment), plus add/remove + the extra's offset.
+    if editor.rig.is_some() {
+        attachments_panel(ui, editor, actions, t);
     }
 
     ui.separator();

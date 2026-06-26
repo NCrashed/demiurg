@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use demiurg_core::{Document, KeyXform, Quat, Rig, VoxelModel, project};
+use demiurg_core::{Document, KeyXform, Quat, Rig, RigBone, VoxelModel, project};
 use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{
     AXIS_COLORS, KfaView, Line3, ModelView, OrbitCamera, PickHit, RenderMode, ViewDir, pick_voxel,
@@ -785,6 +785,10 @@ struct Editor {
     /// The bone whose mesh `document` currently edits (index into
     /// `rig.bones`). Meaningless when `rig` is `None`.
     active_bone: usize,
+    /// Which attachment of [`Self::active_bone`] `document` edits: `0` is the
+    /// primary mesh, `1..` index the bone's `extras`. Reset to `0` on a bone
+    /// switch. Sculpt loads / commits this attachment's mesh.
+    active_attachment: usize,
     /// Which aspect of the rig is being edited (Sculpt / Skeleton /
     /// Animate). Meaningless when `rig` is `None`.
     rig_mode: RigMode,
@@ -834,10 +838,11 @@ struct Editor {
 }
 
 /// One whole-rig undo entry: the rig (every bone's mesh + hinge, clips, root)
-/// and which bone was active, captured before an edit.
+/// and which bone + attachment was active, captured before an edit.
 struct RigSnapshot {
     rig: Rig,
     active_bone: usize,
+    active_attachment: usize,
 }
 
 /// Cap on the rig undo/redo depth (each entry clones the whole rig).
@@ -903,6 +908,7 @@ impl Editor {
             ref_image_dirty: false,
             rig: None,
             active_bone: 0,
+            active_attachment: 0,
             rig_mode: RigMode::Sculpt,
             pivot_move_mode: false,
             rotate_axis: 2,
@@ -927,14 +933,32 @@ impl Editor {
     fn rig_state(&self) -> Option<RigSnapshot> {
         let mut rig = self.rig.clone()?;
         if self.rig_mode == RigMode::Sculpt {
-            if let Some(b) = rig.bones.get_mut(self.active_bone) {
-                b.model = self.document.model().clone();
+            if let Some(m) = rig
+                .bones
+                .get_mut(self.active_bone)
+                .and_then(|b| b.attachment_model_mut(self.active_attachment))
+            {
+                *m = self.document.model().clone();
             }
         }
         Some(RigSnapshot {
             rig,
             active_bone: self.active_bone,
+            active_attachment: self.active_attachment,
         })
+    }
+
+    /// Clamp `active_attachment` to the active bone's attachment count (after
+    /// a bone switch, a removal, or an undo that dropped extras).
+    fn clamp_active_attachment(&mut self) {
+        let count = self
+            .rig
+            .as_ref()
+            .and_then(|r| r.bones.get(self.active_bone))
+            .map_or(1, RigBone::attachment_count);
+        if self.active_attachment >= count {
+            self.active_attachment = count - 1;
+        }
     }
 
     /// Push a captured pre-edit snapshot onto the undo stack (clearing redo,
@@ -3537,6 +3561,8 @@ impl App {
     fn restore_rig_snapshot(&mut self, snap: RigSnapshot) {
         self.editor.rig = Some(snap.rig);
         self.editor.active_bone = snap.active_bone;
+        self.editor.active_attachment = snap.active_attachment;
+        self.editor.clamp_active_attachment();
         self.editor.rig_dirty = true; // rebuild the posed preview if showing
         if self.editor.rig_mode == RigMode::Sculpt {
             self.load_active_bone(false);
@@ -3707,6 +3733,15 @@ impl App {
         }
         if let Some(i) = a.select_bone {
             self.select_bone(i);
+        }
+        if let Some(i) = a.select_attachment {
+            self.select_attachment(i);
+        }
+        if a.add_attachment {
+            self.add_attachment();
+        }
+        if a.remove_attachment {
+            self.remove_attachment();
         }
         if a.add_bone {
             self.add_bone();
@@ -4189,6 +4224,7 @@ impl App {
     fn enter_rig(&mut self, rig: Rig) {
         self.editor.rig = Some(rig);
         self.editor.active_bone = 0;
+        self.editor.active_attachment = 0;
         self.editor.rig_mode = RigMode::Sculpt;
         self.editor.anim_playing = true;
         self.editor.active_clip = 0;
@@ -4614,7 +4650,13 @@ impl App {
         let Some(rig) = &self.editor.rig else {
             return;
         };
-        let model = rig.bones[self.editor.active_bone].model.clone();
+        // Load the active attachment's mesh (0 = primary, 1.. = an extra).
+        let model = rig
+            .bones
+            .get(self.editor.active_bone)
+            .and_then(|b| b.attachment_model(self.editor.active_attachment))
+            .cloned()
+            .unwrap_or_else(|| VoxelModel::new(1, 1, 1));
         self.editor.document.replace_model(model);
         self.view
             .set_model(self.editor.document.model(), self.editor.render_mode);
@@ -4642,10 +4684,14 @@ impl App {
         if self.editor.rig_mode != RigMode::Sculpt {
             return;
         }
-        if let Some(rig) = &mut self.editor.rig {
-            if let Some(bone) = rig.bones.get_mut(self.editor.active_bone) {
-                bone.model = self.editor.document.model().clone();
-            }
+        if let Some(m) = self
+            .editor
+            .rig
+            .as_mut()
+            .and_then(|r| r.bones.get_mut(self.editor.active_bone))
+            .and_then(|b| b.attachment_model_mut(self.editor.active_attachment))
+        {
+            *m = self.editor.document.model().clone();
         }
     }
 
@@ -4657,11 +4703,81 @@ impl App {
         }
         if self.editor.rig_mode != RigMode::Sculpt {
             self.editor.active_bone = i;
+            self.editor.active_attachment = 0;
             return;
         }
         self.commit_active_bone();
         self.editor.active_bone = i;
+        self.editor.active_attachment = 0; // a new bone starts on its primary mesh
         self.load_active_bone(true);
+    }
+
+    /// Switch which attachment of the active bone Sculpt edits (`0` = primary,
+    /// `1..` = an extra). Commits the current attachment's edits first, then
+    /// loads the chosen one's mesh. No-op outside Sculpt or for an out-of-range
+    /// index.
+    fn select_attachment(&mut self, i: usize) {
+        if self.editor.rig_mode != RigMode::Sculpt || i == self.editor.active_attachment {
+            return;
+        }
+        let count = self
+            .editor
+            .rig
+            .as_ref()
+            .and_then(|r| r.bones.get(self.editor.active_bone))
+            .map_or(0, RigBone::attachment_count);
+        if i >= count {
+            return;
+        }
+        self.commit_active_bone();
+        self.editor.active_attachment = i;
+        self.load_active_bone(false); // same bone, different mesh — keep the camera
+    }
+
+    /// Add a new extra attachment to the active bone and select it for
+    /// sculpting. One undo step. Sculpt mode only.
+    fn add_attachment(&mut self) {
+        if self.editor.rig.is_none() || self.editor.rig_mode != RigMode::Sculpt {
+            return;
+        }
+        self.editor.rig_checkpoint();
+        self.commit_active_bone(); // fold the current attachment's edits in first
+        let idx = self
+            .editor
+            .rig
+            .as_mut()
+            .and_then(|r| r.bones.get_mut(self.editor.active_bone))
+            .map(RigBone::add_extra);
+        if let Some(idx) = idx {
+            self.editor.active_attachment = idx;
+            self.load_active_bone(false);
+            self.editor.rig_dirty = true;
+        }
+    }
+
+    /// Remove the active attachment (an extra) from the active bone, falling
+    /// back to the previous one. The primary can't be removed. One undo step
+    /// (on success). Sculpt mode only.
+    fn remove_attachment(&mut self) {
+        if self.editor.rig_mode != RigMode::Sculpt || self.editor.active_attachment == 0 {
+            return;
+        }
+        let Some(snap) = self.editor.rig_state() else {
+            return;
+        };
+        let removed = self
+            .editor
+            .rig
+            .as_mut()
+            .and_then(|r| r.bones.get_mut(self.editor.active_bone))
+            .is_some_and(|b| b.remove_extra(self.editor.active_attachment));
+        if !removed {
+            return; // out of range: no checkpoint
+        }
+        self.editor.rig_push_undo(snap);
+        self.editor.active_attachment -= 1;
+        self.load_active_bone(false);
+        self.editor.rig_dirty = true;
     }
 
     /// Add a new bone as a child of the active bone and make it active.
@@ -4680,6 +4796,7 @@ impl App {
         let rig = self.editor.rig.as_mut().expect("rig present");
         let new_idx = rig.add_bone(parent);
         self.editor.active_bone = new_idx;
+        self.editor.active_attachment = 0; // new bone starts on its primary mesh
         self.editor.rig_dirty = true;
         if self.editor.rig_mode == RigMode::Sculpt {
             self.load_active_bone(true);
@@ -4704,6 +4821,7 @@ impl App {
             .expect("rig present")
             .add_axis_joint(parent);
         self.editor.active_bone = leaf;
+        self.editor.active_attachment = 0;
         self.editor.rig_dirty = true;
         if self.editor.rig_mode == RigMode::Sculpt {
             self.load_active_bone(true);
@@ -4748,6 +4866,7 @@ impl App {
         };
         self.editor.rig_push_undo(snap);
         self.editor.active_bone = new_idx;
+        self.editor.active_attachment = 0;
         self.editor.rig_dirty = true;
         if self.editor.rig_mode == RigMode::Sculpt {
             self.load_active_bone(true);
@@ -4777,6 +4896,7 @@ impl App {
             // A bone before the active one was removed — indices shifted down.
             self.editor.active_bone -= 1;
         }
+        self.editor.clamp_active_attachment(); // the active bone may have changed
         self.editor.rig_dirty = true;
         if self.editor.rig_mode == RigMode::Sculpt {
             self.load_active_bone(true);

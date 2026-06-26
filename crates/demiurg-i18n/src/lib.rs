@@ -132,6 +132,10 @@ pub enum Msg {
     ExportCharacter,
     Rig,
     Bones,
+    Attachments,
+    PrimaryMesh,
+    Attachment,
+    AddAttachment,
     AddBone,
     AxisJoint,
     DummyRoot,
@@ -197,7 +201,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 117] = [
+    pub const ALL: [Msg; 121] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -210,6 +214,10 @@ impl Msg {
         Msg::Radius,
         Msg::Colour,
         Msg::ModelColours,
+        Msg::Attachments,
+        Msg::PrimaryMesh,
+        Msg::Attachment,
+        Msg::AddAttachment,
         Msg::Mirror,
         Msg::Rotate,
         Msg::RotateCw,
@@ -342,6 +350,10 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Radius => "Radius",
         Msg::Colour => "Colour",
         Msg::ModelColours => "Colours in model",
+        Msg::Attachments => "Attachments",
+        Msg::PrimaryMesh => "Mesh (primary)",
+        Msg::Attachment => "Attachment",
+        Msg::AddAttachment => "+ Attachment",
         Msg::Mirror => "Mirror",
         Msg::Rotate => "Rotate 90",
         Msg::RotateCw => "Clockwise",
@@ -467,6 +479,10 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Radius => "Радиус",
         Msg::Colour => "Цвет",
         Msg::ModelColours => "Цвета модели",
+        Msg::Attachments => "Привязки",
+        Msg::PrimaryMesh => "Меш (основной)",
+        Msg::Attachment => "Привязка",
+        Msg::AddAttachment => "+ Привязка",
         Msg::Mirror => "Зеркало",
         Msg::Rotate => "Поворот 90",
         Msg::RotateCw => "По часовой",
