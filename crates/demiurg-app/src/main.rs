@@ -48,9 +48,11 @@ use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{
     AXIS_COLORS, KfaView, Line3, ModelView, OrbitCamera, PickHit, RenderMode, ViewDir, pick_voxel,
 };
+use roxlap_core::kfa_draw::compose_attachment;
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_render::{
-    FrameParams, ImageFacing, ImageId, ImageSprite, RenderOptions, SceneRenderer, egui,
+    DynSpriteTransform, FrameParams, ImageFacing, ImageId, ImageSprite, RenderOptions,
+    SceneRenderer, egui,
 };
 use ui::UiActions;
 use winit::application::ApplicationHandler;
@@ -5059,6 +5061,34 @@ impl App {
                 renderer.update_kfa_poses(kfa.kfas_mut());
             }
             None => renderer.set_kfa_sprites(&mut []),
+        }
+        // Each bone's extra attachments — the KFA limb path draws only the
+        // primary, so pose each extra from its bone's solved transform via
+        // `compose_attachment` (the same math `add_character` uses) and add it
+        // as a posed sprite. Re-registered every frame like the rig above
+        // (cheap for a preview's handful of small meshes).
+        if let (Some(kfa), Some(rig)) = (self.kfa.as_ref(), self.editor.rig.as_ref()) {
+            for (bi, bone) in rig.bones.iter().enumerate() {
+                if bone.extras.is_empty() {
+                    continue;
+                }
+                let Some((bp, [bs, bh, bf])) = kfa.limb_pose(bi) else {
+                    continue;
+                };
+                for ex in &bone.extras {
+                    let (s, h, f, pos) = compose_attachment(bs, bh, bf, bp, &ex.offset);
+                    let model = renderer.add_sprite_model(&ex.model.to_kv6());
+                    renderer.add_sprite_instance_posed(
+                        model,
+                        DynSpriteTransform {
+                            pos,
+                            right: s,
+                            up: h,
+                            forward: f,
+                        },
+                    );
+                }
+            }
         }
         renderer.render(self.view.scene_mut(), &camera, &frame);
         // Depth-tested editor gizmos land in the framebuffer; paint_egui
