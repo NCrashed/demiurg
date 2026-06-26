@@ -212,6 +212,7 @@ pub fn demo_rig() -> Rig {
                     htype: 0,
                     filler: [0; 7],
                 },
+                extras: Vec::new(),
             },
             RigBone {
                 name: "arm".to_string(),
@@ -225,6 +226,7 @@ pub fn demo_rig() -> Rig {
                     htype: 0,
                     filler: [0; 7],
                 },
+                extras: Vec::new(),
             },
         ],
         clips: vec![Clip {
@@ -332,6 +334,7 @@ mod tests {
             name: name.to_string(),
             model: VoxelModel::new(1, 1, 1), // empty: zero voxels -> invisible
             hinge: hinge(parent, v),
+            extras: Vec::new(),
         };
         let rig = Rig {
             name: "joint".to_string(),
@@ -344,6 +347,7 @@ mod tests {
                     name: "leaf".to_string(),
                     model: box_model(3, 3, 8, 0x80ff_ffff),
                     hinge: hinge(2, axis(0.0, 0.0, 1.0)),
+                    extras: Vec::new(),
                 },
             ],
             clips: vec![Clip {
