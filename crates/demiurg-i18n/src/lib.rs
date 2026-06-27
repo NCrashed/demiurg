@@ -146,6 +146,8 @@ pub enum Msg {
     PingPong,
     OnionSkin,
     ClipPadWarn,
+    AddClipLayer,
+    MakeClipLayer,
     Rig,
     Bones,
     Attachments,
@@ -218,7 +220,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 137] = [
+    pub const ALL: [Msg; 139] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -297,6 +299,8 @@ impl Msg {
         Msg::PingPong,
         Msg::OnionSkin,
         Msg::ClipPadWarn,
+        Msg::AddClipLayer,
+        Msg::MakeClipLayer,
         Msg::Rig,
         Msg::Bones,
         Msg::AddBone,
@@ -449,6 +453,8 @@ const fn en(msg: Msg) -> &'static str {
         Msg::PingPong => "Ping-pong",
         Msg::OnionSkin => "Onion skin",
         Msg::ClipPadWarn => "Bounding box dwarfs the content — crop to shrink the clip",
+        Msg::AddClipLayer => "+ Clip layer",
+        Msg::MakeClipLayer => "To clip",
         Msg::Rig => "Rig",
         Msg::Bones => "Bones",
         Msg::AddBone => "Add bone",
@@ -594,6 +600,8 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::PingPong => "Туда-обратно",
         Msg::OnionSkin => "Калька",
         Msg::ClipPadWarn => "Рамка намного больше содержимого — обрежьте для сжатия клипа",
+        Msg::AddClipLayer => "+ Слой-клип",
+        Msg::MakeClipLayer => "В клип",
         Msg::Rig => "Риг",
         Msg::Bones => "Кости",
         Msg::AddBone => "Добавить кость",

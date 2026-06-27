@@ -1031,7 +1031,21 @@ impl Editor {
     fn rig_state(&self) -> Option<RigSnapshot> {
         let mut rig = self.rig.clone()?;
         if self.rig_mode == RigMode::Sculpt {
-            if let Some(m) = rig
+            if let Some(clip) = &self.clip {
+                // Clip attachment: fold the live frame edit into a copy of the
+                // clip, then into the snapshot's attachment.
+                let mut clip = clip.clone();
+                if let Some(f) = clip.frames.get_mut(self.active_frame) {
+                    f.model = self.document.model().clone();
+                }
+                if let Some(slot) = rig
+                    .bones
+                    .get_mut(self.active_bone)
+                    .and_then(|b| b.attachment_clip_mut(self.active_attachment))
+                {
+                    *slot = clip;
+                }
+            } else if let Some(m) = rig
                 .bones
                 .get_mut(self.active_bone)
                 .and_then(|b| b.attachment_model_mut(self.active_attachment))
@@ -3817,7 +3831,16 @@ impl App {
     }
 
     fn do_undo(&mut self) {
-        if self.editor.rig.is_some() {
+        // While editing a clip (standalone or a clip attachment), Ctrl+Z undoes
+        // the per-frame voxel edits first; once those are exhausted it cascades
+        // to the whole-rig undo (e.g. to undo a "to clip" conversion).
+        if self.editor.clip.is_some() {
+            if self.editor.document.undo() {
+                self.editor.dirty = true;
+            } else if self.editor.rig.is_some() {
+                self.rig_undo();
+            }
+        } else if self.editor.rig.is_some() {
             self.rig_undo();
         } else if self.editor.document.undo() {
             self.editor.dirty = true;
@@ -3825,7 +3848,13 @@ impl App {
     }
 
     fn do_redo(&mut self) {
-        if self.editor.rig.is_some() {
+        if self.editor.clip.is_some() {
+            if self.editor.document.redo() {
+                self.editor.dirty = true;
+            } else if self.editor.rig.is_some() {
+                self.rig_redo();
+            }
+        } else if self.editor.rig.is_some() {
             self.rig_redo();
         } else if self.editor.document.redo() {
             self.editor.dirty = true;
@@ -4082,6 +4111,12 @@ impl App {
         }
         if a.add_attachment {
             self.add_attachment();
+        }
+        if a.add_clip_layer {
+            self.add_clip_layer();
+        }
+        if a.make_clip_layer {
+            self.make_active_attachment_clip();
         }
         if a.remove_attachment {
             self.remove_attachment();
@@ -4953,8 +4988,11 @@ impl App {
         self.attach_drag = None;
         if mode == RigMode::Sculpt {
             self.kfa = None;
-            self.load_active_bone(true); // restores the active bone + camera
+            self.load_active_bone(true); // restores the active bone + camera (+ clip)
         } else {
+            // Leaving Sculpt: a clip attachment was committed above; drop the
+            // editor's clip-editing state so its panel/timeline don't linger.
+            self.editor.clip = None;
             self.rebuild_rig_preview();
             if let Some(kfa) = &self.kfa {
                 self.camera = kfa.framing_camera();
@@ -5351,11 +5389,24 @@ impl App {
         let Some(rig) = &self.editor.rig else {
             return;
         };
+        let (bone, att) = (self.editor.active_bone, self.editor.active_attachment);
+        // A clip attachment is edited with the clip editor: pull a working copy
+        // into `Editor.clip` and load its first frame into `document`. A mesh
+        // attachment loads its mesh straight into `document` (clip cleared).
+        if let Some(clip) = rig.bones.get(bone).and_then(|b| b.attachment_clip(att)) {
+            self.editor.clip = Some(clip.clone());
+            self.editor.active_frame = 0;
+            self.editor.clip_time_ms = 0;
+            self.editor.anim_playing = false;
+            self.load_active_frame(reframe); // loads frame 0 + scene + onion + reframe
+            return;
+        }
+        self.editor.clip = None;
         // Load the active attachment's mesh (0 = primary, 1.. = an extra).
         let model = rig
             .bones
-            .get(self.editor.active_bone)
-            .and_then(|b| b.attachment_model(self.editor.active_attachment))
+            .get(bone)
+            .and_then(|b| b.attachment_model(att))
             .cloned()
             .unwrap_or_else(|| VoxelModel::new(1, 1, 1));
         self.editor.document.replace_model(model);
@@ -5385,12 +5436,30 @@ impl App {
         if self.editor.rig_mode != RigMode::Sculpt {
             return;
         }
+        let (bone, att) = (self.editor.active_bone, self.editor.active_attachment);
+        // Editing a clip attachment: fold the active frame's document edits into
+        // `Editor.clip`, then write that clip back into the attachment.
+        if self.editor.clip.is_some() {
+            self.commit_active_frame(); // document → Editor.clip.frames[active_frame]
+            if let Some(clip) = self.editor.clip.clone() {
+                if let Some(slot) = self
+                    .editor
+                    .rig
+                    .as_mut()
+                    .and_then(|r| r.bones.get_mut(bone))
+                    .and_then(|b| b.attachment_clip_mut(att))
+                {
+                    *slot = clip;
+                }
+            }
+            return;
+        }
         if let Some(m) = self
             .editor
             .rig
             .as_mut()
-            .and_then(|r| r.bones.get_mut(self.editor.active_bone))
-            .and_then(|b| b.attachment_model_mut(self.editor.active_attachment))
+            .and_then(|r| r.bones.get_mut(bone))
+            .and_then(|b| b.attachment_model_mut(att))
         {
             *m = self.editor.document.model().clone();
         }
@@ -5454,6 +5523,54 @@ impl App {
             .as_mut()
             .and_then(|r| r.bones.get_mut(self.editor.active_bone))
             .map(RigBone::add_extra);
+        if let Some(idx) = idx {
+            self.editor.active_attachment = idx;
+            self.load_active_bone(false);
+            self.editor.rig_dirty = true;
+        }
+    }
+
+    /// Turn the active attachment into an animated clip, seeding its first frame
+    /// from the current mesh, and enter clip editing on it. Sculpt only; one
+    /// undo step. No-op if the active attachment is already a clip.
+    fn make_active_attachment_clip(&mut self) {
+        if self.editor.rig.is_none()
+            || self.editor.rig_mode != RigMode::Sculpt
+            || self.editor.clip.is_some()
+        {
+            return;
+        }
+        self.editor.rig_checkpoint();
+        self.commit_active_bone(); // fold the current mesh edits in first
+        let seed = self.editor.document.model().clone();
+        let (bone, att) = (self.editor.active_bone, self.editor.active_attachment);
+        let ok = self
+            .editor
+            .rig
+            .as_mut()
+            .and_then(|r| r.bones.get_mut(bone))
+            .is_some_and(|b| b.set_attachment_clip(att, ClipDoc::from_model(seed)));
+        if ok {
+            self.load_active_bone(false); // enters clip editing on the new clip
+            self.editor.rig_dirty = true;
+        }
+    }
+
+    /// Add a new extra attachment that is an (empty) animated clip and enter
+    /// clip editing on it. Sculpt only; one undo step.
+    fn add_clip_layer(&mut self) {
+        if self.editor.rig.is_none() || self.editor.rig_mode != RigMode::Sculpt {
+            return;
+        }
+        self.editor.rig_checkpoint();
+        self.commit_active_bone();
+        let clip = ClipDoc::new([NEW_DIMS, NEW_DIMS, NEW_DIMS]);
+        let idx = self
+            .editor
+            .rig
+            .as_mut()
+            .and_then(|r| r.bones.get_mut(self.editor.active_bone))
+            .map(|b| b.add_clip_extra(clip));
         if let Some(idx) = idx {
             self.editor.active_attachment = idx;
             self.load_active_bone(false);

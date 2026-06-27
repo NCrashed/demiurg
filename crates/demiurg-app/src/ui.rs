@@ -115,6 +115,10 @@ pub struct UiActions {
     pub select_attachment: Option<usize>,
     /// Add a new extra attachment to the active bone.
     pub add_attachment: bool,
+    /// Add a new extra attachment that is an animated clip.
+    pub add_clip_layer: bool,
+    /// Turn the active attachment into an animated clip (seeded from its mesh).
+    pub make_clip_layer: bool,
     /// Remove the active (extra) attachment from the active bone.
     pub remove_attachment: bool,
     /// Append a new bone as a child of the active bone.
@@ -1557,6 +1561,12 @@ fn attachments_panel(
             actions.select_attachment = Some(i);
         }
     }
+    // Whether the active attachment already draws a clip (then "To clip" is off).
+    let active_is_clip = editor
+        .rig
+        .as_ref()
+        .and_then(|r| r.bones.get(active_bone))
+        .is_some_and(|b| b.attachment_is_clip(active));
     ui.horizontal(|ui| {
         if ui.button(t(Msg::AddAttachment)).clicked() {
             actions.add_attachment = true;
@@ -1566,6 +1576,19 @@ fn attachments_panel(
             .clicked()
         {
             actions.remove_attachment = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        if ui.button(t(Msg::AddClipLayer)).clicked() {
+            actions.add_clip_layer = true;
+        }
+        // Convert the active mesh attachment into an animated clip (seeded from
+        // its current mesh). Disabled if it's already a clip.
+        if ui
+            .add_enabled(!active_is_clip, egui::Button::new(t(Msg::MakeClipLayer)))
+            .clicked()
+        {
+            actions.make_clip_layer = true;
         }
     });
 

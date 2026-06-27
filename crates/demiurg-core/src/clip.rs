@@ -108,6 +108,24 @@ impl ClipDoc {
         }
     }
 
+    /// A single-frame clip whose first frame **is** `model` — turns a sculpted
+    /// mesh into a clip you can then extend frame by frame. Dims/pivot come from
+    /// the model.
+    #[must_use]
+    pub fn from_model(model: VoxelModel) -> Self {
+        let (x, y, z) = model.dims();
+        let pivot = model.pivot;
+        Self {
+            name: String::new(),
+            dims: [x, y, z],
+            pivot,
+            voxel_world_size: DEFAULT_VOXEL_WORLD_SIZE,
+            loop_mode: LoopMode::Loop,
+            default_frame_ms: DEFAULT_FRAME_MS,
+            frames: vec![ClipFrame::new(model)],
+        }
+    }
+
     /// Number of frames (always ≥ 1).
     #[must_use]
     pub fn frame_count(&self) -> usize {
@@ -441,6 +459,20 @@ mod tests {
         let f2 = clip.add_frame();
         clip.frames[f2].model.set(2, 0, 0, 0x8000_00ff);
         clip
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // pivot literals are exact in f32
+    fn from_model_seeds_a_single_frame_clip() {
+        // "Convert mesh to clip": the mesh becomes frame 0, dims/pivot follow.
+        let mut m = VoxelModel::new(5, 6, 7);
+        m.set(2, 3, 4, 0x80ab_cdef);
+        m.pivot = [1.0, 2.0, 3.0];
+        let clip = ClipDoc::from_model(m);
+        assert_eq!(clip.frame_count(), 1);
+        assert_eq!(clip.dims, [5, 6, 7]);
+        assert_eq!(clip.pivot, [1.0, 2.0, 3.0]);
+        assert_eq!(clip.frames[0].model.get(2, 3, 4), 0x80ab_cdef);
     }
 
     #[test]

@@ -184,6 +184,31 @@ impl RigBone {
         self.attachment_count() - 1
     }
 
+    /// Make attachment `i` (`0` = primary, `1..` = an extra) draw `clip` instead
+    /// of its mesh. The placeholder mesh is left in place (harmless). Returns
+    /// `false` for an out-of-range index.
+    pub fn set_attachment_clip(&mut self, i: usize, clip: ClipDoc) -> bool {
+        if i == 0 {
+            self.primary_clip = Some(clip);
+            true
+        } else if let Some(ex) = self.extras.get_mut(i - 1) {
+            ex.clip = Some(clip);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Append a new extra attachment that draws `clip` (at the identity offset)
+    /// and return its attachment index.
+    pub fn add_clip_extra(&mut self, clip: ClipDoc) -> usize {
+        let name = format!("layer {}", self.extras.len() + 1);
+        let mut att = RigAttachment::mesh(VoxelModel::new(1, 1, 1), BoneXform::IDENTITY, name);
+        att.clip = Some(clip);
+        self.extras.push(att);
+        self.attachment_count() - 1
+    }
+
     /// Remove extra attachment `i` (an attachment index `1..`). Returns
     /// `false` for the primary (`0`) or an out-of-range index — the primary
     /// can't be removed.
