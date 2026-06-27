@@ -1242,11 +1242,7 @@ fn skeleton_panel(
         let cur = editor.active_attachment;
         ui.horizontal_wrapped(|ui| {
             for i in 0..attach_count {
-                let label = if i == 0 {
-                    t(Msg::PrimaryMesh).to_string()
-                } else {
-                    format!("{} {i}", t(Msg::Attachment))
-                };
+                let label = layer_label(editor.rig.as_ref(), active, i, t);
                 if ui.selectable_label(i == cur, label).clicked() {
                     actions.select_attachment = Some(i);
                 }
@@ -1294,12 +1290,29 @@ fn vec3_drag_row(ui: &mut egui::Ui, label: &str, v: &mut [f32; 3], speed: f64) -
     (begin, changed)
 }
 
+/// Display label for attachment `i` of bone `bone`: "Base layer" for the
+/// primary (`0`), else the extra's editable name (a generic "Layer N" only as a
+/// fallback for a nameless extra).
+fn layer_label(
+    rig: Option<&demiurg_core::Rig>,
+    bone: usize,
+    i: usize,
+    t: &impl Fn(Msg) -> &'static str,
+) -> String {
+    if i == 0 {
+        return t(Msg::PrimaryMesh).to_string();
+    }
+    rig.and_then(|r| r.bones.get(bone))
+        .and_then(|b| b.extras.get(i - 1))
+        .map_or_else(|| format!("{} {i}", t(Msg::Attachment)), |e| e.name.clone())
+}
+
 /// The Attachments section (Rig ▸ Sculpt): pick which of the active bone's
 /// meshes to sculpt — the primary mesh or an extra attachment — add / remove
-/// extras, and set the active extra's local offset (translate / rotate /
-/// scale) in the bone's frame. Selection / add / remove are deferred to the
-/// host (they swap the working mesh); the offset mutates the rig directly,
-/// one undo step per field drag (the inline begin/commit-pending pair).
+/// extras, rename the active extra, and set its local offset (translate /
+/// rotate / scale) in the bone's frame. Selection / add / remove are deferred to
+/// the host (they swap the working mesh); the name + offset mutate the rig
+/// directly, one undo step per interaction (the inline begin/commit-pending pair).
 fn attachments_panel(
     ui: &mut egui::Ui,
     editor: &mut Editor,
@@ -1320,11 +1333,7 @@ fn attachments_panel(
     ui.separator();
     ui.label(t(Msg::Attachments));
     for i in 0..count {
-        let label = if i == 0 {
-            t(Msg::PrimaryMesh).to_string()
-        } else {
-            format!("{} {i}", t(Msg::Attachment))
-        };
+        let label = layer_label(editor.rig.as_ref(), active_bone, i, t);
         if ui.selectable_label(i == active, label).clicked() {
             actions.select_attachment = Some(i);
         }
@@ -1341,7 +1350,7 @@ fn attachments_panel(
         }
     });
 
-    // The active extra's local offset (the primary is fixed at identity).
+    // The active extra's name + local offset (the primary is fixed at identity).
     let mut rebuild = false;
     if active > 0 {
         if let Some(att) = editor
@@ -1350,6 +1359,14 @@ fn attachments_panel(
             .and_then(|r| r.bones.get_mut(active_bone))
             .and_then(|b| b.extras.get_mut(active - 1))
         {
+            // Rename the layer (undoable, but no preview rebuild needed).
+            let rn = ui.text_edit_singleline(&mut att.name);
+            if rn.gained_focus() {
+                actions.rig_edit_begin = true;
+            }
+            if rn.changed() {
+                actions.rig_edit_changed = true;
+            }
             let (begin, changed) = attachment_offset_fields(ui, att, t);
             if begin {
                 actions.rig_edit_begin = true;

@@ -56,6 +56,10 @@ pub struct RigAttachment {
     pub model: VoxelModel,
     /// Local TRS relative to the bone (engine `local_offset`).
     pub offset: BoneXform,
+    /// Artist-facing layer name. Editor metadata (the engine `Attachment` has
+    /// no name); persisted in a `DLAY` extra-chunk that round-trips through
+    /// `.rkc` (and `.demiurg`), so it survives save/load.
+    pub name: String,
 }
 
 impl RigBone {
@@ -88,9 +92,11 @@ impl RigBone {
     /// Append a new extra attachment (a small default mesh at the identity
     /// offset) and return its attachment index (`attachment_count() - 1`).
     pub fn add_extra(&mut self) -> usize {
+        let name = format!("layer {}", self.extras.len() + 1);
         self.extras.push(RigAttachment {
             model: default_bone_model(),
             offset: BoneXform::IDENTITY,
+            name,
         });
         self.attachment_count() - 1
     }
@@ -156,6 +162,20 @@ impl Rig {
                 hinge: b.hinge,
             });
         }
+        // Layer names ride along in a `DLAY` extra-chunk (the engine has no
+        // attachment name) — a postcard `Vec<String>` of every extra's name in
+        // bone-major order, matching how `from_character` reads them back.
+        let extra_names: Vec<String> = self
+            .bones
+            .iter()
+            .flat_map(|b| b.extras.iter().map(|e| e.name.clone()))
+            .collect();
+        let mut extra_chunks = Vec::new();
+        if !extra_names.is_empty() {
+            if let Ok(payload) = postcard::to_allocvec(&extra_names) {
+                extra_chunks.push((DLAY_TAG, payload));
+            }
+        }
         Character {
             name: self.name.clone(),
             root: self.root,
@@ -163,7 +183,7 @@ impl Rig {
             bones,
             clips: self.clips.clone(),
             voxel_clips: Vec::new(),
-            extra_chunks: Vec::new(),
+            extra_chunks,
         }
     }
 
@@ -177,6 +197,16 @@ impl Rig {
     /// # Errors
     /// A message if a static attachment's mesh index is out of range.
     pub fn from_character(c: &Character) -> Result<Self, String> {
+        // Layer names from the `DLAY` extra-chunk (bone-major order, written by
+        // `to_character`); empty/absent for a foreign `.rkc`, then extras get a
+        // default `layer N` name.
+        let names: Vec<String> = c
+            .extra_chunks
+            .iter()
+            .find(|(tag, _)| *tag == DLAY_TAG)
+            .and_then(|(_, payload)| postcard::from_bytes(payload).ok())
+            .unwrap_or_default();
+        let mut names = names.into_iter();
         let bones =
             c.bones
                 .iter()
@@ -198,9 +228,13 @@ impl Rig {
                         if primary.is_none() {
                             primary = Some(model);
                         } else {
+                            let name = names
+                                .next()
+                                .unwrap_or_else(|| format!("layer {}", extras.len() + 1));
                             extras.push(RigAttachment {
                                 model,
                                 offset: a.local_offset,
+                                name,
                             });
                         }
                     }
@@ -906,6 +940,11 @@ fn remap_index(old: usize, from: usize, to: usize) -> usize {
 /// return-to-start segment (matches the demo clip's inter-key spacing).
 const DEFAULT_TAIL_MS: i32 = 500;
 
+/// Tag of the `.rkc` extra-chunk that carries the editor's per-layer names (a
+/// postcard `Vec<String>` in bone-major order). Unknown to the engine, so it's
+/// round-tripped verbatim via [`Character::extra_chunks`].
+const DLAY_TAG: [u8; 4] = *b"DLAY";
+
 /// The origin point, reused for default hinge endpoints.
 const ZERO: Point3 = Point3 {
     x: 0.0,
@@ -1042,15 +1081,20 @@ mod tests {
                 t: [3.0, 0.0, -1.0],
                 ..BoneXform::IDENTITY
             },
+            name: "horn".to_string(),
         });
         let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("round-trips");
         assert_eq!(back.bones.len(), 1);
         // Primary mesh survives as the bone's `model`.
         assert_eq!(back.bones[0].model.get(1, 1, 1), 0x80ff_0000);
-        // The extra survives with its own mesh + offset.
+        // The extra survives with its own mesh + offset + name.
         assert_eq!(back.bones[0].extras.len(), 1);
         assert_eq!(back.bones[0].extras[0].model.get(0, 0, 0), 0x8000_ff00);
         assert_eq!(back.bones[0].extras[0].offset.t, [3.0, 0.0, -1.0]);
+        assert_eq!(
+            back.bones[0].extras[0].name, "horn",
+            "layer name survives .rkc"
+        );
     }
 
     use roxlap_formats::character::{Clip, ClipData};

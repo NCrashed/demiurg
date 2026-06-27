@@ -3640,9 +3640,11 @@ impl App {
             .as_mut()
             .and_then(|r| r.bones.get_mut(self.editor.active_bone))
         {
+            let name = format!("layer {}", b.extras.len() + 1);
             b.extras.push(RigAttachment {
                 model: mesh,
                 offset: src_off,
+                name,
             });
         }
         self.editor.selection.clear();
