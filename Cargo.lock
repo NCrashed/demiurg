@@ -657,7 +657,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "demiurg-app"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "arboard",
  "demiurg-core",
@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "demiurg-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "dot_vox",
  "postcard",
@@ -684,11 +684,11 @@ dependencies = [
 
 [[package]]
 name = "demiurg-i18n"
-version = "0.8.0"
+version = "0.9.0"
 
 [[package]]
 name = "demiurg-view"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "demiurg-core",
  "glam",

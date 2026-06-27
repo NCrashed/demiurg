@@ -7,6 +7,30 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-27
+
+Procedural clips: script a flame, smoke, or energy effect instead of sculpting
+it frame by frame.
+
+### Added
+
+- **Procedural clip generator (Rhai).** A clip can be driven by an embedded
+  [Rhai](https://rhai.rs) script that fills its frames — ideal for dynamic
+  effects that are tedious to animate by hand:
+  - **Imperative API** — the script body runs once per frame with globals
+    (`frame`, `frames`, `t`, `w`/`h`/`d`) and flat helpers: `set` / `get`,
+    `sphere`, `box`, `rgb` / `hsv`, a stable `noise` field, fractal `fbm`, and a
+    per-frame `rand`.
+  - **Presets** — Flame, Smoke, Energy, Plasma, and Sparkle, loadable as a
+    starting point (and a live API example).
+  - **Editing** — a floating, syntax-highlighted script window with an API
+    cheat-sheet, frame-count and seed controls, and an **Auto** toggle that
+    regenerates a short moment after edits settle for a near-live preview.
+  - **Deterministic & safe** — the same seed yields the same clip; scripts are
+    sandboxed (no I/O) and capped against runaway loops.
+  - The script + parameters are saved in the `.demiurg` project; a procedural
+    clip exports to `.rvc` (and drops onto bones as a clip layer) like any other.
+
 ## [0.8.0] - 2026-06-27
 
 Animated voxel clips: author "GIF/MP4 for voxels" as their own documents, and
