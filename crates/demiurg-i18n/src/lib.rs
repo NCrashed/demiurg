@@ -155,6 +155,7 @@ pub enum Msg {
     Procedural,
     MakeProcedural,
     DropProcedural,
+    EditScript,
     Generate,
     Seed,
     Preset,
@@ -233,7 +234,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 151] = [
+    pub const ALL: [Msg; 152] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -320,6 +321,7 @@ impl Msg {
         Msg::Procedural,
         Msg::MakeProcedural,
         Msg::DropProcedural,
+        Msg::EditScript,
         Msg::Generate,
         Msg::Seed,
         Msg::Preset,
@@ -486,6 +488,7 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Procedural => "Procedural",
         Msg::MakeProcedural => "Make procedural",
         Msg::DropProcedural => "Drop script",
+        Msg::EditScript => "Edit script…",
         Msg::Generate => "Generate",
         Msg::Seed => "Seed",
         Msg::Preset => "Preset",
@@ -645,6 +648,7 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Procedural => "Процедурный",
         Msg::MakeProcedural => "Сделать процедурным",
         Msg::DropProcedural => "Убрать скрипт",
+        Msg::EditScript => "Изменить скрипт…",
         Msg::Generate => "Сгенерировать",
         Msg::Seed => "Зерно",
         Msg::Preset => "Пресет",

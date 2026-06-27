@@ -80,17 +80,19 @@ let hue = t;                                       // cycle the hue over the loo
 sphere(cx, cy, cz, r.to_int(), hsv(hue, 0.9, 1.0));
 ";
 
-/// Preset: a noise-driven fire that rises over the loop.
+/// Preset: a noise-driven fire that rises over the loop. The world is z-down,
+/// so the wide hot base sits at high `z` (visually the bottom).
 pub const FLAME_SCRIPT: &str = r"// Flame — noise-driven fire rising over the loop.
+// World is z-down: the base sits at high z (the visual bottom).
 let scale = 0.18;
 for z in 0..d {
-    let hf = z.to_float() / d.to_float();   // 0 at the base .. 1 at the top
-    let thresh = 0.30 + 0.55 * hf;          // flames narrow as they rise
+    let hf = 1.0 - z.to_float() / d.to_float();   // 0 at the base (bottom) .. 1 at the tip (top)
+    let thresh = 0.30 + 0.55 * hf;                // flames narrow as they rise
     for y in 0..h {
         for x in 0..w {
-            let n = noise(x.to_float()*scale, y.to_float()*scale, z.to_float()*scale - t*6.0);
+            let n = noise(x.to_float()*scale, y.to_float()*scale, z.to_float()*scale + t*6.0);
             if n > thresh {
-                let heat = 1.0 - hf;        // hottest near the base
+                let heat = 1.0 - hf;              // hottest near the base
                 set(x, y, z, hsv(0.02 + 0.12*heat, 1.0, 0.55 + 0.45*heat));
             }
         }
@@ -98,15 +100,16 @@ for z in 0..d {
 }
 ";
 
-/// Preset: a soft grey smoke plume billowing upward.
+/// Preset: a soft grey smoke plume billowing upward (base at high `z`).
 pub const SMOKE_SCRIPT: &str = r"// Smoke — a soft grey plume billowing upward.
+// World is z-down: the dense base sits at high z (the visual bottom).
 let scale = 0.13;
 for z in 0..d {
-    let hf = z.to_float() / d.to_float();
+    let hf = 1.0 - z.to_float() / d.to_float();
     let thresh = 0.48 + 0.34 * hf;
     for y in 0..h {
         for x in 0..w {
-            let n = noise(x.to_float()*scale, y.to_float()*scale, z.to_float()*scale - t*3.0);
+            let n = noise(x.to_float()*scale, y.to_float()*scale, z.to_float()*scale + t*3.0);
             if n > thresh {
                 let v = (150.0 + 90.0*(n - thresh)).to_int();
                 set(x, y, z, rgb(v, v, v));

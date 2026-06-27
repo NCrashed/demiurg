@@ -518,6 +518,10 @@ pub fn build(
                 }
             });
     }
+
+    // The floating Rhai script editor (procedural clips), over the viewport.
+    let ctx = ui.ctx().clone();
+    clip_script_window(&ctx, editor, actions);
 }
 
 fn dims_arr(d: (u32, u32, u32)) -> [u32; 3] {
@@ -1021,6 +1025,7 @@ fn clip_procedural_section(
     t: &impl Fn(Msg) -> &'static str,
 ) {
     let mut script_dirty = false;
+    let mut open_window = false;
     {
         let Some(clip) = editor.clip.as_mut() else {
             return;
@@ -1042,15 +1047,10 @@ fn clip_procedural_section(
                     ui.label(t(Msg::Seed));
                     script_dirty |= ui.add(egui::DragValue::new(&mut g.seed)).changed();
                 });
-                // The script editor (monospace, multiline).
-                script_dirty |= ui
-                    .add(
-                        egui::TextEdit::multiline(&mut g.script)
-                            .code_editor()
-                            .desired_rows(8)
-                            .desired_width(f32::INFINITY),
-                    )
-                    .changed();
+                // The script itself lives in a roomy floating window.
+                if ui.button(t(Msg::EditScript)).clicked() {
+                    open_window = true;
+                }
                 ui.horizontal(|ui| {
                     ui.label(t(Msg::Preset));
                     for (msg, script) in CLIP_PRESETS {
@@ -1073,8 +1073,51 @@ fn clip_procedural_section(
     if script_dirty {
         editor.clip_modified = true;
     }
+    if open_window {
+        editor.script_window_open = true;
+    }
     if let Some(err) = &editor.clip_gen_error {
         ui.colored_label(egui::Color32::from_rgb(0xE0, 0x60, 0x60), err);
+    }
+}
+
+/// The floating Rhai script editor window (opened by the panel's "Edit script…").
+/// A roomy monospace editor over the active clip's generator + a Generate
+/// button; drawn at the top level so it floats over the viewport.
+fn clip_script_window(ctx: &egui::Context, editor: &mut Editor, actions: &mut UiActions) {
+    if !editor.script_window_open {
+        return;
+    }
+    let lang = editor.lang;
+    let t = |m: Msg| tr(lang, m);
+    let mut open = true;
+    let mut dirty = false;
+    if let Some(g) = editor.clip.as_mut().and_then(|c| c.generator.as_mut()) {
+        egui::Window::new(t(Msg::Procedural))
+            .open(&mut open)
+            .default_size([460.0, 380.0])
+            .show(ctx, |ui| {
+                dirty |= ui
+                    .add(
+                        egui::TextEdit::multiline(&mut g.script)
+                            .code_editor()
+                            .desired_rows(22)
+                            .desired_width(f32::INFINITY),
+                    )
+                    .changed();
+                ui.horizontal(|ui| {
+                    if ui.button(t(Msg::Generate)).clicked() {
+                        actions.generate_clip = true;
+                    }
+                    ui.label(format!("{}: {}", t(Msg::Frames), g.frame_count));
+                });
+            });
+    } else {
+        open = false; // no generator any more — nothing to edit
+    }
+    editor.script_window_open = open;
+    if dirty {
+        editor.clip_modified = true;
     }
 }
 

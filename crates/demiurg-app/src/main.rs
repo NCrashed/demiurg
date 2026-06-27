@@ -940,6 +940,9 @@ struct Editor {
     /// The last procedural-generation error (script compile / runtime), shown
     /// in the clip panel until the next successful Generate. `None` = no error.
     clip_gen_error: Option<String>,
+    /// Whether the floating Rhai script editor window is open (the panel's
+    /// "Edit script…" opens it; its close box dismisses it).
+    script_window_open: bool,
 }
 
 /// One whole-rig undo entry: the rig (every bone's mesh + hinge, clips, root)
@@ -1035,6 +1038,7 @@ impl Editor {
             clip_time_ms: 0,
             onion_skin: false,
             clip_gen_error: None,
+            script_window_open: false,
         }
     }
 
