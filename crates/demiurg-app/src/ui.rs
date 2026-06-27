@@ -1108,6 +1108,92 @@ fn clip_procedural_section(
     }
 }
 
+/// A lightweight Rhai syntax highlighter for the script editor — builds a
+/// coloured [`egui::text::LayoutJob`] by tokenizing comments, strings, numbers,
+/// keywords, the generator's host functions, and the per-frame globals. No
+/// external dependency; good enough to make a script readable.
+fn highlight_rhai(
+    text: &str,
+    font: &egui::FontId,
+    default: egui::Color32,
+) -> egui::text::LayoutJob {
+    use egui::text::LayoutJob;
+    use egui::{Color32, TextFormat};
+
+    // Token classes — words checked whole (we only ever pass identifier runs).
+    const KEYWORDS: &[&str] = &[
+        "let", "const", "if", "else", "for", "in", "while", "loop", "fn", "return", "break",
+        "continue", "true", "false", "switch", "do", "until", "throw", "import",
+    ];
+    const API: &[&str] = &[
+        "set", "get", "sphere", "box", "rgb", "hsv", "noise", "fbm", "rand", "sin", "cos", "tan",
+        "sqrt", "abs", "floor", "ceil", "round", "min", "max", "to_int", "to_float", "pow",
+    ];
+    const GLOBALS: &[&str] = &["frame", "frames", "t", "w", "h", "d"];
+
+    let c_comment = Color32::from_rgb(0x6A, 0x99, 0x55);
+    let c_string = Color32::from_rgb(0xCE, 0x91, 0x78);
+    let c_number = Color32::from_rgb(0xB5, 0xCE, 0xA8);
+    let c_keyword = Color32::from_rgb(0x56, 0x9C, 0xD6);
+    let c_api = Color32::from_rgb(0xDC, 0xDC, 0xAA);
+    let c_global = Color32::from_rgb(0x9C, 0xDC, 0xFE);
+
+    let fmt = |c: Color32| TextFormat::simple(font.clone(), c);
+    let mut job = LayoutJob::default();
+    let b = text.as_bytes();
+    let n = b.len();
+    let mut i = 0;
+    while i < n {
+        // line comment `// …`
+        if b[i] == b'/' && i + 1 < n && b[i + 1] == b'/' {
+            let start = i;
+            while i < n && b[i] != b'\n' {
+                i += 1;
+            }
+            job.append(&text[start..i], 0.0, fmt(c_comment));
+        } else if b[i] == b'"' {
+            // string literal (no escape handling needed for highlighting)
+            let start = i;
+            i += 1;
+            while i < n && b[i] != b'"' {
+                i += 1;
+            }
+            i = (i + 1).min(n);
+            job.append(&text[start..i], 0.0, fmt(c_string));
+        } else if b[i].is_ascii_digit() {
+            let start = i;
+            while i < n && (b[i].is_ascii_digit() || b[i] == b'.' || b[i] == b'_') {
+                i += 1;
+            }
+            job.append(&text[start..i], 0.0, fmt(c_number));
+        } else if b[i].is_ascii_alphabetic() || b[i] == b'_' {
+            let start = i;
+            while i < n && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let word = &text[start..i];
+            let color = if KEYWORDS.contains(&word) {
+                c_keyword
+            } else if API.contains(&word) {
+                c_api
+            } else if GLOBALS.contains(&word) {
+                c_global
+            } else {
+                default
+            };
+            job.append(word, 0.0, fmt(color));
+        } else {
+            // Anything else (operators, punctuation, non-ASCII in comments that
+            // already fell through): emit one whole UTF-8 char as default text.
+            let len = text[i..].chars().next().map_or(1, char::len_utf8);
+            let end = (i + len).min(n);
+            job.append(&text[i..end], 0.0, fmt(default));
+            i = end;
+        }
+    }
+    job
+}
+
 /// The floating Rhai script editor window (opened by the panel's "Edit script…").
 /// A roomy monospace editor over the active clip's generator + a Generate
 /// button; drawn at the top level so it floats over the viewport.
@@ -1124,12 +1210,20 @@ fn clip_script_window(ctx: &egui::Context, editor: &mut Editor, actions: &mut Ui
             .open(&mut open)
             .default_size([460.0, 380.0])
             .show(ctx, |ui| {
+                // Syntax-highlight the script via a custom layouter.
+                let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+                    let font = egui::TextStyle::Monospace.resolve(ui.style());
+                    let mut job = highlight_rhai(buf.as_str(), &font, ui.visuals().text_color());
+                    job.wrap.max_width = wrap;
+                    ui.fonts_mut(|f| f.layout_job(job))
+                };
                 dirty |= ui
                     .add(
                         egui::TextEdit::multiline(&mut g.script)
                             .code_editor()
                             .desired_rows(22)
-                            .desired_width(f32::INFINITY),
+                            .desired_width(f32::INFINITY)
+                            .layouter(&mut layouter),
                     )
                     .changed();
                 ui.horizontal(|ui| {
