@@ -472,6 +472,36 @@ fn float_selection(cells: &[([i32; 3], u32)], dims: (u32, u32, u32)) -> HashSet<
         .collect()
 }
 
+/// Translate `cells` so their bounding box fits inside `[0, dims)` — used when
+/// pasting a clipboard copied from a different (e.g. larger) mesh, so it lands
+/// in the target instead of off its edge. A box that already fits is left at
+/// its absolute position (paste-in-place within the same mesh); one too big for
+/// the target is pinned to the origin corner (the far side still clips).
+#[allow(clippy::cast_possible_wrap)] // voxel dims are far below i32::MAX
+fn shift_cells_into_bounds(cells: &mut [([i32; 3], u32)], dims: (u32, u32, u32)) {
+    if cells.is_empty() {
+        return;
+    }
+    let d = [dims.0 as i32, dims.1 as i32, dims.2 as i32];
+    let (mut min, mut max) = ([i32::MAX; 3], [i32::MIN; 3]);
+    for (p, _) in cells.iter() {
+        for a in 0..3 {
+            min[a] = min[a].min(p[a]);
+            max[a] = max[a].max(p[a]);
+        }
+    }
+    // Per axis: 0 if it fits; otherwise the minimal shift that pulls `max` to
+    // `d-1`, but never past `min = 0`.
+    let shift = [0, 1, 2].map(|a| (d[a] - 1 - max[a]).min(0).max(-min[a]));
+    if shift != [0, 0, 0] {
+        for (p, _) in cells.iter_mut() {
+            for a in 0..3 {
+                p[a] += shift[a];
+            }
+        }
+    }
+}
+
 /// Rotate `cells` 90 degrees in the plane perpendicular to `axis`, about the
 /// cells' bounding-box centre, keeping them on the integer grid: the two
 /// in-plane extents swap and the block stays centred (so a square selection
@@ -3564,8 +3594,12 @@ impl App {
             return;
         }
         self.commit_float();
-        let cells = self.editor.clipboard.clone();
-        self.editor.selection = float_selection(&cells, self.editor.document.dims());
+        let dims = self.editor.document.dims();
+        // Shift a clipboard from another (e.g. bigger) mesh into the target so
+        // it lands in bounds; a same-mesh paste that fits stays in place.
+        let mut cells = self.editor.clipboard.clone();
+        shift_cells_into_bounds(&mut cells, dims);
+        self.editor.selection = float_selection(&cells, dims);
         // A paste only adds voxels — nothing to clear on commit.
         self.editor.float = Some(FloatLayer {
             cells,
@@ -5649,6 +5683,24 @@ mod tests {
         // Counter-clockwise undoes the clockwise turn exactly.
         rotate_cells_90(&mut c, 2, false);
         assert_eq!(c, orig);
+    }
+
+    #[test]
+    fn shift_cells_into_bounds_fits_pulls_in_or_pins() {
+        // Already inside a big target: left in place (paste-in-place).
+        let mut c = vec![([10, 10, 10], 1u32)];
+        shift_cells_into_bounds(&mut c, (32, 32, 32));
+        assert_eq!(c[0].0, [10, 10, 10]);
+        // Past a small target's far edge: pulled in so max lands at dim-1.
+        let mut c = vec![([10, 10, 10], 1u32), ([12, 10, 10], 1)];
+        shift_cells_into_bounds(&mut c, (4, 4, 4));
+        assert_eq!(c[0].0, [1, 3, 3]);
+        assert_eq!(c[1].0, [3, 3, 3], "max pinned to dim-1");
+        // Wider than the target: pinned to the origin corner (far side clips).
+        let mut c = vec![([5, 0, 0], 1u32), ([15, 0, 0], 1)];
+        shift_cells_into_bounds(&mut c, (4, 4, 4));
+        assert_eq!(c[0].0[0], 0, "min pinned to 0");
+        assert_eq!(c[1].0[0], 10);
     }
 
     #[test]
