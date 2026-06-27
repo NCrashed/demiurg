@@ -7,6 +7,30 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-28
+
+Bring skeletal animation and voxel clips closer together: bake a rig into a
+clip, and ease its motion.
+
+### Added
+
+- **Bake a rig's animation into a clip.** "Bake to clip" (Animate ▸ clips
+  panel, with a frame-count field) samples a skeletal clip's poses and
+  rasterizes every bone attachment — static mesh or animated clip layer — into a
+  voxel-flipbook clip, opened as a new clip document to preview / tweak / export
+  or drop back onto a bone. The bake matches the viewport exactly (same posing +
+  voxel placement) and bounds the result to a fixed box (capped at 256³).
+- **Keyframe easing.** A skeletal clip can interpolate with an easing curve —
+  Linear, In, Out, or In-out — chosen per clip in the Animate panel, for smooth
+  motion instead of the engine's robotic linear blend. The curve is saved with
+  the rig (`.rkc` / `.demiurg`), shows live in the preview, and is carried into a
+  bake.
+
+### Fixed
+
+- A bone whose primary attachment is an animated clip but that also carries a
+  static-mesh extra no longer draws that extra twice in the posed-rig preview.
+
 ## [0.9.0] - 2026-06-27
 
 Procedural clips: script a flame, smoke, or energy effect instead of sculpting
