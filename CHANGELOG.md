@@ -7,6 +7,40 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-27
+
+Animated voxel clips: author "GIF/MP4 for voxels" as their own documents, and
+hang them off bones as animated layers.
+
+### Added
+
+- **Animated voxel clips (`.rvc`) — a new document type.** A clip is a flipbook
+  of voxel frames, sculpted with the usual tools and rendered by the engine:
+  - **Frames** — add / duplicate / delete / reorder, each with its own duration
+    (or a clip-wide default), plus a loop mode (loop / once / ping-pong).
+  - **Playback** — play / pause and step with `Space` / `,` / `.`, scrub a
+    bottom frame timeline; the playhead and the edited frame are one, so you
+    stop on any frame and sculpt it.
+  - **Onion-skinning** — ghost the previous (cool) and next (warm) frames while
+    sculpting, so motion registers; the ghosts are never picked or edited.
+  - **Crop warning** — when the bounding box dwarfs the content the clip warns
+    and offers a crop-to-content that tightens every frame at once.
+  - **Files** — New clip, Open / Export `.rvc` (the engine's clip codec), and
+    lossless `.demiurg` clip projects that keep every frame's interior voxels.
+- **Clips as bone layers.** Any bone attachment — a bone's base mesh or an extra
+  layer — can be an animated clip instead of a static mesh:
+  - **Author in place** — "To clip" turns the current mesh into a clip (its
+    first frame), "+ Clip layer" adds an empty one, and "Import .rvc" drops an
+    authored clip onto the bone; selecting a clip layer brings up the full clip
+    editor (frames, timeline, onion-skin) to sculpt it inside the rig.
+  - **Plays on the posed rig** — a clip layer animates in the Animate preview
+    along the rig's playhead, with per-layer **speed** and **phase** so the same
+    clip can run fast on one bone and slow / offset on another.
+  - **Round-trips** through `.rkc` (the engine character container) and
+    `.demiurg`; clip layers show their frame count in the Layers list.
+- **Select all** — `Ctrl+A` selects every occupied voxel of the current model
+  and switches to the Select tool, ready to delete / copy / move.
+
 ## [0.7.0] - 2026-06-27
 
 Layers: build a bone out of several meshes, each sculpted, placed and named on
