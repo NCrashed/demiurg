@@ -70,6 +70,9 @@ pub struct UiActions {
     pub remove_reference: bool,
     /// Extract the current selection into a new child bone (rig slicing).
     pub extract_to_bone: bool,
+    /// Extract the current selection into a new extra attachment on the active
+    /// bone (same bone, new offsettable layer).
+    pub extract_to_attachment: bool,
     /// Rotate the selection 90 degrees about `editor.rotate_axis`:
     /// `Some(true)` = clockwise, `Some(false)` = counter-clockwise.
     pub rotate_sel: Option<bool>,
@@ -544,14 +547,24 @@ fn selection_panel(
             actions.paste_sel = true;
         }
     });
-    // Rig slicing: carve the selection out of this bone's mesh into a new child
-    // bone (it keeps its place at rest). Only meaningful while editing a rig.
-    if editor.rig.is_some()
-        && ui
-            .add_enabled(has_sel, egui::Button::new(t(Msg::ExtractToBone)))
-            .clicked()
-    {
-        actions.extract_to_bone = true;
+    // Rig slicing: carve the selection out into a new child bone, or into a new
+    // extra attachment on the same bone (a separately-offsettable layer). Both
+    // keep the piece in place at rest; only while editing a rig.
+    if editor.rig.is_some() {
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_sel, egui::Button::new(t(Msg::ExtractToBone)))
+                .clicked()
+            {
+                actions.extract_to_bone = true;
+            }
+            if ui
+                .add_enabled(has_sel, egui::Button::new(t(Msg::ExtractToAttachment)))
+                .clicked()
+            {
+                actions.extract_to_attachment = true;
+            }
+        });
     }
 }
 

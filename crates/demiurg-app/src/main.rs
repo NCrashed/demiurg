@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use demiurg_core::{Document, KeyXform, Quat, Rig, RigBone, VoxelModel, project};
+use demiurg_core::{Document, KeyXform, Quat, Rig, RigAttachment, RigBone, VoxelModel, project};
 use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{
     AXIS_COLORS, KfaView, Line3, ModelView, OrbitCamera, PickHit, RenderMode, ViewDir, pick_voxel,
@@ -3564,6 +3564,91 @@ impl App {
         self.editor.dirty = true; // refresh the parent view (now holed)
     }
 
+    /// Extract the selected voxels into a new **extra attachment** on the same
+    /// bone: the carved-out piece leaves the active attachment's mesh and rides
+    /// alongside it, placed exactly where it was. Unlike "Extract to bone" it
+    /// stays on the same bone (no new hinge) — a quick way to split a mesh into
+    /// separately-offsettable layers. No-op outside a rig's Sculpt mode, or
+    /// with no occupied selected voxels.
+    #[allow(clippy::cast_precision_loss)] // voxel coords are tiny; exact in f32
+    fn extract_selection_to_attachment(&mut self) {
+        if self.editor.rig.is_none() || self.editor.rig_mode != RigMode::Sculpt {
+            return;
+        }
+        self.commit_float();
+        let model = self.editor.document.model();
+        let picked: Vec<[u32; 3]> = self
+            .editor
+            .selection
+            .iter()
+            .copied()
+            .filter(|&c| model.get(c[0], c[1], c[2]) != 0)
+            .collect();
+        if picked.is_empty() {
+            return;
+        }
+        let mut min = [u32::MAX; 3];
+        let mut max = [0u32; 3];
+        for c in &picked {
+            for a in 0..3 {
+                min[a] = min[a].min(c[a]);
+                max[a] = max[a].max(c[a]);
+            }
+        }
+        let mut mesh = VoxelModel::new(
+            max[0] - min[0] + 1,
+            max[1] - min[1] + 1,
+            max[2] - min[2] + 1,
+        );
+        for &c in &picked {
+            mesh.set(
+                c[0] - min[0],
+                c[1] - min[1],
+                c[2] - min[2],
+                model.get(c[0], c[1], c[2]),
+            );
+        }
+        // The new attachment keeps the source's place: pivot tracks the crop
+        // and the offset is copied from the source attachment, so the same bone
+        // transform draws it exactly where it was (primary = identity offset).
+        let pp = self.editor.document.pivot();
+        mesh.pivot = [
+            pp[0] - min[0] as f32,
+            pp[1] - min[1] as f32,
+            pp[2] - min[2] as f32,
+        ];
+        let src_off = self
+            .editor
+            .active_attachment
+            .checked_sub(1)
+            .and_then(|e| {
+                self.editor
+                    .rig
+                    .as_ref()
+                    .and_then(|r| r.bones.get(self.editor.active_bone))
+                    .and_then(|b| b.extras.get(e))
+            })
+            .map_or(KeyXform::IDENTITY, |a| a.offset);
+        // One undo step: snapshot (folds the document in), carve, add the extra.
+        self.editor.rig_checkpoint();
+        let clear: Vec<([u32; 3], u32)> = picked.iter().map(|&c| (c, 0)).collect();
+        self.editor.document.set_cells(clear); // hole the source attachment
+        self.commit_active_bone(); // fold the holed mesh back into the attachment
+        if let Some(b) = self
+            .editor
+            .rig
+            .as_mut()
+            .and_then(|r| r.bones.get_mut(self.editor.active_bone))
+        {
+            b.extras.push(RigAttachment {
+                model: mesh,
+                offset: src_off,
+            });
+        }
+        self.editor.selection.clear();
+        self.editor.dirty = true;
+    }
+
     /// Copy the occupied selected voxels to the clipboard at their
     /// absolute positions, so a paste lands back where they came from.
     /// Settles any floating layer first, so the copy reads real voxels.
@@ -3846,6 +3931,9 @@ impl App {
         }
         if a.extract_to_bone {
             self.extract_selection_to_bone();
+        }
+        if a.extract_to_attachment {
+            self.extract_selection_to_attachment();
         }
         if let Some(cw) = a.rotate_sel {
             self.rotate_selection(cw);

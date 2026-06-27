@@ -142,6 +142,7 @@ pub enum Msg {
     DummyRoot,
     DuplicateBone,
     ExtractToBone,
+    ExtractToAttachment,
     DeleteBone,
     MoveBoneUp,
     MoveBoneDown,
@@ -202,7 +203,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 122] = [
+    pub const ALL: [Msg; 123] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -274,6 +275,7 @@ impl Msg {
         Msg::DummyRoot,
         Msg::DuplicateBone,
         Msg::ExtractToBone,
+        Msg::ExtractToAttachment,
         Msg::DeleteBone,
         Msg::MoveBoneUp,
         Msg::MoveBoneDown,
@@ -411,6 +413,7 @@ const fn en(msg: Msg) -> &'static str {
         Msg::DummyRoot => "Dummy root",
         Msg::DuplicateBone => "Duplicate bone",
         Msg::ExtractToBone => "Extract to bone",
+        Msg::ExtractToAttachment => "Extract to attachment",
         Msg::DeleteBone => "Delete bone",
         Msg::MoveBoneUp => "Move bone up",
         Msg::MoveBoneDown => "Move bone down",
@@ -541,6 +544,7 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::DummyRoot => "Фиктивный корень",
         Msg::DuplicateBone => "Дублировать кость",
         Msg::ExtractToBone => "Вытащить в кость",
+        Msg::ExtractToAttachment => "Вырезать в привязку",
         Msg::DeleteBone => "Удалить кость",
         Msg::MoveBoneUp => "Переместить кость вверх",
         Msg::MoveBoneDown => "Переместить кость вниз",
