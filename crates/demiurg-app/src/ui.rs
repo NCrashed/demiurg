@@ -106,6 +106,8 @@ pub struct UiActions {
     pub set_clip_loop_mode: Option<LoopMode>,
     /// Clip timeline: scrub the playhead to this absolute time (ms). Pauses.
     pub seek_clip: Option<u32>,
+    /// Clip editor: crop every frame to the union of all frames' content.
+    pub crop_clip: bool,
     /// Switch the active rig bone (index into `rig.bones`).
     pub select_bone: Option<usize>,
     /// Switch the active attachment of the active bone (`0` = primary mesh,
@@ -875,15 +877,24 @@ fn clips_panel(
 /// tools below this panel. Emits [`UiActions`]; the host applies them.
 fn clip_panel(
     ui: &mut egui::Ui,
-    editor: &Editor,
+    editor: &mut Editor,
     actions: &mut UiActions,
     t: &impl Fn(Msg) -> &'static str,
 ) {
-    let Some(clip) = &editor.clip else {
+    if editor.clip.is_none() {
         return;
-    };
-    let active = editor.active_frame.min(clip.frames.len() - 1);
+    }
     ui.separator();
+    // Onion-skin toggle (mutates the editor) — done before borrowing the clip.
+    // Flipping it rebuilds the view (with / without ghosts).
+    if ui
+        .checkbox(&mut editor.onion_skin, t(Msg::OnionSkin))
+        .changed()
+    {
+        editor.dirty = true;
+    }
+    let clip = editor.clip.as_ref().expect("clip present (checked above)");
+    let active = editor.active_frame.min(clip.frames.len() - 1);
     ui.label(t(Msg::Frames));
     let durations = clip.durations();
     egui::ScrollArea::vertical()
@@ -959,6 +970,18 @@ fn clip_panel(
             }
         }
     });
+    // Padding warning: when the declared bbox dwarfs the content, the `.rvc`
+    // carries lots of empty columns — offer a crop-to-content.
+    if clip.is_padding_wasteful() {
+        ui.separator();
+        ui.colored_label(
+            egui::Color32::from_rgb(0xE0, 0xA0, 0x30),
+            t(Msg::ClipPadWarn),
+        );
+        if ui.button(t(Msg::Crop)).clicked() {
+            actions.crop_clip = true;
+        }
+    }
 }
 
 /// The Clip timeline bar (bottom, when a clip is open): transport (play/pause,

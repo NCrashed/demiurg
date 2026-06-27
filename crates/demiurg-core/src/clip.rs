@@ -245,6 +245,44 @@ impl ClipDoc {
         self.pivot = self.frames.first().map_or(self.pivot, |f| f.model.pivot);
     }
 
+    /// Tight bounding-box dims covering occupied voxels across *all* frames —
+    /// the smallest [`Self::dims`] that would still hold every frame's content.
+    /// `[0; 3]` for an empty clip. Mirrors roxlap's `PadStats::content_dims`.
+    #[must_use]
+    pub fn content_dims(&self) -> [u32; 3] {
+        self.union_bounds().map_or([0; 3], |(min, max)| {
+            [
+                max[0] - min[0] + 1,
+                max[1] - min[1] + 1,
+                max[2] - min[2] + 1,
+            ]
+        })
+    }
+
+    /// Voxel-volume ratio of the declared bbox to the tight content bbox: `1.0`
+    /// = perfectly tight, `8.0` = the box holds 8× the content's span. `1.0` for
+    /// an empty clip. Mirrors roxlap's `PadStats::pad_ratio`.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // editor-sized volumes are exact in f32
+    pub fn pad_ratio(&self) -> f32 {
+        let vol = |d: [u32; 3]| u64::from(d[0]) * u64::from(d[1]) * u64::from(d[2]);
+        let content = vol(self.content_dims());
+        if content == 0 {
+            1.0
+        } else {
+            vol(self.dims) as f32 / content as f32
+        }
+    }
+
+    /// Whether the clip wastes significant space on padding — the declared bbox
+    /// is `≥ 2×` the content's span, so [`Self::crop_all`] would at least halve
+    /// the per-frame occupancy storage. Matches roxlap's `PadStats::is_wasteful`
+    /// so the editor's warning agrees with the codec.
+    #[must_use]
+    pub fn is_padding_wasteful(&self) -> bool {
+        self.pad_ratio() >= 2.0
+    }
+
     /// The bounding box `(min, max)` covering occupied voxels across *all*
     /// frames, or `None` if every frame is empty.
     #[must_use]
@@ -491,6 +529,20 @@ mod tests {
         assert_eq!(clip.dims, [3, 2, 1]);
         assert_eq!(clip.frames[0].model.get(0, 0, 0), 0x80ff_0000);
         assert_eq!(clip.frames[1].model.get(2, 1, 0), 0x8000_ff00);
+    }
+
+    #[test]
+    fn padding_wasteful_flags_a_loose_bbox_then_clears_after_crop() {
+        // One voxel in an 8³ box: content is 1³, declared is 8³ → pad ratio 512,
+        // very wasteful. Cropping tightens to 1³ → ratio 1.0, not wasteful.
+        let mut clip = ClipDoc::new([8, 8, 8]);
+        clip.frames[0].model.set(2, 2, 2, 0x80ff_0000);
+        assert_eq!(clip.content_dims(), [1, 1, 1]);
+        assert!(clip.pad_ratio() > 2.0);
+        assert!(clip.is_padding_wasteful());
+        clip.crop_all();
+        assert_eq!(clip.dims, [1, 1, 1]);
+        assert!(!clip.is_padding_wasteful());
     }
 
     #[test]

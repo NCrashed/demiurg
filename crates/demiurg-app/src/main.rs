@@ -78,6 +78,11 @@ const VOXEL_SIDE_SHADES: [i8; 6] = [0, 28, 16, 16, 16, 28];
 /// Redraw cadence — ~60 fps, so the editor doesn't peg the GPU/CPU
 /// rendering an idle scene as fast as it can. Pairs with GPU vsync.
 const FRAME_DT: Duration = Duration::from_micros(16_667);
+/// Onion-skin ghost tints (voxlap-packed `0x80RRGGBB`; the `0x80` brightness
+/// bit keeps them non-empty): the previous frame in a cool dim blue, the next
+/// in a warm dim red, so motion direction reads at a glance.
+const ONION_PREV: u32 = 0x8030_3060;
+const ONION_NEXT: u32 = 0x8060_3030;
 /// Voxel-edge wireframe colour (`0xAARRGGBB`): a faint, semi-transparent
 /// **light** grey. Light (not dark) so edges lift out of dark shadowed
 /// faces — where boundaries otherwise vanish — while staying subtle on
@@ -917,6 +922,11 @@ struct Editor {
     /// the edited frame are one and the same). Reuses `anim_playing` for the
     /// play/pause state.
     clip_time_ms: u32,
+    /// Clip onion-skinning: ghost the neighbouring frames (dim-tinted, behind
+    /// the active frame) while sculpting, so motion registers. Render-only —
+    /// the ghosts never enter the document, so they aren't pickable/editable.
+    /// Suppressed during playback.
+    onion_skin: bool,
 }
 
 /// One whole-rig undo entry: the rig (every bone's mesh + hinge, clips, root)
@@ -1010,6 +1020,7 @@ impl Editor {
             active_frame: 0,
             clip_modified: false,
             clip_time_ms: 0,
+            onion_skin: false,
         }
     }
 
@@ -4018,6 +4029,9 @@ impl App {
         if let Some(ms) = a.seek_clip {
             self.seek_clip(ms);
         }
+        if a.crop_clip {
+            self.crop_clip();
+        }
         if let Some(mode) = a.set_rig_mode {
             self.set_rig_mode(mode);
         }
@@ -4659,8 +4673,7 @@ impl App {
             .get(self.editor.active_frame)
             .map_or_else(|| VoxelModel::new(1, 1, 1), |f| f.model.clone());
         self.editor.document.replace_model(model);
-        self.view
-            .set_model(self.editor.document.model(), self.editor.render_mode);
+        self.refresh_clip_view(); // shows onion-skin ghosts when enabled
         self.editor.refresh_palette();
         self.editor.sync_resize_dims();
         self.editor.selection.clear();
@@ -4866,6 +4879,64 @@ impl App {
             f.duration_ms = ms.map(|m| m.max(1));
             self.editor.clip_modified = true;
             self.sync_clip_time();
+        }
+    }
+
+    /// Crop every frame to the union of all frames' content, tightening the
+    /// clip's bounding box (and shrinking the `.rvc`) without any frame losing
+    /// voxels. Reframes since the dims change.
+    fn crop_clip(&mut self) {
+        self.commit_active_frame();
+        let Some(clip) = self.editor.clip.as_mut() else {
+            return;
+        };
+        clip.crop_all();
+        self.editor.clip_modified = true;
+        // crop_all keeps the frame count, so `active_frame` stays valid.
+        self.load_active_frame(true);
+        self.editor.sync_resize_dims();
+        self.sync_clip_time();
+    }
+
+    /// Build the model the viewport should show for the active clip frame: the
+    /// working model with the neighbouring frames ghosted in (onion-skin), or
+    /// `None` when onion-skin is off / playing / there's nothing to ghost. The
+    /// ghosts are render-only (they never enter the document), so picking and
+    /// the sculpt tools ignore them.
+    fn clip_render_model(&self) -> Option<VoxelModel> {
+        if !self.editor.onion_skin || self.editor.anim_playing {
+            return None;
+        }
+        let clip = self.editor.clip.as_ref()?;
+        if clip.frames.len() < 2 {
+            return None;
+        }
+        let active = self.editor.active_frame;
+        let mut base = self.editor.display_model().into_owned();
+        for (idx, tint) in [
+            (active.checked_sub(1), ONION_PREV),
+            (Some(active + 1), ONION_NEXT),
+        ] {
+            let Some(f) = idx.and_then(|i| clip.frames.get(i)) else {
+                continue;
+            };
+            for (x, y, z, _) in f.model.occupied() {
+                if base.get(x, y, z) == 0 {
+                    base.set(x, y, z, tint); // only fill cells the active frame leaves empty
+                }
+            }
+        }
+        Some(base)
+    }
+
+    /// Set the viewport model for the active clip frame, applying onion-skin
+    /// ghosts when enabled. The shared helper behind a frame load and the
+    /// per-edit rebuild.
+    fn refresh_clip_view(&mut self) {
+        let mode = self.editor.render_mode;
+        match self.clip_render_model() {
+            Some(ghosted) => self.view.set_model(&ghosted, mode),
+            None => self.view.set_model(self.editor.document.model(), mode),
         }
     }
 
@@ -5602,10 +5673,13 @@ impl App {
         // In Animate mode the static scene is empty (the posed rig renders
         // via the KFA path), so don't repopulate it from the document.
         if self.editor.dirty && self.kfa.is_none() {
-            // Render the document with the floating layer composited on
-            // top (a borrow when nothing floats, a clone while it does).
+            // Render the document with the floating layer composited on top (a
+            // borrow when nothing floats, a clone while it does), plus onion-skin
+            // ghosts when editing a clip.
             let mode = self.editor.render_mode;
-            {
+            if let Some(ghosted) = self.clip_render_model() {
+                self.view.set_model(&ghosted, mode);
+            } else {
                 let display = self.editor.display_model();
                 self.view.set_model(&display, mode);
             }

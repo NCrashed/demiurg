@@ -144,6 +144,8 @@ pub enum Msg {
     LoopModeLabel,
     Once,
     PingPong,
+    OnionSkin,
+    ClipPadWarn,
     Rig,
     Bones,
     Attachments,
@@ -216,7 +218,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 135] = [
+    pub const ALL: [Msg; 137] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -293,6 +295,8 @@ impl Msg {
         Msg::LoopModeLabel,
         Msg::Once,
         Msg::PingPong,
+        Msg::OnionSkin,
+        Msg::ClipPadWarn,
         Msg::Rig,
         Msg::Bones,
         Msg::AddBone,
@@ -443,6 +447,8 @@ const fn en(msg: Msg) -> &'static str {
         Msg::LoopModeLabel => "Loop mode",
         Msg::Once => "Once",
         Msg::PingPong => "Ping-pong",
+        Msg::OnionSkin => "Onion skin",
+        Msg::ClipPadWarn => "Bounding box dwarfs the content — crop to shrink the clip",
         Msg::Rig => "Rig",
         Msg::Bones => "Bones",
         Msg::AddBone => "Add bone",
@@ -586,6 +592,8 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::LoopModeLabel => "Режим цикла",
         Msg::Once => "Один раз",
         Msg::PingPong => "Туда-обратно",
+        Msg::OnionSkin => "Калька",
+        Msg::ClipPadWarn => "Рамка намного больше содержимого — обрежьте для сжатия клипа",
         Msg::Rig => "Риг",
         Msg::Bones => "Кости",
         Msg::AddBone => "Добавить кость",
