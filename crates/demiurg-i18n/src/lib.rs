@@ -166,6 +166,7 @@ pub enum Msg {
     Sparkle,
     AutoGenerate,
     ApiHelp,
+    BakeToClip,
     Rig,
     Bones,
     Attachments,
@@ -238,7 +239,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 156] = [
+    pub const ALL: [Msg; 157] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -336,6 +337,7 @@ impl Msg {
         Msg::Sparkle,
         Msg::AutoGenerate,
         Msg::ApiHelp,
+        Msg::BakeToClip,
         Msg::Rig,
         Msg::Bones,
         Msg::AddBone,
@@ -507,6 +509,7 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Sparkle => "Sparkle",
         Msg::AutoGenerate => "Auto",
         Msg::ApiHelp => "API reference",
+        Msg::BakeToClip => "Bake to clip",
         Msg::Rig => "Rig",
         Msg::Bones => "Bones",
         Msg::AddBone => "Add bone",
@@ -671,6 +674,7 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Sparkle => "Искры",
         Msg::AutoGenerate => "Авто",
         Msg::ApiHelp => "Справка по API",
+        Msg::BakeToClip => "Запечь в клип",
         Msg::Rig => "Риг",
         Msg::Bones => "Кости",
         Msg::AddBone => "Добавить кость",

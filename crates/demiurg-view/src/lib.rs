@@ -16,10 +16,12 @@
 //! gizmo lines ([`voxel_box_lines_3d`]), so picking and the hover box
 //! line up in either mode.
 
+mod bake;
 mod camera;
 mod kfa;
 mod pick;
 
+pub use bake::bake_clip;
 pub use camera::{OrbitCamera, ViewDir};
 pub use kfa::{KfaView, demo_rig, demo_rkc_bytes};
 pub use pick::{

@@ -165,6 +165,8 @@ pub struct UiActions {
     pub select_clip: Option<usize>,
     /// Animate: append a new clip.
     pub add_clip: bool,
+    /// Animate: bake the active skeletal clip into a voxel clip (open as new).
+    pub bake_clip: bool,
     /// Animate: rename clip `.0` to `.1`.
     pub rename_clip: Option<(usize, String)>,
     /// Animate: delete the clip at this index.
@@ -759,7 +761,7 @@ fn rig_panel(
 #[allow(clippy::too_many_lines)] // a flat panel: clip list + pose inspector + buttons
 fn clips_panel(
     ui: &mut egui::Ui,
-    editor: &Editor,
+    editor: &mut Editor,
     actions: &mut UiActions,
     t: &impl Fn(Msg) -> &'static str,
 ) {
@@ -890,6 +892,15 @@ fn clips_panel(
             }
         });
     }
+    // Bake this skeletal clip into a voxel-flipbook clip (opens as a new clip).
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label(t(Msg::Frames));
+        ui.add(egui::DragValue::new(&mut editor.bake_frames).range(1..=512));
+        if ui.button(t(Msg::BakeToClip)).clicked() {
+            actions.bake_clip = true;
+        }
+    });
 }
 
 /// The Clip editor panel (left side, when a clip document is open): the frames

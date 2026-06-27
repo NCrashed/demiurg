@@ -949,6 +949,9 @@ struct Editor {
     /// Auto-generate: re-run the generator a short debounce after script / param
     /// edits settle, for near-live procedural preview.
     auto_generate: bool,
+    /// How many frames to sample when baking the active skeletal clip into a
+    /// voxel clip (Animate ▸ Bake to clip).
+    bake_frames: u32,
 }
 
 /// One whole-rig undo entry: the rig (every bone's mesh + hinge, clips, root)
@@ -1046,6 +1049,7 @@ impl Editor {
             clip_gen_error: None,
             script_window_open: false,
             auto_generate: false,
+            bake_frames: 24,
         }
     }
 
@@ -4155,6 +4159,9 @@ impl App {
         if a.add_clip {
             self.add_clip();
         }
+        if a.bake_clip {
+            self.bake_active_clip();
+        }
         if let Some(i) = a.delete_clip {
             self.delete_clip(i);
         }
@@ -4755,6 +4762,26 @@ impl App {
         self.enter_clip(ClipDoc::new([NEW_DIMS, NEW_DIMS, NEW_DIMS]));
         self.doc_name = None;
         self.project_path = None;
+    }
+
+    /// Bake the active skeletal clip into a voxel-flipbook clip and open it as a
+    /// new standalone clip document. No-op outside a rig with a clip.
+    fn bake_active_clip(&mut self) {
+        let Some(rig) = self.editor.rig.as_ref() else {
+            return;
+        };
+        if rig.clips.is_empty() {
+            return;
+        }
+        let clip_index = self.editor.active_clip.min(rig.clips.len() - 1);
+        match demiurg_view::bake_clip(rig, clip_index, self.editor.bake_frames) {
+            Ok(doc) => {
+                self.enter_clip(doc); // replaces the rig with the baked clip
+                self.doc_name = None;
+                self.project_path = None;
+            }
+            Err(e) => eprintln!("demiurg: bake: {e}"),
+        }
     }
 
     /// Enter clip-edit mode on the first frame.
