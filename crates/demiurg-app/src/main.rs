@@ -79,6 +79,9 @@ const VOXEL_SIDE_SHADES: [i8; 6] = [0, 28, 16, 16, 16, 28];
 /// Redraw cadence — ~60 fps, so the editor doesn't peg the GPU/CPU
 /// rendering an idle scene as fast as it can. Pairs with GPU vsync.
 const FRAME_DT: Duration = Duration::from_micros(16_667);
+/// Idle delay after a procedural script/param edit before Auto regenerates, so
+/// typing doesn't trigger a generate on every keystroke.
+const REGEN_DEBOUNCE: Duration = Duration::from_millis(350);
 /// Onion-skin ghost tints (voxlap-packed `0x80RRGGBB`; the `0x80` brightness
 /// bit keeps them non-empty): the previous frame in a cool dim blue, the next
 /// in a warm dim red, so motion direction reads at a glance.
@@ -943,6 +946,9 @@ struct Editor {
     /// Whether the floating Rhai script editor window is open (the panel's
     /// "Edit script…" opens it; its close box dismisses it).
     script_window_open: bool,
+    /// Auto-generate: re-run the generator a short debounce after script / param
+    /// edits settle, for near-live procedural preview.
+    auto_generate: bool,
 }
 
 /// One whole-rig undo entry: the rig (every bone's mesh + hinge, clips, root)
@@ -1039,6 +1045,7 @@ impl Editor {
             onion_skin: false,
             clip_gen_error: None,
             script_window_open: false,
+            auto_generate: false,
         }
     }
 
@@ -1492,6 +1499,7 @@ fn main() {
         // Animate toggle revives it.
         kfa: None,
         next_frame: Instant::now(),
+        clip_regen_due: None,
     };
 
     let event_loop = EventLoop::new().expect("winit: create event loop");
@@ -1660,6 +1668,9 @@ struct App {
     kfa: Option<KfaView>,
     /// When the next frame should render (drives the ~60 fps cap).
     next_frame: Instant,
+    /// When a debounced auto-generate of the procedural clip is due (set on a
+    /// script/param edit while Auto is on; fired and cleared in `redraw`).
+    clip_regen_due: Option<Instant>,
 }
 
 impl App {
@@ -4115,6 +4126,10 @@ impl App {
         if let Some(script) = a.load_preset {
             self.load_clip_preset(script);
         }
+        // A script/param edit while Auto is on schedules a debounced regen.
+        if a.script_changed && self.editor.auto_generate {
+            self.clip_regen_due = Some(Instant::now() + REGEN_DEBOUNCE);
+        }
         if let Some(mode) = a.set_rig_mode {
             self.set_rig_mode(mode);
         }
@@ -5006,7 +5021,9 @@ impl App {
                 self.editor.active_frame = 0;
                 self.editor.clip_time_ms = 0;
                 self.editor.anim_playing = false;
-                self.load_active_frame(true); // reframe: generated dims are clip dims
+                // No reframe: dims don't change between regens, so keep the
+                // camera steady (important for the live Auto preview).
+                self.load_active_frame(false);
             }
             Err(e) => self.editor.clip_gen_error = Some(e.to_string()),
         }
@@ -5949,6 +5966,11 @@ impl App {
         self.poll_dialog();
         self.poll_save();
         self.maybe_autosave();
+        // Fire a debounced auto-generate once edits have settled.
+        if self.clip_regen_due.is_some_and(|due| Instant::now() >= due) {
+            self.clip_regen_due = None;
+            self.generate_clip();
+        }
         // A tool switch (keyboard or a panel click) away from a floating
         // layer settles it into the model.
         if self.editor.tool != self.last_tool {

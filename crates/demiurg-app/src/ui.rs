@@ -116,6 +116,9 @@ pub struct UiActions {
     pub drop_procedural: bool,
     /// Clip editor: load this preset script into the generator and generate.
     pub load_preset: Option<&'static str>,
+    /// Clip editor: the generator script / params changed this frame (drives
+    /// debounced auto-generate).
+    pub script_changed: bool,
     /// Switch the active rig bone (index into `rig.bones`).
     pub select_bone: Option<usize>,
     /// Switch the active attachment of the active bone (`0` = primary mesh,
@@ -1013,7 +1016,25 @@ const CLIP_PRESETS: &[(Msg, &str)] = &[
         Msg::EnergySplash,
         demiurg_core::clip::generator::ENERGY_SCRIPT,
     ),
+    (Msg::Plasma, demiurg_core::clip::generator::PLASMA_SCRIPT),
+    (Msg::Sparkle, demiurg_core::clip::generator::SPARKLE_SCRIPT),
 ];
+
+/// A compact API cheat-sheet shown in the script window (code identifiers, so
+/// not translated). Mirrors `demiurg_core::clip::generator`'s host API.
+const SCRIPT_API_HELP: &str = "\
+globals: frame, frames, t (0..1), w, h, d
+set(x,y,z,col)   get(x,y,z)
+sphere(cx,cy,cz,r,col)
+box(x0,y0,z0,x1,y1,z1,col)
+rgb(r,g,b)        // channels 0..255
+hsv(h,s,v)        // each 0..1
+noise(x,y,z)      // stable 0..1 field
+fbm(x,y,z,oct)    // fractal 0..1
+rand()  rand(a,b) // per-frame
+coords are ints; sample noise/fbm with floats:
+  noise(x.to_float()*0.15, ...)
+world is z-down: high z = bottom";
 
 /// The Procedural section of the clip panel: make/drop a generator, edit the
 /// Rhai script + frame-count + seed, load a preset, Generate, and show the last
@@ -1026,6 +1047,7 @@ fn clip_procedural_section(
 ) {
     let mut script_dirty = false;
     let mut open_window = false;
+    let mut auto_on = editor.auto_generate;
     {
         let Some(clip) = editor.clip.as_mut() else {
             return;
@@ -1066,13 +1088,18 @@ fn clip_procedural_section(
                     if ui.button(t(Msg::DropProcedural)).clicked() {
                         actions.drop_procedural = true;
                     }
+                    // Auto: regenerate shortly after edits settle.
+                    ui.checkbox(&mut auto_on, t(Msg::AutoGenerate))
+                        .on_hover_text(t(Msg::AutoGenerate));
                 });
             }
         }
     }
     if script_dirty {
         editor.clip_modified = true;
+        actions.script_changed = true;
     }
+    editor.auto_generate = auto_on;
     if open_window {
         editor.script_window_open = true;
     }
@@ -1111,6 +1138,13 @@ fn clip_script_window(ctx: &egui::Context, editor: &mut Editor, actions: &mut Ui
                     }
                     ui.label(format!("{}: {}", t(Msg::Frames), g.frame_count));
                 });
+                egui::CollapsingHeader::new(t(Msg::ApiHelp))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.add(egui::Label::new(
+                            egui::RichText::new(SCRIPT_API_HELP).monospace(),
+                        ));
+                    });
             });
     } else {
         open = false; // no generator any more — nothing to edit
@@ -1118,6 +1152,7 @@ fn clip_script_window(ctx: &egui::Context, editor: &mut Editor, actions: &mut Ui
     editor.script_window_open = open;
     if dirty {
         editor.clip_modified = true;
+        actions.script_changed = true;
     }
 }
 

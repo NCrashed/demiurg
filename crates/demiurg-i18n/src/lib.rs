@@ -162,6 +162,10 @@ pub enum Msg {
     Flame,
     Smoke,
     EnergySplash,
+    Plasma,
+    Sparkle,
+    AutoGenerate,
+    ApiHelp,
     Rig,
     Bones,
     Attachments,
@@ -234,7 +238,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 152] = [
+    pub const ALL: [Msg; 156] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -328,6 +332,10 @@ impl Msg {
         Msg::Flame,
         Msg::Smoke,
         Msg::EnergySplash,
+        Msg::Plasma,
+        Msg::Sparkle,
+        Msg::AutoGenerate,
+        Msg::ApiHelp,
         Msg::Rig,
         Msg::Bones,
         Msg::AddBone,
@@ -495,6 +503,10 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Flame => "Flame",
         Msg::Smoke => "Smoke",
         Msg::EnergySplash => "Energy",
+        Msg::Plasma => "Plasma",
+        Msg::Sparkle => "Sparkle",
+        Msg::AutoGenerate => "Auto",
+        Msg::ApiHelp => "API reference",
         Msg::Rig => "Rig",
         Msg::Bones => "Bones",
         Msg::AddBone => "Add bone",
@@ -655,6 +667,10 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Flame => "Пламя",
         Msg::Smoke => "Дым",
         Msg::EnergySplash => "Энергия",
+        Msg::Plasma => "Плазма",
+        Msg::Sparkle => "Искры",
+        Msg::AutoGenerate => "Авто",
+        Msg::ApiHelp => "Справка по API",
         Msg::Rig => "Риг",
         Msg::Bones => "Кости",
         Msg::AddBone => "Добавить кость",

@@ -12,8 +12,9 @@
 //! - `rgb(r,g,b) -> col`, `hsv(h,s,v) -> col` — packed `0x80RRGGBB` colours
 //!   (`r,g,b` are `0..255` ints; `h,s,v` are `0.0..1.0` floats).
 //! - `noise(x,y,z) -> 0.0..1.0` — a stable value-noise field (same every frame,
-//!   so animate by feeding `t` into a coordinate). `rand() -> 0.0..1.0` and
-//!   `rand(a,b)` — a per-frame PRNG. Rhai's built-ins cover `sin`/`cos`/`sqrt`…
+//!   so animate by feeding `t` into a coordinate). `fbm(x,y,z,octaves)` — summed
+//!   octaves of `noise` for richer, more organic detail. `rand() -> 0.0..1.0`
+//!   and `rand(a,b)` — a per-frame PRNG. Rhai's built-ins cover `sin`/`cos`/`sqrt`…
 //!
 //! Voxel coordinates are **integers** (`i64`); sample `noise` with floats, e.g.
 //! `noise(x.to_float()*0.15, y.to_float()*0.15, z.to_float()*0.15 + t*2.0)`.
@@ -90,7 +91,7 @@ for z in 0..d {
     let thresh = 0.30 + 0.55 * hf;                // flames narrow as they rise
     for y in 0..h {
         for x in 0..w {
-            let n = noise(x.to_float()*scale, y.to_float()*scale, z.to_float()*scale + t*6.0);
+            let n = fbm(x.to_float()*scale, y.to_float()*scale, z.to_float()*scale + t*6.0, 4);
             if n > thresh {
                 let heat = 1.0 - hf;              // hottest near the base
                 set(x, y, z, hsv(0.02 + 0.12*heat, 1.0, 0.55 + 0.45*heat));
@@ -109,7 +110,7 @@ for z in 0..d {
     let thresh = 0.48 + 0.34 * hf;
     for y in 0..h {
         for x in 0..w {
-            let n = noise(x.to_float()*scale, y.to_float()*scale, z.to_float()*scale + t*3.0);
+            let n = fbm(x.to_float()*scale, y.to_float()*scale, z.to_float()*scale + t*3.0, 5);
             if n > thresh {
                 let v = (150.0 + 90.0*(n - thresh)).to_int();
                 set(x, y, z, rgb(v, v, v));
@@ -141,6 +142,35 @@ for i in 0..14 {
         (rand()*h.to_float()).to_int(),
         (rand()*d.to_float()).to_int(),
         rgb(190, 240, 255));
+}
+";
+
+/// Preset: a swirling, colour-shifting plasma volume (fbm field + fbm hue).
+pub const PLASMA_SCRIPT: &str = r"// Plasma — a swirling coloured volume.
+let s = 0.16;
+for z in 0..d {
+    for y in 0..h {
+        for x in 0..w {
+            let fx = x.to_float(); let fy = y.to_float(); let fz = z.to_float();
+            let n = fbm(fx*s, fy*s, fz*s + t*4.0, 4);
+            if n > 0.55 {
+                let hue = fbm(fx*s*0.5, fy*s*0.5, fz*s*0.5 - t*2.0, 3);
+                set(x, y, z, hsv(hue, 0.8, 1.0));
+            }
+        }
+    }
+}
+";
+
+/// Preset: twinkling points that change every frame (uses the per-frame PRNG).
+pub const SPARKLE_SCRIPT: &str = r"// Sparkle — twinkling points re-rolled each frame.
+let count = (w * h * d) / 40;
+for i in 0..count {
+    let x = (rand() * w.to_float()).to_int();
+    let y = (rand() * h.to_float()).to_int();
+    let z = (rand() * d.to_float()).to_int();
+    let b = (rand() * 155.0 + 100.0).to_int();
+    set(x, y, z, rgb(b, b, b + 40));   // bluish-white
 }
 ";
 
@@ -229,7 +259,8 @@ pub fn generate(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss,
-    clippy::many_single_char_names
+    clippy::many_single_char_names,
+    clippy::too_many_lines
 )]
 fn register_api(
     engine: &mut rhai::Engine,
@@ -323,6 +354,19 @@ fn register_api(
     // noise(x,y,z): stable value-noise field in 0..1 (fixed seed across frames).
     engine.register_fn("noise", move |x: f64, y: f64, z: f64| -> f64 {
         value_noise(seed, x, y, z)
+    });
+    // fbm(x,y,z,octaves): fractal (summed-octave) noise in 0..1 — richer, more
+    // organic than a single `noise` layer. `octaves` is clamped to 1..8.
+    engine.register_fn("fbm", move |x: f64, y: f64, z: f64, octaves: i64| -> f64 {
+        let oct = octaves.clamp(1, 8);
+        let (mut freq, mut amp, mut sum, mut norm) = (1.0, 1.0, 0.0, 0.0);
+        for _ in 0..oct {
+            sum += amp * value_noise(seed, x * freq, y * freq, z * freq);
+            norm += amp;
+            freq *= 2.0;
+            amp *= 0.5;
+        }
+        sum / norm
     });
     // rand(): next per-frame PRNG draw in 0..1.
     {
@@ -418,7 +462,7 @@ fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
 }
 
 #[cfg(all(test, feature = "generator"))]
-#[allow(clippy::cast_possible_truncation)] // tiny test indices
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)] // tiny test indices / hashes
 mod tests {
     use super::*;
 
@@ -485,6 +529,19 @@ mod tests {
     }
 
     #[test]
+    fn value_noise_stays_in_unit_range() {
+        // The noise field (and hence `fbm`, a normalized weighted sum of it)
+        // must stay in 0..1 so colour/threshold maths behave.
+        let mut step = 0u64;
+        for _ in 0..5000 {
+            step = splitmix64(step);
+            let r = |k: u64| (splitmix64(step ^ k) >> 11) as f64 / 9_007_199_254_740_992.0 * 30.0;
+            let n = value_noise(7, r(1), r(2), r(3));
+            assert!((0.0..=1.0).contains(&n), "noise out of range: {n}");
+        }
+    }
+
+    #[test]
     fn demo_script_fills_every_frame() {
         let frames = generate([16, 16, 16], [8.0; 3], &ClipGenerator::demo()).expect("runs");
         assert_eq!(frames.len(), 16);
@@ -498,6 +555,8 @@ mod tests {
             ("flame", FLAME_SCRIPT),
             ("smoke", SMOKE_SCRIPT),
             ("energy", ENERGY_SCRIPT),
+            ("plasma", PLASMA_SCRIPT),
+            ("sparkle", SPARKLE_SCRIPT),
         ] {
             let frames = generate([16, 16, 16], [8.0; 3], &make(script, 6, 7))
                 .unwrap_or_else(|e| panic!("preset {name} failed: {e}"));
