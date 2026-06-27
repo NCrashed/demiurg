@@ -29,25 +29,22 @@ demiurg-core = { path = "crates/demiurg-core", version = "0.6.0" }
 demiurg-i18n = { path = "crates/demiurg-i18n", version = "0.6.0" }
 demiurg-view = { path = "crates/demiurg-view", version = "0.6.0" }
 
-# demiurg depends on roxlap ONLY (see DESIGN.md §1).
-#
-# TEMPORARILY pinned to the LOCAL roxlap checkout (master, 0.14.0) while we
-# adapt the editor to its new animated-clips API and renderer: we co-develop
-# the engine and the editor together until the API settles, then bump roxlap,
-# publish it, and restore version pins here before releasing demiurg.
-# (Published baseline is crates.io 0.13.0 — the `roxlap_formats::character`
-# rigged-character container with TRS keyframes.)
+# demiurg depends on roxlap ONLY (see DESIGN.md §1). crates.io 0.15.0 ships the
+# animated-voxel-clips API + renderer (VCL.5/RF.1) the multi-attachment editor
+# builds on, on top of 0.13's `roxlap_formats::character` TRS-keyframe container.
+# (The local `../roxlap/crates/*` path pin used while co-developing 0.14/0.15 was
+# restored to a published version once 0.15.0 shipped.)
 #
 # roxlap-formats: kv6/character/kfa read/write + shaded surface extraction.
-# roxlap-core:    Camera, OpticastSettings, SpriteLighting, kfa_draw.
+# roxlap-core:    Camera, OpticastSettings, kfa_draw (compose_attachment).
 # roxlap-scene:   Scene graph the renderer composites.
 # roxlap-render:  unified CPU/GPU facade (SceneRenderer, draw_lines, sprites,
-#                 image sprites, set_kfa_sprites/update_kfa_poses).
+#                 image sprites, set_kfa_sprites, add_character).
 # roxlap-voxvideo lands at M5.
-roxlap-formats = { path = "../roxlap/crates/roxlap-formats" }
-roxlap-core = { path = "../roxlap/crates/roxlap-core" }
-roxlap-scene = { path = "../roxlap/crates/roxlap-scene" }
-roxlap-render = { path = "../roxlap/crates/roxlap-render" }
+roxlap-formats = "0.15.0"
+roxlap-core = "0.15.0"
+roxlap-scene = "0.15.0"
+roxlap-render = "0.15.0"
 
 # Render-side world math (f64 orbit camera). Mirrors roxlap's pin so
 # the workspaces share one glam.
