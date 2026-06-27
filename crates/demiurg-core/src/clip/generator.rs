@@ -80,6 +80,67 @@ let hue = t;                                       // cycle the hue over the loo
 sphere(cx, cy, cz, r.to_int(), hsv(hue, 0.9, 1.0));
 ";
 
+/// Preset: a noise-driven fire that rises over the loop.
+pub const FLAME_SCRIPT: &str = r"// Flame — noise-driven fire rising over the loop.
+let scale = 0.18;
+for z in 0..d {
+    let hf = z.to_float() / d.to_float();   // 0 at the base .. 1 at the top
+    let thresh = 0.30 + 0.55 * hf;          // flames narrow as they rise
+    for y in 0..h {
+        for x in 0..w {
+            let n = noise(x.to_float()*scale, y.to_float()*scale, z.to_float()*scale - t*6.0);
+            if n > thresh {
+                let heat = 1.0 - hf;        // hottest near the base
+                set(x, y, z, hsv(0.02 + 0.12*heat, 1.0, 0.55 + 0.45*heat));
+            }
+        }
+    }
+}
+";
+
+/// Preset: a soft grey smoke plume billowing upward.
+pub const SMOKE_SCRIPT: &str = r"// Smoke — a soft grey plume billowing upward.
+let scale = 0.13;
+for z in 0..d {
+    let hf = z.to_float() / d.to_float();
+    let thresh = 0.48 + 0.34 * hf;
+    for y in 0..h {
+        for x in 0..w {
+            let n = noise(x.to_float()*scale, y.to_float()*scale, z.to_float()*scale - t*3.0);
+            if n > thresh {
+                let v = (150.0 + 90.0*(n - thresh)).to_int();
+                set(x, y, z, rgb(v, v, v));
+            }
+        }
+    }
+}
+";
+
+/// Preset: an expanding spherical shell plus a few sparks.
+pub const ENERGY_SCRIPT: &str = r"// Energy splash — an expanding shell + sparks.
+let cx = w/2; let cy = h/2; let cz = d/2;
+let radius = t * (w.to_float() * 0.5);
+for z in 0..d {
+    for y in 0..h {
+        for x in 0..w {
+            let dx = (x - cx).to_float();
+            let dy = (y - cy).to_float();
+            let dz = (z - cz).to_float();
+            let dist = sqrt(dx*dx + dy*dy + dz*dz);
+            if dist > radius - 1.2 && dist < radius + 1.2 {
+                set(x, y, z, hsv(0.55 + 0.08*rand(), 0.85, 1.0));
+            }
+        }
+    }
+}
+for i in 0..14 {
+    set((rand()*w.to_float()).to_int(),
+        (rand()*h.to_float()).to_int(),
+        (rand()*d.to_float()).to_int(),
+        rgb(190, 240, 255));
+}
+";
+
 // ---- the engine (feature-gated) -----------------------------------------
 
 /// Run `g`'s script once per frame and collect the resulting models — the
@@ -425,5 +486,23 @@ mod tests {
         let frames = generate([16, 16, 16], [8.0; 3], &ClipGenerator::demo()).expect("runs");
         assert_eq!(frames.len(), 16);
         assert!(frames.iter().all(|f| f.occupied_count() > 0));
+    }
+
+    #[test]
+    fn preset_scripts_compile_and_produce_voxels() {
+        // Guards the shipped presets against Rhai syntax / API drift.
+        for (name, script) in [
+            ("flame", FLAME_SCRIPT),
+            ("smoke", SMOKE_SCRIPT),
+            ("energy", ENERGY_SCRIPT),
+        ] {
+            let frames = generate([16, 16, 16], [8.0; 3], &make(script, 6, 7))
+                .unwrap_or_else(|e| panic!("preset {name} failed: {e}"));
+            assert_eq!(frames.len(), 6);
+            assert!(
+                frames.iter().any(|f| f.occupied_count() > 0),
+                "preset {name} produced no voxels in any frame",
+            );
+        }
     }
 }

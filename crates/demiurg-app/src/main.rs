@@ -937,6 +937,9 @@ struct Editor {
     /// the ghosts never enter the document, so they aren't pickable/editable.
     /// Suppressed during playback.
     onion_skin: bool,
+    /// The last procedural-generation error (script compile / runtime), shown
+    /// in the clip panel until the next successful Generate. `None` = no error.
+    clip_gen_error: Option<String>,
 }
 
 /// One whole-rig undo entry: the rig (every bone's mesh + hinge, clips, root)
@@ -1031,6 +1034,7 @@ impl Editor {
             clip_modified: false,
             clip_time_ms: 0,
             onion_skin: false,
+            clip_gen_error: None,
         }
     }
 
@@ -4095,6 +4099,18 @@ impl App {
         if a.crop_clip {
             self.crop_clip();
         }
+        if a.make_procedural {
+            self.make_clip_procedural();
+        }
+        if a.generate_clip {
+            self.generate_clip();
+        }
+        if a.drop_procedural {
+            self.drop_clip_procedural();
+        }
+        if let Some(script) = a.load_preset {
+            self.load_clip_preset(script);
+        }
         if let Some(mode) = a.set_rig_mode {
             self.set_rig_mode(mode);
         }
@@ -4731,6 +4747,7 @@ impl App {
         self.editor.active_frame = 0;
         self.editor.clip_modified = false;
         self.editor.clip_time_ms = 0;
+        self.editor.clip_gen_error = None;
         self.editor.anim_playing = false; // a freshly opened clip starts paused
         self.load_active_frame(true);
     }
@@ -4953,6 +4970,69 @@ impl App {
             self.editor.clip_modified = true;
             self.sync_clip_time();
         }
+    }
+
+    // ---- procedural generation (Rhai) ------------------------------------
+
+    /// Make the active clip procedural: install the demo generator and generate
+    /// its frames. No-op outside a clip / when it's already procedural.
+    fn make_clip_procedural(&mut self) {
+        let Some(clip) = self.editor.clip.as_mut() else {
+            return;
+        };
+        if clip.generator.is_some() {
+            return;
+        }
+        clip.generator = Some(demiurg_core::clip::ClipGenerator::demo());
+        self.generate_clip();
+    }
+
+    /// Re-run the active clip's generator script and adopt the produced frames.
+    /// On a script error, store the message for the panel and leave the frames
+    /// untouched. No-op when the clip has no generator.
+    fn generate_clip(&mut self) {
+        let result = match self.editor.clip.as_mut() {
+            Some(clip) if clip.generator.is_some() => clip.regenerate(),
+            _ => return,
+        };
+        match result {
+            Ok(()) => {
+                self.editor.clip_gen_error = None;
+                self.editor.clip_modified = true;
+                self.editor.active_frame = 0;
+                self.editor.clip_time_ms = 0;
+                self.editor.anim_playing = false;
+                self.load_active_frame(true); // reframe: generated dims are clip dims
+            }
+            Err(e) => self.editor.clip_gen_error = Some(e.to_string()),
+        }
+    }
+
+    /// Drop the active clip's generator (keeping the already-generated frames),
+    /// turning it back into a plain hand-editable clip.
+    fn drop_clip_procedural(&mut self) {
+        if let Some(clip) = self.editor.clip.as_mut() {
+            clip.generator = None;
+            self.editor.clip_modified = true;
+            self.editor.clip_gen_error = None;
+        }
+    }
+
+    /// Load `script` into the active clip's generator (creating one if needed)
+    /// and generate — the "load a preset" path.
+    fn load_clip_preset(&mut self, script: &str) {
+        match self.editor.clip.as_mut().map(|c| &mut c.generator) {
+            Some(g @ None) => {
+                *g = Some(demiurg_core::clip::ClipGenerator {
+                    script: script.to_string(),
+                    frame_count: 16,
+                    seed: 1,
+                });
+            }
+            Some(Some(g)) => g.script = script.to_string(),
+            None => return,
+        }
+        self.generate_clip();
     }
 
     /// Crop every frame to the union of all frames' content, tightening the

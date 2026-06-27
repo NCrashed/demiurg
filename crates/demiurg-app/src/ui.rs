@@ -108,6 +108,14 @@ pub struct UiActions {
     pub seek_clip: Option<u32>,
     /// Clip editor: crop every frame to the union of all frames' content.
     pub crop_clip: bool,
+    /// Clip editor: make the clip procedural (install the demo generator).
+    pub make_procedural: bool,
+    /// Clip editor: (re)run the generator script and adopt its frames.
+    pub generate_clip: bool,
+    /// Clip editor: drop the generator (keep the generated frames).
+    pub drop_procedural: bool,
+    /// Clip editor: load this preset script into the generator and generate.
+    pub load_preset: Option<&'static str>,
     /// Switch the active rig bone (index into `rig.bones`).
     pub select_bone: Option<usize>,
     /// Switch the active attachment of the active bone (`0` = primary mesh,
@@ -987,6 +995,86 @@ fn clip_panel(
         if ui.button(t(Msg::Crop)).clicked() {
             actions.crop_clip = true;
         }
+    }
+    // The procedural-generator section needs `&mut editor` (it edits the script
+    // in place); `clip`'s borrow above has ended (NLL), so it re-borrows freely.
+    clip_procedural_section(ui, editor, actions, t);
+}
+
+/// Preset effects offered in the clip's Procedural section: `(label, script)`.
+const CLIP_PRESETS: &[(Msg, &str)] = &[
+    (Msg::Flame, demiurg_core::clip::generator::FLAME_SCRIPT),
+    (Msg::Smoke, demiurg_core::clip::generator::SMOKE_SCRIPT),
+    (
+        Msg::EnergySplash,
+        demiurg_core::clip::generator::ENERGY_SCRIPT,
+    ),
+];
+
+/// The Procedural section of the clip panel: make/drop a generator, edit the
+/// Rhai script + frame-count + seed, load a preset, Generate, and show the last
+/// generation error. Emits [`UiActions`]; the host runs the generator.
+fn clip_procedural_section(
+    ui: &mut egui::Ui,
+    editor: &mut Editor,
+    actions: &mut UiActions,
+    t: &impl Fn(Msg) -> &'static str,
+) {
+    let mut script_dirty = false;
+    {
+        let Some(clip) = editor.clip.as_mut() else {
+            return;
+        };
+        ui.separator();
+        ui.label(t(Msg::Procedural));
+        match &mut clip.generator {
+            None => {
+                if ui.button(t(Msg::MakeProcedural)).clicked() {
+                    actions.make_procedural = true;
+                }
+            }
+            Some(g) => {
+                ui.horizontal(|ui| {
+                    ui.label(t(Msg::Frames));
+                    script_dirty |= ui
+                        .add(egui::DragValue::new(&mut g.frame_count).range(1..=512))
+                        .changed();
+                    ui.label(t(Msg::Seed));
+                    script_dirty |= ui.add(egui::DragValue::new(&mut g.seed)).changed();
+                });
+                // The script editor (monospace, multiline).
+                script_dirty |= ui
+                    .add(
+                        egui::TextEdit::multiline(&mut g.script)
+                            .code_editor()
+                            .desired_rows(8)
+                            .desired_width(f32::INFINITY),
+                    )
+                    .changed();
+                ui.horizontal(|ui| {
+                    ui.label(t(Msg::Preset));
+                    for (msg, script) in CLIP_PRESETS {
+                        if ui.button(t(*msg)).clicked() {
+                            actions.load_preset = Some(script);
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button(t(Msg::Generate)).clicked() {
+                        actions.generate_clip = true;
+                    }
+                    if ui.button(t(Msg::DropProcedural)).clicked() {
+                        actions.drop_procedural = true;
+                    }
+                });
+            }
+        }
+    }
+    if script_dirty {
+        editor.clip_modified = true;
+    }
+    if let Some(err) = &editor.clip_gen_error {
+        ui.colored_label(egui::Color32::from_rgb(0xE0, 0x60, 0x60), err);
     }
 }
 
