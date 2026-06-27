@@ -11,6 +11,14 @@ keywords.workspace = true
 categories.workspace = true
 description = "Editor document model and engine-format conversion for the demiurg voxel asset editor."
 
+[features]
+# The Rhai procedural-clip generator. On by default; a lean / wasm build can
+# `default-features = false` to drop the `rhai` engine (clip projects still
+# load/save — only `ClipDoc::regenerate` and `clip::generator::generate`, which
+# need the engine, are gated off).
+default = ["generator"]
+generator = ["dep:rhai"]
+
 [dependencies]
 roxlap-formats.workspace = true
 serde.workspace = true
@@ -18,6 +26,13 @@ postcard.workspace = true
 # MagicaVoxel `.vox` import (handles real-world chunk variants + the
 # default palette). Export is hand-rolled in `vox.rs`.
 dot_vox = "5"
+# Embedded scripting for procedural clip generation (optional; see the
+# `generator` feature). Generation runs synchronously on one thread, so the
+# (non-`sync`) single-threaded engine is fine and lets host fns close over a
+# plain `Rc<RefCell<_>>` working frame.
+rhai = { version = "1.25", optional = true, default-features = false, features = [
+    "std",
+] }
 
 [lints]
 workspace = true

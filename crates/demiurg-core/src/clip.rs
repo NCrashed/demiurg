@@ -32,6 +32,8 @@ use roxlap_formats::voxel_clip::{self, DecodeError, ParseError, VoxelClip};
 
 use crate::VoxelModel;
 
+pub mod generator;
+pub use generator::{ClipGenerator, GenError};
 pub use roxlap_formats::voxel_clip::LoopMode;
 
 /// Default frame duration for a fresh clip (~12.5 fps — a comfortable default
@@ -89,6 +91,11 @@ pub struct ClipDoc {
     pub default_frame_ms: u32,
     /// The frames, in playback order. Length ≥ 1.
     pub frames: Vec<ClipFrame>,
+    /// A procedural generator that (re)builds [`Self::frames`] from a script, or
+    /// `None` for a hand-sculpted clip. The frames stay the single source of
+    /// truth (encode/preview/timeline read only them); the generator just fills
+    /// them on [`Self::regenerate`]. Persisted in the `.demiurg` project.
+    pub generator: Option<ClipGenerator>,
 }
 
 impl ClipDoc {
@@ -105,6 +112,7 @@ impl ClipDoc {
             loop_mode: LoopMode::Loop,
             default_frame_ms: DEFAULT_FRAME_MS,
             frames: vec![ClipFrame::new(model)],
+            generator: None,
         }
     }
 
@@ -123,7 +131,27 @@ impl ClipDoc {
             loop_mode: LoopMode::Loop,
             default_frame_ms: DEFAULT_FRAME_MS,
             frames: vec![ClipFrame::new(model)],
+            generator: None,
         }
+    }
+
+    /// Re-run the [`generator`](Self::generator) script and replace every frame
+    /// with its output, keeping the clip's loop mode + default duration. A
+    /// no-op (returns `Ok`) when there is no generator. The frames remain the
+    /// source of truth — this just fills them.
+    ///
+    /// # Errors
+    /// [`GenError`] if the script fails to compile or a frame fails to run.
+    #[cfg(feature = "generator")]
+    pub fn regenerate(&mut self) -> Result<(), GenError> {
+        let Some(g) = &self.generator else {
+            return Ok(());
+        };
+        let models = generator::generate(self.dims, self.pivot, g)?;
+        if !models.is_empty() {
+            self.frames = models.into_iter().map(ClipFrame::new).collect();
+        }
+        Ok(())
     }
 
     /// Number of frames (always ≥ 1).
@@ -384,6 +412,7 @@ impl ClipDoc {
             loop_mode: decoded.loop_mode,
             default_frame_ms: clip.default_frame_ms,
             frames,
+            generator: None, // a `.rvc` carries only baked frames, no script
         })
     }
 

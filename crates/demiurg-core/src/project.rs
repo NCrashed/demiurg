@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::VoxelModel;
-use crate::clip::{self, ClipDoc, ClipFrame};
+use crate::clip::{self, ClipDoc, ClipFrame, ClipGenerator};
 use crate::rig::Rig;
 use roxlap_formats::Rgb6;
 
@@ -115,6 +115,10 @@ pub struct ClipProject {
     pub loop_mode: u8,
     pub default_frame_ms: u32,
     pub frames: Vec<ClipFrameProject>,
+    /// The procedural generator (script + params), if the clip is procedural.
+    /// `#[serde(default)]` so projects written before generators still load.
+    #[serde(default)]
+    pub generator: Option<ClipGenerator>,
 }
 
 /// One dense frame of a [`ClipProject`].
@@ -153,6 +157,7 @@ impl ClipProject {
             loop_mode: clip::loop_mode_to_u8(c.loop_mode),
             default_frame_ms: c.default_frame_ms,
             frames,
+            generator: c.generator.clone(),
         }
     }
 
@@ -197,6 +202,7 @@ impl ClipProject {
             loop_mode: clip::loop_mode_from_u8(self.loop_mode),
             default_frame_ms: self.default_frame_ms,
             frames,
+            generator: self.generator,
         })
     }
 }
@@ -359,6 +365,25 @@ mod tests {
             "interior voxel survives the project round-trip"
         );
         assert_eq!(back.frames[0].model.get(1, 1, 1), 0x8080_8080);
+    }
+
+    #[test]
+    fn clip_generator_survives_the_project_round_trip() {
+        use crate::clip::{ClipDoc, ClipGenerator};
+
+        let mut clip = ClipDoc::new([4, 4, 4]);
+        clip.generator = Some(ClipGenerator {
+            script: "set(frame, 0, 0, rgb(1, 2, 3));".into(),
+            frame_count: 9,
+            seed: 1234,
+        });
+        let Loaded::Clip(back) = from_bytes(&to_bytes_clip(&clip)).expect("round-trips") else {
+            panic!("expected a clip");
+        };
+        let g = back.generator.expect("generator survives");
+        assert_eq!(g.frame_count, 9);
+        assert_eq!(g.seed, 1234);
+        assert!(g.script.contains("rgb(1, 2, 3)"));
     }
 
     #[test]
