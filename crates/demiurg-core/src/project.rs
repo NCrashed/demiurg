@@ -14,11 +14,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::VoxelModel;
+use crate::clip::{self, ClipDoc, ClipFrame};
 use crate::rig::Rig;
 use roxlap_formats::Rgb6;
 
-/// On-disk top-level document: a bare model, or a rigged character (its `.rkc`
-/// bytes). Postcard tags the variant, so the loader knows which it is.
+/// On-disk top-level document: a bare model, a rigged character (its `.rkc`
+/// bytes), or an animated voxel clip. Postcard tags the variant, so the loader
+/// knows which it is.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum Doc {
     // Boxed: a `Project` (dense voxel buffer + palette) dwarfs the rig's byte
@@ -26,9 +28,12 @@ enum Doc {
     Model(Box<Project>),
     /// A rigged, animated character as serialized `.rkc` bytes.
     Rig(Vec<u8>),
+    /// An animated voxel clip — a sequence of dense frames (boxed: a clip's
+    /// many dense buffers dwarf the other variants).
+    Clip(Box<ClipProject>),
 }
 
-/// What a `.demiurg` file decoded to — a model or a rig.
+/// What a `.demiurg` file decoded to — a model, a rig, or a clip.
 // A `VoxelModel` (inline 256-entry palette) dwarfs a `Rig`, but `Loaded` is a
 // one-shot return value the caller immediately unwraps — boxing would only add
 // indirection at every match site, not save any lasting memory.
@@ -36,6 +41,7 @@ enum Doc {
 pub enum Loaded {
     Model(VoxelModel),
     Rig(Rig),
+    Clip(ClipDoc),
 }
 
 /// Serializable form of a [`VoxelModel`]. Palette entries are stored as
@@ -94,6 +100,107 @@ impl Project {
     }
 }
 
+/// Serializable form of a [`ClipDoc`]: clip-level metadata plus the dense
+/// frames. Like [`Project`], frames store raw `[r, g, b]` palette triplets and
+/// the full dense voxel buffer, so the WIP round-trips losslessly (interior
+/// voxels the `.rvc` export would drop are kept). `dims`/`pivot` are
+/// clip-level (every frame shares them).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClipProject {
+    pub name: String,
+    pub dims: [u32; 3],
+    pub pivot: [f32; 3],
+    pub voxel_world_size: f32,
+    /// [`crate::clip::loop_mode_to_u8`] tag.
+    pub loop_mode: u8,
+    pub default_frame_ms: u32,
+    pub frames: Vec<ClipFrameProject>,
+}
+
+/// One dense frame of a [`ClipProject`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClipFrameProject {
+    /// 256 `[r, g, b]` entries when present.
+    pub palette: Option<Vec<[u8; 3]>>,
+    /// Dense voxel buffer, `x + xsiz·(y + ysiz·z)` order, `0` = empty.
+    pub voxels: Vec<u32>,
+    /// On-screen ms; `None` ⇒ the clip's `default_frame_ms`.
+    pub duration_ms: Option<u32>,
+}
+
+impl ClipProject {
+    /// Snapshot a clip document.
+    #[must_use]
+    pub fn from_clip(c: &ClipDoc) -> Self {
+        let frames = c
+            .frames
+            .iter()
+            .map(|f| ClipFrameProject {
+                palette: f
+                    .model
+                    .palette
+                    .as_ref()
+                    .map(|p| p.iter().map(|c| [c.r, c.g, c.b]).collect()),
+                voxels: f.model.voxels().to_vec(),
+                duration_ms: f.duration_ms,
+            })
+            .collect();
+        Self {
+            name: c.name.clone(),
+            dims: c.dims,
+            pivot: c.pivot,
+            voxel_world_size: c.voxel_world_size,
+            loop_mode: clip::loop_mode_to_u8(c.loop_mode),
+            default_frame_ms: c.default_frame_ms,
+            frames,
+        }
+    }
+
+    /// Rebuild a clip document. Returns `None` if any frame's buffer length
+    /// disagrees with `dims`, or the clip has no frames (corrupt project).
+    #[must_use]
+    pub fn into_clip(self) -> Option<ClipDoc> {
+        if self.frames.is_empty() {
+            return None;
+        }
+        let mut frames = Vec::with_capacity(self.frames.len());
+        for f in self.frames {
+            let palette = f.palette.map(|entries| {
+                let mut arr = [Rgb6::default(); 256];
+                for (slot, c) in arr.iter_mut().zip(entries.iter()) {
+                    *slot = Rgb6 {
+                        r: c[0],
+                        g: c[1],
+                        b: c[2],
+                    };
+                }
+                arr
+            });
+            let model = VoxelModel::from_parts(
+                self.dims[0],
+                self.dims[1],
+                self.dims[2],
+                self.pivot,
+                palette,
+                f.voxels,
+            )?;
+            frames.push(ClipFrame {
+                model,
+                duration_ms: f.duration_ms,
+            });
+        }
+        Some(ClipDoc {
+            name: self.name,
+            dims: self.dims,
+            pivot: self.pivot,
+            voxel_world_size: self.voxel_world_size,
+            loop_mode: clip::loop_mode_from_u8(self.loop_mode),
+            default_frame_ms: self.default_frame_ms,
+            frames,
+        })
+    }
+}
+
 /// Serialize a bare model to `.demiurg` bytes.
 ///
 /// # Panics
@@ -116,6 +223,17 @@ pub fn to_bytes_rig(rig: &Rig) -> Vec<u8> {
     postcard::to_allocvec(&Doc::Rig(rig.to_rkc_bytes())).expect("postcard serialize")
 }
 
+/// Serialize an animated voxel clip to `.demiurg` bytes (lossless dense frames).
+///
+/// # Panics
+/// Never in practice: postcard serialization into a growable `Vec` has no
+/// failure path.
+#[must_use]
+pub fn to_bytes_clip(clip: &ClipDoc) -> Vec<u8> {
+    postcard::to_allocvec(&Doc::Clip(Box::new(ClipProject::from_clip(clip))))
+        .expect("postcard serialize")
+}
+
 /// Parse `.demiurg` bytes into a model or a rig.
 ///
 /// # Errors
@@ -131,6 +249,10 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Loaded, LoadError> {
         Doc::Rig(rkc) => Rig::from_rkc_bytes(&rkc)
             .map(Loaded::Rig)
             .map_err(LoadError::Rig),
+        Doc::Clip(c) => (*c)
+            .into_clip()
+            .map(Loaded::Clip)
+            .ok_or(LoadError::DimsMismatch),
     }
 }
 
@@ -142,7 +264,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Loaded, LoadError> {
 pub fn from_bytes_model(bytes: &[u8]) -> Result<VoxelModel, LoadError> {
     match from_bytes(bytes)? {
         Loaded::Model(m) => Ok(m),
-        Loaded::Rig(_) => Err(LoadError::ExpectedModel),
+        Loaded::Rig(_) | Loaded::Clip(_) => Err(LoadError::ExpectedModel),
     }
 }
 
@@ -199,6 +321,44 @@ mod tests {
         assert_eq!(back.dims(), (3, 3, 3));
         assert_eq!(back.pivot, m.pivot);
         assert_eq!(back.palette, m.palette);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // pivot/size literals are exact in f32
+    fn clip_round_trips_losslessly_including_interior() {
+        use crate::clip::{ClipDoc, LoopMode};
+
+        // A solid 3³ first frame: its enclosed centre voxel would vanish
+        // through `.rvc` (surface-only) but must survive the `.demiurg` WIP.
+        let mut clip = ClipDoc::new([3, 3, 3]);
+        for z in 0..3 {
+            for y in 0..3 {
+                for x in 0..3 {
+                    clip.frames[0].model.set(x, y, z, 0x8080_8080);
+                }
+            }
+        }
+        let f1 = clip.add_frame();
+        clip.frames[f1].model.set(0, 0, 0, 0x80ff_0000);
+        clip.frames[f1].duration_ms = Some(33);
+        clip.loop_mode = LoopMode::PingPong;
+        clip.default_frame_ms = 50;
+        clip.name = "spark".into();
+
+        let Loaded::Clip(back) = from_bytes(&to_bytes_clip(&clip)).expect("round-trips") else {
+            panic!("expected a clip");
+        };
+        assert_eq!(back.name, "spark");
+        assert_eq!(back.dims, [3, 3, 3]);
+        assert_eq!(back.frame_count(), 2);
+        assert_eq!(back.loop_mode, LoopMode::PingPong);
+        assert_eq!(back.durations(), vec![50, 33]);
+        assert_eq!(
+            back.frames[0].model.occupied_count(),
+            27,
+            "interior voxel survives the project round-trip"
+        );
+        assert_eq!(back.frames[0].model.get(1, 1, 1), 0x8080_8080);
     }
 
     #[test]

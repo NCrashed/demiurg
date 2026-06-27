@@ -4191,6 +4191,14 @@ impl App {
                     self.project_path = Some(path);
                     true
                 }
+                // Clip documents are loaded once the clip editor is wired (C1).
+                Ok(Ok(project::Loaded::Clip(_))) => {
+                    eprintln!(
+                        "demiurg: {}: clip projects are not loadable yet",
+                        path.display()
+                    );
+                    false
+                }
                 Ok(Err(e)) => {
                     eprintln!("demiurg: {}: {e}", path.display());
                     false

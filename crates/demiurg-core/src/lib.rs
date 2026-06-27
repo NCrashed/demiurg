@@ -25,11 +25,13 @@ use roxlap_formats::Rgb6;
 use roxlap_formats::kv6::{self, Kv6};
 use roxlap_formats::vxl::{self, Vxl};
 
+pub mod clip;
 pub mod edit;
 pub mod project;
 pub mod rig;
 pub mod vox;
 
+pub use clip::{ClipDoc, ClipFrame, LoopMode};
 pub use edit::Document;
 pub use rig::{KeyXform, Keyframe, Quat, Rig, RigAttachment, RigBone};
 

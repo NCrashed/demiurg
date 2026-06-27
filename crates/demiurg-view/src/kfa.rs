@@ -390,7 +390,9 @@ mod tests {
                 assert_eq!(back.clips.len(), rig.clips.len(), "clips survive");
                 assert_eq!(back.clip_keyframes(0).len(), rig.clip_keyframes(0).len());
             }
-            demiurg_core::project::Loaded::Model(_) => panic!("expected a rig"),
+            demiurg_core::project::Loaded::Model(_) | demiurg_core::project::Loaded::Clip(_) => {
+                panic!("expected a rig")
+            }
         }
     }
 
