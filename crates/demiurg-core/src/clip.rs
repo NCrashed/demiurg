@@ -337,14 +337,14 @@ impl ClipDoc {
         self.to_voxel_clip().serialize()
     }
 
-    /// Parse `.rvc` bytes back into an (editable, surface-only) clip document.
+    /// Decode an in-memory roxlap [`VoxelClip`] into an (editable, surface-only)
+    /// clip document — the bridge from an embedded `.rkc` clip attachment back
+    /// to an editable clip.
     ///
     /// # Errors
-    /// [`ClipLoadError::Parse`] if the bytes are not a valid `.rvc`;
-    /// [`ClipLoadError::Decode`] if its frame stream cannot be reconstructed.
-    pub fn from_rvc_bytes(bytes: &[u8]) -> Result<Self, ClipLoadError> {
-        let clip = VoxelClip::parse(bytes).map_err(ClipLoadError::Parse)?;
-        let decoded = clip.decode().map_err(ClipLoadError::Decode)?;
+    /// [`DecodeError`] if the clip's frame stream cannot be reconstructed.
+    pub fn from_voxel_clip(clip: &VoxelClip) -> Result<Self, DecodeError> {
+        let decoded = clip.decode()?;
         let durations = decoded.durations.clone();
         let frames = decoded
             .frames
@@ -367,6 +367,16 @@ impl ClipDoc {
             default_frame_ms: clip.default_frame_ms,
             frames,
         })
+    }
+
+    /// Parse `.rvc` bytes back into an (editable, surface-only) clip document.
+    ///
+    /// # Errors
+    /// [`ClipLoadError::Parse`] if the bytes are not a valid `.rvc`;
+    /// [`ClipLoadError::Decode`] if its frame stream cannot be reconstructed.
+    pub fn from_rvc_bytes(bytes: &[u8]) -> Result<Self, ClipLoadError> {
+        let clip = VoxelClip::parse(bytes).map_err(ClipLoadError::Parse)?;
+        Self::from_voxel_clip(&clip).map_err(ClipLoadError::Decode)
     }
 }
 

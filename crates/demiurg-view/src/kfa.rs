@@ -200,10 +200,10 @@ pub fn demo_rig() -> Rig {
         name: "demo".to_string(),
         root: [0.0, 0.0, 0.0],
         bones: vec![
-            RigBone {
-                name: "body".to_string(),
-                model: body,
-                hinge: Hinge {
+            RigBone::mesh(
+                "body".to_string(),
+                body,
+                Hinge {
                     parent: -1,
                     p: [zero, zero],
                     v: [z_axis, z_axis],
@@ -212,12 +212,12 @@ pub fn demo_rig() -> Rig {
                     htype: 0,
                     filler: [0; 7],
                 },
-                extras: Vec::new(),
-            },
-            RigBone {
-                name: "arm".to_string(),
-                model: arm,
-                hinge: Hinge {
+                Vec::new(),
+            ),
+            RigBone::mesh(
+                "arm".to_string(),
+                arm,
+                Hinge {
                     parent: 0,
                     p: [zero, shoulder],
                     v: [z_axis, z_axis],
@@ -226,8 +226,8 @@ pub fn demo_rig() -> Rig {
                     htype: 0,
                     filler: [0; 7],
                 },
-                extras: Vec::new(),
-            },
+                Vec::new(),
+            ),
         ],
         clips: vec![Clip {
             name: "swing".to_string(),
@@ -330,11 +330,13 @@ mod tests {
             htype: 0,
             filler: [0; 7],
         };
-        let rotator = |name: &str, parent: i32, v: Point3| RigBone {
-            name: name.to_string(),
-            model: VoxelModel::new(1, 1, 1), // empty: zero voxels -> invisible
-            hinge: hinge(parent, v),
-            extras: Vec::new(),
+        let rotator = |name: &str, parent: i32, v: Point3| {
+            RigBone::mesh(
+                name.to_string(),
+                VoxelModel::new(1, 1, 1), // empty: zero voxels -> invisible
+                hinge(parent, v),
+                Vec::new(),
+            )
         };
         let rig = Rig {
             name: "joint".to_string(),
@@ -343,12 +345,12 @@ mod tests {
                 rotator("root", -1, axis(0.0, 0.0, 1.0)),
                 rotator("rotX", 0, axis(1.0, 0.0, 0.0)),
                 rotator("rotY", 1, axis(0.0, 1.0, 0.0)),
-                RigBone {
-                    name: "leaf".to_string(),
-                    model: box_model(3, 3, 8, 0x80ff_ffff),
-                    hinge: hinge(2, axis(0.0, 0.0, 1.0)),
-                    extras: Vec::new(),
-                },
+                RigBone::mesh(
+                    "leaf".to_string(),
+                    box_model(3, 3, 8, 0x80ff_ffff),
+                    hinge(2, axis(0.0, 0.0, 1.0)),
+                    Vec::new(),
+                ),
             ],
             clips: vec![Clip {
                 name: "c".to_string(),

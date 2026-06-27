@@ -7,13 +7,16 @@
 //! existing tools); rendering and saving go through [`Rig::to_character`].
 
 use roxlap_formats::character::{
-    self, Attachment, Bone as CharBone, Character, Clip, ClipData, MeshRef,
+    self, Attachment, Bone as CharBone, Character, Clip, ClipData, ClipPlayback, MeshRef,
 };
 use roxlap_formats::kfa::{Hinge, Point3, Seq};
 use roxlap_formats::xform::BoneXform;
 
 use crate::VoxelModel;
+use crate::clip::ClipDoc;
 
+/// Re-export the engine's per-attachment clip playback params (rate + phase).
+pub use roxlap_formats::character::ClipPlayback as LayerPlayback;
 /// Re-export so editor code can name the keyframe transform type.
 pub use roxlap_formats::xform::{BoneXform as KeyXform, Quat};
 
@@ -45,15 +48,27 @@ pub struct RigBone {
     pub model: VoxelModel,
     pub hinge: Hinge,
     pub extras: Vec<RigAttachment>,
+    /// When `Some`, the bone's **primary** attachment draws this animated voxel
+    /// clip instead of [`Self::model`] (which is then an unused placeholder).
+    /// Any attachment — primary or extra — can be a mesh or a clip.
+    pub primary_clip: Option<ClipDoc>,
+    /// Playback rate + phase for the primary when it is a clip; ignored for a
+    /// mesh primary.
+    pub primary_playback: ClipPlayback,
 }
 
-/// An extra mesh attached to a bone, positioned by `offset` in the bone's
-/// frame (on top of the bone's solved world transform). The primary mesh is
-/// the bone's own [`RigBone::model`] at the identity offset; these ride
-/// alongside it.
+/// An extra attachment on a bone, positioned by `offset` in the bone's frame
+/// (on top of the bone's solved world transform). The primary attachment is the
+/// bone's own [`RigBone::model`] / [`RigBone::primary_clip`] at the identity
+/// offset; these ride alongside it. Each extra draws either a static mesh
+/// ([`Self::model`]) or an animated voxel clip ([`Self::clip`]).
 #[derive(Debug, Clone)]
 pub struct RigAttachment {
     pub model: VoxelModel,
+    /// When `Some`, this attachment draws the clip instead of [`Self::model`].
+    pub clip: Option<ClipDoc>,
+    /// Playback rate + phase when this attachment is a clip; ignored for a mesh.
+    pub playback: ClipPlayback,
     /// Local TRS relative to the bone (engine `local_offset`).
     pub offset: BoneXform,
     /// Artist-facing layer name. Editor metadata (the engine `Attachment` has
@@ -62,7 +77,75 @@ pub struct RigAttachment {
     pub name: String,
 }
 
+impl RigAttachment {
+    /// A static-mesh extra at `offset` named `name`.
+    #[must_use]
+    pub fn mesh(model: VoxelModel, offset: BoneXform, name: String) -> Self {
+        Self {
+            model,
+            clip: None,
+            playback: ClipPlayback::default(),
+            offset,
+            name,
+        }
+    }
+}
+
 impl RigBone {
+    /// A mesh-primary bone with no clip on its primary attachment — the common
+    /// constructor used everywhere a bone is built from a [`VoxelModel`].
+    #[must_use]
+    pub fn mesh(name: String, model: VoxelModel, hinge: Hinge, extras: Vec<RigAttachment>) -> Self {
+        Self {
+            name,
+            model,
+            hinge,
+            extras,
+            primary_clip: None,
+            primary_playback: ClipPlayback::default(),
+        }
+    }
+
+    /// Whether attachment `i` (`0` = primary, `1..` = extras) draws a clip.
+    #[must_use]
+    pub fn attachment_is_clip(&self, i: usize) -> bool {
+        if i == 0 {
+            self.primary_clip.is_some()
+        } else {
+            self.extras.get(i - 1).is_some_and(|e| e.clip.is_some())
+        }
+    }
+
+    /// The clip of attachment `i`, or `None` when it's a mesh / out of range.
+    #[must_use]
+    pub fn attachment_clip(&self, i: usize) -> Option<&ClipDoc> {
+        if i == 0 {
+            self.primary_clip.as_ref()
+        } else {
+            self.extras.get(i - 1).and_then(|e| e.clip.as_ref())
+        }
+    }
+
+    /// Mutable [`Self::attachment_clip`].
+    pub fn attachment_clip_mut(&mut self, i: usize) -> Option<&mut ClipDoc> {
+        if i == 0 {
+            self.primary_clip.as_mut()
+        } else {
+            self.extras.get_mut(i - 1).and_then(|e| e.clip.as_mut())
+        }
+    }
+
+    /// The playback params of attachment `i` (default for a mesh / out of range).
+    #[must_use]
+    pub fn attachment_playback(&self, i: usize) -> ClipPlayback {
+        if i == 0 {
+            self.primary_playback
+        } else {
+            self.extras
+                .get(i - 1)
+                .map_or_else(ClipPlayback::default, |e| e.playback)
+        }
+    }
     /// Number of attachments: the primary mesh plus every extra.
     #[must_use]
     pub fn attachment_count(&self) -> usize {
@@ -93,11 +176,11 @@ impl RigBone {
     /// offset) and return its attachment index (`attachment_count() - 1`).
     pub fn add_extra(&mut self) -> usize {
         let name = format!("layer {}", self.extras.len() + 1);
-        self.extras.push(RigAttachment {
-            model: default_bone_model(),
-            offset: BoneXform::IDENTITY,
+        self.extras.push(RigAttachment::mesh(
+            default_bone_model(),
+            BoneXform::IDENTITY,
             name,
-        });
+        ));
         self.attachment_count() - 1
     }
 
@@ -142,19 +225,47 @@ impl Rig {
         // identity offset) followed by one static attachment per extra (at the
         // extra's `offset`). Meshes are pooled across all bones; an attachment
         // references its mesh by the pool index.
+        // Meshes and clips are pooled across all bones; an attachment references
+        // its source by the pool index. Each attachment is either a static mesh
+        // (`MeshRef::Static`) or an animated voxel clip (`MeshRef::Clip` +
+        // `VCLP`), carrying its `local_offset` and (for a clip) playback params.
         let mut meshes = Vec::new();
+        let mut voxel_clips = Vec::new();
         let mut bones = Vec::new();
+        let push_clip = |voxel_clips: &mut Vec<_>, clip: &ClipDoc, offset, playback| {
+            let id = voxel_clips.len();
+            voxel_clips.push(clip.to_voxel_clip());
+            let mut att = Attachment::clip(id);
+            att.local_offset = offset;
+            att.playback = playback;
+            att
+        };
         for b in &self.bones {
             let mut attachments = Vec::with_capacity(1 + b.extras.len());
-            let primary_id = meshes.len();
-            meshes.push(b.model.to_kv6());
-            attachments.push(Attachment::static_mesh(primary_id));
-            for ex in &b.extras {
+            // Primary attachment (identity offset): a clip or the bone mesh.
+            if let Some(clip) = &b.primary_clip {
+                attachments.push(push_clip(
+                    &mut voxel_clips,
+                    clip,
+                    BoneXform::IDENTITY,
+                    b.primary_playback,
+                ));
+            } else {
                 let id = meshes.len();
-                meshes.push(ex.model.to_kv6());
-                let mut att = Attachment::static_mesh(id);
-                att.local_offset = ex.offset;
-                attachments.push(att);
+                meshes.push(b.model.to_kv6());
+                attachments.push(Attachment::static_mesh(id));
+            }
+            // Extras, each at its own offset.
+            for ex in &b.extras {
+                if let Some(clip) = &ex.clip {
+                    attachments.push(push_clip(&mut voxel_clips, clip, ex.offset, ex.playback));
+                } else {
+                    let id = meshes.len();
+                    meshes.push(ex.model.to_kv6());
+                    let mut att = Attachment::static_mesh(id);
+                    att.local_offset = ex.offset;
+                    attachments.push(att);
+                }
             }
             bones.push(CharBone {
                 name: b.name.clone(),
@@ -182,24 +293,26 @@ impl Rig {
             meshes,
             bones,
             clips: self.clips.clone(),
-            voxel_clips: Vec::new(),
+            voxel_clips,
             extra_chunks,
         }
     }
 
-    /// Build from an engine [`Character`], decompiling each bone's first
-    /// static-mesh attachment to an editable [`VoxelModel`].
+    /// Build from an engine [`Character`], decompiling each bone's attachments
+    /// to editable meshes / clips.
     ///
-    /// The editor models a single static mesh per bone, so only the first
-    /// [`MeshRef::Static`] attachment is loaded; a bone that draws only an
-    /// animated voxel clip (or nothing) gets an empty editable mesh.
+    /// Attachment `0` is the bone's primary (a mesh in [`RigBone::model`] or a
+    /// clip in [`RigBone::primary_clip`]); the rest become `extras`, each
+    /// carrying its own offset, name, and (for a clip) playback. A bone with no
+    /// attachments gets an empty editable mesh.
     ///
     /// # Errors
-    /// A message if a static attachment's mesh index is out of range.
+    /// A message if a static attachment's mesh index, or a clip attachment's
+    /// clip index, is out of range or undecodable.
     pub fn from_character(c: &Character) -> Result<Self, String> {
-        // Layer names from the `DLAY` extra-chunk (bone-major order, written by
-        // `to_character`); empty/absent for a foreign `.rkc`, then extras get a
-        // default `layer N` name.
+        // Layer names from the `DLAY` extra-chunk (bone-major order over the
+        // extras, written by `to_character`); empty/absent for a foreign `.rkc`,
+        // then extras get a default `layer N` name.
         let names: Vec<String> = c
             .extra_chunks
             .iter()
@@ -207,46 +320,58 @@ impl Rig {
             .and_then(|(_, payload)| postcard::from_bytes(payload).ok())
             .unwrap_or_default();
         let mut names = names.into_iter();
-        let bones =
-            c.bones
-                .iter()
-                .map(|b| {
-                    // The first static attachment is the bone's primary mesh
-                    // (drawn at the identity offset); the rest become `extras`
-                    // carrying their own offset. Clip attachments aren't authored
-                    // here yet, so they're skipped.
-                    let mut primary: Option<VoxelModel> = None;
-                    let mut extras = Vec::new();
-                    for a in &b.attachments {
-                        let MeshRef::Static(i) = a.target else {
-                            continue;
-                        };
-                        let kv6 = c.meshes.get(i).ok_or_else(|| {
-                            format!("bone {:?}: mesh index {i} out of range", b.name)
-                        })?;
-                        let model = VoxelModel::from_kv6(kv6);
-                        if primary.is_none() {
-                            primary = Some(model);
-                        } else {
-                            let name = names
-                                .next()
-                                .unwrap_or_else(|| format!("layer {}", extras.len() + 1));
-                            extras.push(RigAttachment {
-                                model,
-                                offset: a.local_offset,
-                                name,
-                            });
+        let bones = c
+            .bones
+            .iter()
+            .map(|b| {
+                let mut bone = RigBone::mesh(
+                    b.name.clone(),
+                    // Default for a bone with no attachments (overwritten below
+                    // if attachment 0 is a static mesh).
+                    VoxelModel::new(1, 1, 1),
+                    b.hinge,
+                    Vec::new(),
+                );
+                for (idx, a) in b.attachments.iter().enumerate() {
+                    // Resolve the attachment to (mesh, optional clip).
+                    let (model, clip) = match a.target {
+                        MeshRef::Static(i) => {
+                            let kv6 = c.meshes.get(i).ok_or_else(|| {
+                                format!("bone {:?}: mesh index {i} out of range", b.name)
+                            })?;
+                            (VoxelModel::from_kv6(kv6), None)
                         }
+                        MeshRef::Clip(i) => {
+                            let vc = c.voxel_clips.get(i).ok_or_else(|| {
+                                format!("bone {:?}: clip index {i} out of range", b.name)
+                            })?;
+                            let doc = ClipDoc::from_voxel_clip(vc).map_err(|e| {
+                                format!("bone {:?}: clip {i} undecodable: {e:?}", b.name)
+                            })?;
+                            // A clip attachment keeps an empty placeholder mesh.
+                            (VoxelModel::new(1, 1, 1), Some(doc))
+                        }
+                    };
+                    if idx == 0 {
+                        bone.model = model;
+                        bone.primary_clip = clip;
+                        bone.primary_playback = a.playback;
+                    } else {
+                        let name = names
+                            .next()
+                            .unwrap_or_else(|| format!("layer {}", bone.extras.len() + 1));
+                        bone.extras.push(RigAttachment {
+                            model,
+                            clip,
+                            playback: a.playback,
+                            offset: a.local_offset,
+                            name,
+                        });
                     }
-                    Ok(RigBone {
-                        name: b.name.clone(),
-                        // Pure-transform / clip-only bone: an empty editable mesh.
-                        model: primary.unwrap_or_else(|| VoxelModel::new(1, 1, 1)),
-                        hinge: b.hinge,
-                        extras,
-                    })
-                })
-                .collect::<Result<Vec<_>, String>>()?;
+                }
+                Ok(bone)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(Self {
             name: c.name.clone(),
             root: c.root,
@@ -280,12 +405,12 @@ impl Rig {
         Self {
             name: name.into(),
             root: [0.0, 0.0, 0.0],
-            bones: vec![RigBone {
-                name: "root".to_string(),
-                model: model.unwrap_or_else(default_bone_model),
-                hinge: free_hinge(-1, Z_AXIS, ZERO),
-                extras: Vec::new(),
-            }],
+            bones: vec![RigBone::mesh(
+                "root".to_string(),
+                model.unwrap_or_else(default_bone_model),
+                free_hinge(-1, Z_AXIS, ZERO),
+                Vec::new(),
+            )],
             clips: Vec::new(),
         }
     }
@@ -307,12 +432,12 @@ impl Rig {
                 let x = p.model.dims().0 as f32;
                 Point3 { x, y: 0.0, z: 0.0 }
             });
-        self.bones.push(RigBone {
-            name: format!("bone {n}"),
-            model: default_bone_model(),
-            hinge: free_hinge(parent, Z_AXIS, joint),
-            extras: Vec::new(),
-        });
+        self.bones.push(RigBone::mesh(
+            format!("bone {n}"),
+            default_bone_model(),
+            free_hinge(parent, Z_AXIS, joint),
+            Vec::new(),
+        ));
         for clip in &mut self.clips {
             if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
                 for row in frmval {
@@ -347,12 +472,12 @@ impl Rig {
             y: joint[1],
             z: joint[2],
         };
-        self.bones.push(RigBone {
+        self.bones.push(RigBone::mesh(
             name,
             model,
-            hinge: free_hinge(parent, Z_AXIS, joint),
-            extras: Vec::new(),
-        });
+            free_hinge(parent, Z_AXIS, joint),
+            Vec::new(),
+        ));
         for clip in &mut self.clips {
             if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
                 for row in frmval {
@@ -423,6 +548,8 @@ impl Rig {
         let src = self.bones.get(i)?;
         let model = src.model.clone();
         let extras = src.extras.clone();
+        let src_primary_clip = src.primary_clip.clone();
+        let src_primary_playback = src.primary_playback;
         let mut hinge = src.hinge;
         let name = format!("{} copy", src.name);
         #[allow(clippy::cast_precision_loss)] // mesh dims are tiny
@@ -444,12 +571,10 @@ impl Rig {
             ];
         }
         let new = self.bones.len();
-        self.bones.push(RigBone {
-            name,
-            model,
-            hinge,
-            extras,
-        });
+        let mut bone = RigBone::mesh(name, model, hinge, extras);
+        bone.primary_clip = src_primary_clip;
+        bone.primary_playback = src_primary_playback;
+        self.bones.push(bone);
         for clip in &mut self.clips {
             if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
                 for row in frmval {
@@ -523,24 +648,24 @@ impl Rig {
         let leaf = format!("bone {}", n + 2);
         let rot_x = i32::try_from(n).unwrap_or(-1);
         let rot_y = i32::try_from(n + 1).unwrap_or(-1);
-        self.bones.push(RigBone {
-            name: format!("{leaf} rotX"),
-            model: empty_bone_model(),
-            hinge: free_hinge(parent, X_AXIS, joint),
-            extras: Vec::new(),
-        });
-        self.bones.push(RigBone {
-            name: format!("{leaf} rotY"),
-            model: empty_bone_model(),
-            hinge: free_hinge(rot_x, Y_AXIS, ZERO),
-            extras: Vec::new(),
-        });
-        self.bones.push(RigBone {
-            name: leaf,
-            model: default_bone_model(),
-            hinge: free_hinge(rot_y, Z_AXIS, ZERO),
-            extras: Vec::new(),
-        });
+        self.bones.push(RigBone::mesh(
+            format!("{leaf} rotX"),
+            empty_bone_model(),
+            free_hinge(parent, X_AXIS, joint),
+            Vec::new(),
+        ));
+        self.bones.push(RigBone::mesh(
+            format!("{leaf} rotY"),
+            empty_bone_model(),
+            free_hinge(rot_x, Y_AXIS, ZERO),
+            Vec::new(),
+        ));
+        self.bones.push(RigBone::mesh(
+            leaf,
+            default_bone_model(),
+            free_hinge(rot_y, Z_AXIS, ZERO),
+            Vec::new(),
+        ));
         for clip in &mut self.clips {
             if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
                 for row in frmval {
@@ -567,12 +692,12 @@ impl Rig {
         h.p = [ZERO, ZERO];
         h.vmin = i16::MIN;
         h.vmax = i16::MAX;
-        self.bones.push(RigBone {
-            name: "origin".to_string(),
-            model: empty_bone_model(),
-            hinge: free_hinge(-1, Z_AXIS, ZERO),
-            extras: Vec::new(),
-        });
+        self.bones.push(RigBone::mesh(
+            "origin".to_string(),
+            empty_bone_model(),
+            free_hinge(-1, Z_AXIS, ZERO),
+            Vec::new(),
+        ));
         for clip in &mut self.clips {
             if let ClipData::Skeletal { frmval, .. } = &mut clip.data {
                 for row in frmval {
@@ -1028,10 +1153,10 @@ mod tests {
             y: 0.0,
             z: 0.0,
         };
-        RigBone {
-            name: name.to_string(),
+        RigBone::mesh(
+            name.to_string(),
             model,
-            hinge: Hinge {
+            Hinge {
                 parent,
                 p: [zero, zero],
                 v: [zero, zero],
@@ -1040,8 +1165,8 @@ mod tests {
                 htype: 0,
                 filler: [0; 7],
             },
-            extras: Vec::new(),
-        }
+            Vec::new(),
+        )
     }
 
     #[test]
@@ -1075,14 +1200,14 @@ mod tests {
         // Hang an extra mesh (distinct colour) off the bone at an offset.
         let mut extra = VoxelModel::new(2, 2, 2);
         extra.set(0, 0, 0, 0x8000_ff00);
-        rig.bones[0].extras.push(RigAttachment {
-            model: extra,
-            offset: BoneXform {
+        rig.bones[0].extras.push(RigAttachment::mesh(
+            extra,
+            BoneXform {
                 t: [3.0, 0.0, -1.0],
                 ..BoneXform::IDENTITY
             },
-            name: "horn".to_string(),
-        });
+            "horn".to_string(),
+        ));
         let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("round-trips");
         assert_eq!(back.bones.len(), 1);
         // Primary mesh survives as the bone's `model`.
@@ -1095,6 +1220,63 @@ mod tests {
             back.bones[0].extras[0].name, "horn",
             "layer name survives .rkc"
         );
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact small offset values
+    fn clip_attachments_round_trip_through_rkc() {
+        use crate::clip::ClipDoc;
+
+        // A two-frame clip with a moving voxel — distinct enough to verify the
+        // frames survive the .rkc VCLP encode/decode.
+        let clip_doc = |col: u32| {
+            let mut c = ClipDoc::new([4, 4, 4]);
+            c.frames[0].model.set(0, 0, 0, col);
+            let f = c.add_frame();
+            c.frames[f].model.set(1, 0, 0, col);
+            c
+        };
+
+        let mut rig = Rig {
+            name: "fx".to_string(),
+            root: [0.0; 3],
+            bones: vec![bone("torch", -1, 0x80ff_0000)],
+            clips: Vec::new(),
+        };
+        // Primary becomes a clip with non-default playback (2x speed, phased).
+        rig.bones[0].primary_clip = Some(clip_doc(0x8000_00ff));
+        rig.bones[0].primary_playback = LayerPlayback {
+            speed_q8: 512,
+            start_phase_ms: 40,
+        };
+        // …plus a clip extra at an offset.
+        rig.bones[0].extras.push(RigAttachment {
+            model: VoxelModel::new(1, 1, 1),
+            clip: Some(clip_doc(0x8000_ff00)),
+            playback: LayerPlayback::default(),
+            offset: BoneXform {
+                t: [2.0, 0.0, 0.0],
+                ..BoneXform::IDENTITY
+            },
+            name: "flame".to_string(),
+        });
+
+        let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("round-trips");
+        let b = &back.bones[0];
+        // Primary clip survives with its frames + playback.
+        assert!(b.attachment_is_clip(0), "primary is a clip");
+        let pc = b.primary_clip.as_ref().expect("primary clip");
+        assert_eq!(pc.frame_count(), 2);
+        assert_eq!(pc.frames[1].model.get(1, 0, 0), 0x8000_00ff);
+        assert_eq!(b.primary_playback.speed_q8, 512);
+        assert_eq!(b.primary_playback.start_phase_ms, 40);
+        // Clip extra survives with its frames + offset + name.
+        assert_eq!(b.extras.len(), 1);
+        assert!(b.attachment_is_clip(1), "extra is a clip");
+        let ec = b.extras[0].clip.as_ref().expect("extra clip");
+        assert_eq!(ec.frames[1].model.get(1, 0, 0), 0x8000_ff00);
+        assert_eq!(b.extras[0].offset.t, [2.0, 0.0, 0.0]);
+        assert_eq!(b.extras[0].name, "flame");
     }
 
     use roxlap_formats::character::{Clip, ClipData};

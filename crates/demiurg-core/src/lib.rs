@@ -33,7 +33,7 @@ pub mod vox;
 
 pub use clip::{ClipDoc, ClipFrame, LoopMode};
 pub use edit::Document;
-pub use rig::{KeyXform, Keyframe, Quat, Rig, RigAttachment, RigBone};
+pub use rig::{KeyXform, Keyframe, LayerPlayback, Quat, Rig, RigAttachment, RigBone};
 
 /// A dense, editable voxel model: the in-memory document the editor
 /// mutates and previews.
