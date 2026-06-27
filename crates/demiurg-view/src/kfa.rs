@@ -7,7 +7,7 @@
 //!
 //! Until rig authoring exists, [`demo_rig`] seeds a synthetic two-bone rig.
 
-use demiurg_core::{Rig, RigBone, VoxelModel};
+use demiurg_core::{Easing, Rig, RigBone, VoxelModel};
 use glam::DVec3;
 use roxlap_core::kfa_draw::solve_kfa_limbs;
 use roxlap_formats::character::{Clip, ClipData};
@@ -27,6 +27,8 @@ const ACTIVE_BONE_COLOR: u32 = 0xff00_e5ff;
 pub struct KfaView {
     rig: Rig,
     kfas: Vec<KfaSprite>,
+    /// The previewed clip index (for per-clip easing); `None` = rest pose.
+    clip: Option<usize>,
 }
 
 impl KfaView {
@@ -47,7 +49,7 @@ impl KfaView {
             b.extras.clear();
         }
         let kfas = vec![skel.to_character().to_kfa_sprite(clip)];
-        Self { rig, kfas }
+        Self { rig, kfas, clip }
     }
 
     /// Parse an `.rkc` rigged-character file into a view. Plays the first
@@ -146,10 +148,29 @@ impl KfaView {
     }
 
     /// Advance the baked animation by `dt_ms` and re-solve bone transforms,
-    /// so [`Self::bone_lines`] reads the current pose.
+    /// so [`Self::bone_lines`] reads the current pose. The engine interpolates
+    /// linearly; when the clip carries a non-linear [`Easing`], the linear pose
+    /// is overridden with the eased one before solving.
     pub fn advance(&mut self, dt_ms: i32) {
+        // `animsprite` advances the playhead (and writes a linear pose).
         for k in &mut self.kfas {
             k.animsprite(dt_ms);
+        }
+        if let Some(ci) = self.clip {
+            let easing = self.rig.clip_easing(ci);
+            if easing != Easing::Linear {
+                let t = self.kfas.first().map(|k| k.kfatim);
+                if let Some(t) = t {
+                    let pose = eased_pose(&self.rig, ci, t, easing);
+                    if !pose.is_empty() {
+                        if let Some(k) = self.kfas.first_mut() {
+                            k.kfaval = pose;
+                        }
+                    }
+                }
+            }
+        }
+        for k in &mut self.kfas {
             solve_kfa_limbs(k);
         }
     }
@@ -183,6 +204,47 @@ impl KfaView {
         }
         lines
     }
+}
+
+/// Resolve clip `clip`'s pose at time `t` with `easing` applied to the active
+/// segment's blend parameter — the eased counterpart of the engine's linear
+/// interpolation. Empty when the clip has fewer than two keys (nothing to
+/// interpolate; the single-key pose is left as `animsprite` set it).
+#[allow(clippy::cast_precision_loss)]
+fn eased_pose(rig: &Rig, clip: usize, t: i32, easing: Easing) -> Vec<BoneXform> {
+    let keys = rig.clip_keyframes(clip);
+    if keys.len() < 2 {
+        return Vec::new();
+    }
+    let loop_len = rig.clip_loop_tim(clip).max(1);
+    let t = t.rem_euclid(loop_len);
+    // The last key with `tim <= t` starts the active segment.
+    let mut i = 0;
+    for (j, k) in keys.iter().enumerate() {
+        if k.tim <= t {
+            i = j;
+        } else {
+            break;
+        }
+    }
+    // Segment end key + span; the final segment wraps back to key 0 at loop_len.
+    let (end, span) = if i + 1 < keys.len() {
+        (&keys[i + 1], keys[i + 1].tim - keys[i].tim)
+    } else {
+        (&keys[0], loop_len - keys[i].tim)
+    };
+    let u = if span > 0 {
+        (t - keys[i].tim) as f32 / span as f32
+    } else {
+        0.0
+    };
+    let u = easing.apply(u);
+    keys[i]
+        .xforms
+        .iter()
+        .zip(&end.xforms)
+        .map(|(a, b)| a.blend(*b, u))
+        .collect()
 }
 
 /// A synthetic two-bone rig (a body with a swinging arm) built from demiurg
@@ -261,6 +323,7 @@ pub fn demo_rig() -> Rig {
                 ],
             },
         }],
+        clip_easing: Vec::new(),
     }
 }
 
@@ -377,6 +440,7 @@ mod tests {
                     seq: vec![Seq { tim: 0, frm: 0 }, Seq { tim: 500, frm: !0 }],
                 },
             }],
+            clip_easing: Vec::new(),
         };
         // Round-trips through .rkc with empty meshes (zero-voxel kv6).
         let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("empty meshes round-trip");

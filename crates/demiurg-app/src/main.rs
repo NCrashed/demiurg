@@ -4162,6 +4162,9 @@ impl App {
         if a.bake_clip {
             self.bake_active_clip();
         }
+        if let Some((clip, easing)) = a.set_clip_easing {
+            self.set_clip_easing(clip, easing);
+        }
         if let Some(i) = a.delete_clip {
             self.delete_clip(i);
         }
@@ -5543,6 +5546,26 @@ impl App {
             .rig
             .as_mut()
             .is_some_and(|r| r.set_clip_loops(clip, on));
+        if changed {
+            if let Some(snap) = snap {
+                self.editor.rig_push_undo(snap);
+            }
+            self.editor.rig_dirty = true;
+        }
+    }
+
+    /// Set clip `clip`'s keyframe easing curve. One undo step; the posed preview
+    /// rebuilds (keeping the playhead) so the eased motion shows immediately.
+    fn set_clip_easing(&mut self, clip: usize, easing: demiurg_core::Easing) {
+        let snap = self.editor.rig_state();
+        let changed = self.editor.rig.as_mut().is_some_and(|r| {
+            if clip < r.clips.len() {
+                r.set_clip_easing(clip, easing);
+                true
+            } else {
+                false
+            }
+        });
         if changed {
             if let Some(snap) = snap {
                 self.editor.rig_push_undo(snap);

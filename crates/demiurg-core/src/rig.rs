@@ -32,6 +32,63 @@ pub struct Rig {
     pub bones: Vec<RigBone>,
     /// Named animation clips (reused from the engine container).
     pub clips: Vec<Clip>,
+    /// Per-clip easing curve for keyframe interpolation (parallel to
+    /// [`Self::clips`]; a missing / shorter entry means [`Easing::Linear`]).
+    /// Editor metadata — the engine clip format has no easing — persisted in a
+    /// `DEAS` extra-chunk that round-trips through `.rkc` and `.demiurg`.
+    pub clip_easing: Vec<Easing>,
+}
+
+/// How a clip's keyframe segments are interpolated. The engine plays linear;
+/// these reshape the `0..1` blend parameter for smoother motion (applied by the
+/// editor's preview, baked into the eased pose).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Easing {
+    /// Constant-rate interpolation (the engine default).
+    #[default]
+    Linear,
+    /// Accelerate out of a key (slow start).
+    EaseIn,
+    /// Decelerate into a key (slow end).
+    EaseOut,
+    /// Smoothstep: slow at both ends (the most natural for most motion).
+    EaseInOut,
+}
+
+impl Easing {
+    /// Reshape a linear blend parameter `u` (`0..1`) by this curve.
+    #[must_use]
+    pub fn apply(self, u: f32) -> f32 {
+        let u = u.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => u,
+            Self::EaseIn => u * u,
+            Self::EaseOut => 1.0 - (1.0 - u) * (1.0 - u),
+            Self::EaseInOut => u * u * (3.0 - 2.0 * u),
+        }
+    }
+
+    /// Stable `u8` tag for the `DEAS` chunk / persistence.
+    #[must_use]
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Linear => 0,
+            Self::EaseIn => 1,
+            Self::EaseOut => 2,
+            Self::EaseInOut => 3,
+        }
+    }
+
+    /// Inverse of [`Self::to_u8`]; unknown tags fall back to [`Self::Linear`].
+    #[must_use]
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::EaseIn,
+            2 => Self::EaseOut,
+            3 => Self::EaseInOut,
+            _ => Self::Linear,
+        }
+    }
 }
 
 /// One bone: a name, its primary editable mesh, its hinge, and any extra
@@ -327,6 +384,14 @@ impl Rig {
                 extra_chunks.push((DLAY_TAG, payload));
             }
         }
+        // Per-clip easing rides along in a `DEAS` extra-chunk (only when any clip
+        // is non-Linear, to keep canonical files clean).
+        if self.clip_easing.iter().any(|&e| e != Easing::Linear) {
+            let tags: Vec<u8> = self.clip_easing.iter().map(|&e| e.to_u8()).collect();
+            if let Ok(payload) = postcard::to_allocvec(&tags) {
+                extra_chunks.push((DEAS_TAG, payload));
+            }
+        }
         Character {
             name: self.name.clone(),
             root: self.root,
@@ -412,11 +477,21 @@ impl Rig {
                 Ok(bone)
             })
             .collect::<Result<Vec<_>, String>>()?;
+        // Per-clip easing from the `DEAS` extra-chunk (a `Vec<u8>` of tags,
+        // one per clip); absent for a foreign `.rkc`, then all clips are Linear.
+        let clip_easing = c
+            .extra_chunks
+            .iter()
+            .find(|(tag, _)| *tag == DEAS_TAG)
+            .and_then(|(_, payload)| postcard::from_bytes::<Vec<u8>>(payload).ok())
+            .map(|tags| tags.into_iter().map(Easing::from_u8).collect())
+            .unwrap_or_default();
         Ok(Self {
             name: c.name.clone(),
             root: c.root,
             bones,
             clips: c.clips.clone(),
+            clip_easing,
         })
     }
 
@@ -452,6 +527,7 @@ impl Rig {
                 Vec::new(),
             )],
             clips: Vec::new(),
+            clip_easing: Vec::new(),
         }
     }
 
@@ -782,6 +858,22 @@ impl Rig {
         }
     }
 
+    /// The easing curve of clip `i` ([`Easing::Linear`] when unset / out of
+    /// range — the parallel `clip_easing` vec may be shorter than `clips`).
+    #[must_use]
+    pub fn clip_easing(&self, i: usize) -> Easing {
+        self.clip_easing.get(i).copied().unwrap_or_default()
+    }
+
+    /// Set clip `i`'s easing curve, growing the parallel vec with `Linear` as
+    /// needed so the indices stay aligned.
+    pub fn set_clip_easing(&mut self, i: usize, easing: Easing) {
+        if i >= self.clip_easing.len() {
+            self.clip_easing.resize(i + 1, Easing::Linear);
+        }
+        self.clip_easing[i] = easing;
+    }
+
     /// Delete clip `i` (the rig may end up with no clips). Returns `false` if
     /// `i` is out of range.
     pub fn remove_clip(&mut self, i: usize) -> bool {
@@ -789,6 +881,9 @@ impl Rig {
             return false;
         }
         self.clips.remove(i);
+        if i < self.clip_easing.len() {
+            self.clip_easing.remove(i); // keep the easing vec aligned with clips
+        }
         true
     }
 
@@ -1109,6 +1204,8 @@ const DEFAULT_TAIL_MS: i32 = 500;
 /// postcard `Vec<String>` in bone-major order). Unknown to the engine, so it's
 /// round-tripped verbatim via [`Character::extra_chunks`].
 const DLAY_TAG: [u8; 4] = *b"DLAY";
+/// Extra-chunk tag carrying per-clip [`Easing`] tags (`Vec<u8>`), editor-only.
+const DEAS_TAG: [u8; 4] = *b"DEAS";
 
 /// The origin point, reused for default hinge endpoints.
 const ZERO: Point3 = Point3 {
@@ -1217,6 +1314,7 @@ mod tests {
             root: [1.0, 2.0, 3.0],
             bones: vec![bone("body", -1, 0x80ff_0000), bone("arm", 0, 0x8000_ff00)],
             clips: Vec::new(),
+            clip_easing: Vec::new(),
         };
         let back = Rig::from_character(&rig.to_character()).expect("round-trips");
         assert_eq!(back.bones.len(), 2);
@@ -1236,6 +1334,7 @@ mod tests {
             root: [0.0; 3],
             bones: vec![bone("body", -1, 0x80ff_0000)],
             clips: Vec::new(),
+            clip_easing: Vec::new(),
         };
         // Hang an extra mesh (distinct colour) off the bone at an offset.
         let mut extra = VoxelModel::new(2, 2, 2);
@@ -1282,6 +1381,7 @@ mod tests {
             root: [0.0; 3],
             bones: vec![bone("torch", -1, 0x80ff_0000)],
             clips: Vec::new(),
+            clip_easing: Vec::new(),
         };
         // Primary becomes a clip with non-default playback (2x speed, phased).
         rig.bones[0].primary_clip = Some(clip_doc(0x8000_00ff));
@@ -1317,6 +1417,45 @@ mod tests {
         assert_eq!(ec.frames[1].model.get(1, 0, 0), 0x8000_ff00);
         assert_eq!(b.extras[0].offset.t, [2.0, 0.0, 0.0]);
         assert_eq!(b.extras[0].name, "flame");
+    }
+
+    #[test]
+    fn clip_easing_round_trips_through_rkc() {
+        let mut rig = Rig {
+            name: "t".to_string(),
+            root: [0.0; 3],
+            bones: vec![bone("b", -1, 0x80ff_0000)],
+            clips: Vec::new(),
+            clip_easing: Vec::new(),
+        };
+        rig.add_clip("a".to_string());
+        rig.add_clip("b".to_string());
+        rig.set_clip_easing(1, Easing::EaseInOut);
+
+        let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("round-trips");
+        assert_eq!(back.clip_easing(0), Easing::Linear, "default stays linear");
+        assert_eq!(
+            back.clip_easing(1),
+            Easing::EaseInOut,
+            "easing survives .rkc"
+        );
+    }
+
+    #[test]
+    fn easing_curves_pin_their_endpoints_and_midpoints() {
+        for e in [
+            Easing::Linear,
+            Easing::EaseIn,
+            Easing::EaseOut,
+            Easing::EaseInOut,
+        ] {
+            assert!((e.apply(0.0) - 0.0).abs() < 1e-6);
+            assert!((e.apply(1.0) - 1.0).abs() < 1e-6);
+        }
+        // EaseInOut is symmetric: 0.5 ↦ 0.5; EaseIn lags, EaseOut leads.
+        assert!((Easing::EaseInOut.apply(0.5) - 0.5).abs() < 1e-6);
+        assert!(Easing::EaseIn.apply(0.5) < 0.5);
+        assert!(Easing::EaseOut.apply(0.5) > 0.5);
     }
 
     use roxlap_formats::character::{Clip, ClipData};
@@ -1370,6 +1509,7 @@ mod tests {
             root: [0.0; 3],
             bones: vec![bone("body", -1, 0x80ff_0000), bone("arm", 0, 0x8000_ff00)],
             clips: vec![clip(2)],
+            clip_easing: Vec::new(),
         };
         let idx = rig.add_bone(0);
         assert_eq!(idx, 2);
@@ -1403,6 +1543,7 @@ mod tests {
             root: [0.0; 3],
             bones: vec![bone("body", -1, 0x80ff_0000), bone("arm", 0, 0x8000_ff00)],
             clips: vec![clip(2)],
+            clip_easing: Vec::new(),
         };
         let idx = rig.duplicate_bone(1).expect("in range");
         assert_eq!(idx, 2);
@@ -1429,6 +1570,7 @@ mod tests {
             root: [0.0; 3],
             bones: vec![bone("body", -1, 0x80ff_0000), bone("arm", 0, 0x8000_ff00)],
             clips: Vec::new(),
+            clip_easing: Vec::new(),
         };
         let idx = rig.duplicate_bone(0).expect("in range");
         assert_eq!(idx, 2);
@@ -1454,6 +1596,7 @@ mod tests {
                 bone("grand", 1, 3),
             ],
             clips: vec![clip(3)],
+            clip_easing: Vec::new(),
         };
         // Move the grandchild (2) to the front (0): order becomes grand, root,
         // child — old indices [0,1,2] map to new [1,2,0].
@@ -1491,6 +1634,7 @@ mod tests {
             root: [0.0; 3],
             bones: vec![bone("body", -1, 0x80ff_0000)],
             clips: vec![clip(1)],
+            clip_easing: Vec::new(),
         };
         let mut part = VoxelModel::new(2, 2, 2);
         part.set(0, 0, 0, 0x8000_ff00);
@@ -1533,6 +1677,7 @@ mod tests {
                 bone("sib", 0, 4),
             ],
             clips: vec![clip(4)],
+            clip_easing: Vec::new(),
         };
         assert!(rig.delete_bone(1));
         assert_eq!(rig.bones.len(), 3);
@@ -1558,6 +1703,7 @@ mod tests {
             root: [0.0; 3],
             bones: vec![bone("root", -1, 1), bone("arm", 0, 2)],
             clips: Vec::new(),
+            clip_easing: Vec::new(),
         };
         assert!(!rig.delete_bone(0), "root must not be deletable");
         assert_eq!(rig.bones.len(), 2);
@@ -1573,6 +1719,7 @@ mod tests {
             root: [0.0; 3],
             bones: vec![bone("root", -1, 1)],
             clips: vec![clip(1)],
+            clip_easing: Vec::new(),
         };
         rig.add_bone(0);
         // frmval columns must match bones.len() or to/from character breaks.
@@ -1590,6 +1737,7 @@ mod tests {
             root: [0.0; 3],
             bones: vec![bone("only", -1, 0x80ab_cdef)],
             clips: Vec::new(),
+            clip_easing: Vec::new(),
         };
         let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("parses");
         assert_eq!(back.bones.len(), 1);
@@ -1658,6 +1806,7 @@ mod tests {
             root: [0.0; 3],
             bones,
             clips: vec![anim_clip(nbones)],
+            clip_easing: Vec::new(),
         }
     }
 

@@ -167,6 +167,8 @@ pub struct UiActions {
     pub add_clip: bool,
     /// Animate: bake the active skeletal clip into a voxel clip (open as new).
     pub bake_clip: bool,
+    /// Animate: set clip `.0`'s keyframe easing curve to `.1`.
+    pub set_clip_easing: Option<(usize, demiurg_core::Easing)>,
     /// Animate: rename clip `.0` to `.1`.
     pub rename_clip: Option<(usize, String)>,
     /// Animate: delete the clip at this index.
@@ -803,6 +805,24 @@ fn clips_panel(
             }
         });
     });
+    // Easing curve for the active clip's keyframe interpolation.
+    if !rig.clips.is_empty() {
+        let active = editor.active_clip.min(rig.clips.len() - 1);
+        let cur = rig.clip_easing(active);
+        ui.horizontal(|ui| {
+            ui.label(t(Msg::Easing));
+            for (e, label) in [
+                (demiurg_core::Easing::Linear, Msg::EaseLinear),
+                (demiurg_core::Easing::EaseIn, Msg::EaseIn),
+                (demiurg_core::Easing::EaseOut, Msg::EaseOut),
+                (demiurg_core::Easing::EaseInOut, Msg::EaseInOut),
+            ] {
+                if ui.selectable_label(cur == e, t(label)).clicked() {
+                    actions.set_clip_easing = Some((active, e));
+                }
+            }
+        });
+    }
     // Pose inspector: numeric translation + scale for the active bone in the
     // selected key (rotation has the bottom-bar slider + viewport drag). Each
     // field drag is one undo step (the inline begin/commit-pending pair). Only
