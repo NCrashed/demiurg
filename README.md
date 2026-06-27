@@ -12,12 +12,12 @@ designed but not yet shipped (one codebase, see [DESIGN.md](./DESIGN.md)).
 
 ## Status
 
-**v0.6.0 — model + skeletal-animation editor for artists.** The native model
+**v0.7.0 — model + skeletal-animation editor for artists.** The native model
 editor (tools, selection + move + 90° rotate, palette, mirror, pivot, resizing,
 undo/redo, reference-image tracing, project save and engine-format export) plus a
-**skeletal-animation editor** — rig a model into bones (slice a selection
-straight into a bone) and animate it with keyframes, posed in the viewport and
-exported to `.rkc` (DESIGN.md M2 + M4).
+**skeletal-animation editor** — rig a model into bones (each built from one or
+more **layers**, sliced straight from a selection) and animate it with keyframes,
+posed in the viewport and exported to `.rkc` (DESIGN.md M2 + M4).
 
 Animation is a **preview**: the `.rkc` format and the rig UI may still change.
 See [Skeletal animation](#skeletal-animation-preview) below. Voxel-video
@@ -89,10 +89,13 @@ pose it across keyframes, and export to roxlap's `.rkc` format.
 - **Start a rig**: File ▸ New rig (one root bone) or Convert to rig (wrap the
   current model as a one-bone rig). Opening a `.rkc` continues editing one.
 - **Rig sub-modes** (Rig panel): **Sculpt** edits the active bone's mesh with the
-  normal voxel tools (and "Extract to bone" carves a selection out into a new
-  child bone — the quick way to slice a model into a skeleton); **Skeleton** sets
-  each bone's joint, parent, rotation axis and mesh pivot (drag a bone, or its
-  pivot, in the viewport); **Animate** previews and poses the clip.
+  normal voxel tools (and "Extract to bone" / "Extract to layer" carve a
+  selection out into a new child bone or a new layer on the same bone);
+  **Skeleton** sets each bone's joint, parent, rotation axis and mesh pivot (drag
+  a bone, or its pivot, in the viewport); **Animate** previews and poses the clip.
+- **Layers** (Sculpt): a bone can carry several meshes — a base mesh plus extra
+  layers, each sculpted on its own, named, and placed by its own offset
+  (numerically or by dragging it against the posed bone).
 - **Posing** (Animate mode): click a bone to select it, then left-drag in the
   viewport to transform it on the selected keyframe. `R` / `G` / `S` switch the
   gizmo between **rotate** (trackball / ring), **move** and **scale**.

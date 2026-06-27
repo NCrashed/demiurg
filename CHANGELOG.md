@@ -7,6 +7,34 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-27
+
+Layers: build a bone out of several meshes, each sculpted, placed and named on
+its own.
+
+### Added
+
+- **Layers — multiple meshes per bone.** A bone can now carry several meshes (a
+  base mesh plus extra layers), each one:
+  - sculpted on its own — pick the active layer in the Layers panel and the
+    voxel tools edit it;
+  - placed by its own offset — translate / rotate / scale it numerically, or
+    drag it against the posed bone with "Move layer" (Skeleton mode);
+  - named — rename it in the panel (names are saved with the project);
+  - drawn together in the Skeleton / Animate preview.
+- **Extract to layer** — carve the current selection into a new layer on the
+  same bone (it stays exactly where it was), the layer counterpart of "Extract
+  to bone".
+- **Copy / paste across bones and layers** — copying voxels from one mesh and
+  pasting into another (a different bone, or a layer) now lands the paste inside
+  the target instead of off its edge.
+
+### Changed
+
+- Bumped roxlap to **0.15.0** — its animated-voxel-clips character container and
+  renderer are what layers build on (a bone's layers map to the engine's
+  per-bone attachment list).
+
 ## [0.6.0] - 2026-06-23
 
 Rigging quality-of-life: slice a model into a skeleton faster, place each bone's
