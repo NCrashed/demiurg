@@ -1619,9 +1619,65 @@ fn attachments_panel(
             }
         }
     }
+    // Clip attachments (primary or extra) carry playback params (speed + phase).
+    if active_is_clip {
+        if let Some(pb) = editor
+            .rig
+            .as_mut()
+            .and_then(|r| r.bones.get_mut(active_bone))
+            .and_then(|b| b.attachment_playback_mut(active))
+        {
+            let (begin, changed) = clip_playback_fields(ui, pb, t);
+            if begin {
+                actions.rig_edit_begin = true;
+            }
+            if changed {
+                actions.rig_edit_changed = true;
+            }
+        }
+    }
     if rebuild {
         editor.rig_dirty = true;
     }
+}
+
+/// Speed (× the rig clip's rate) + start-phase editor for a clip attachment's
+/// playback. Returns `(begin, changed)` (one undo step per drag).
+fn clip_playback_fields(
+    ui: &mut egui::Ui,
+    pb: &mut demiurg_core::LayerPlayback,
+    t: &impl Fn(Msg) -> &'static str,
+) -> (bool, bool) {
+    let (mut begin, mut changed) = (false, false);
+    #[allow(clippy::cast_precision_loss)] // speed_q8 is small
+    let mut speed = pb.speed_q8 as f32 / 256.0;
+    ui.horizontal(|ui| {
+        ui.label(t(Msg::Speed));
+        let r = ui.add(
+            egui::DragValue::new(&mut speed)
+                .speed(0.01)
+                .range(0.0..=16.0),
+        );
+        begin |= r.drag_started() || r.gained_focus();
+        if r.changed() {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                pb.speed_q8 = (speed * 256.0).round() as i32;
+            }
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(t(Msg::Phase));
+        let r = ui.add(
+            egui::DragValue::new(&mut pb.start_phase_ms)
+                .speed(1.0)
+                .range(0..=600_000),
+        );
+        begin |= r.drag_started() || r.gained_focus();
+        changed |= r.changed();
+    });
+    (begin, changed)
 }
 
 /// Numeric editor for an attachment's local offset — translate / rotate

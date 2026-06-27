@@ -44,7 +44,8 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use demiurg_core::{
-    ClipDoc, Document, KeyXform, LoopMode, Quat, Rig, RigAttachment, RigBone, VoxelModel, project,
+    ClipDoc, Document, KeyXform, LayerPlayback, LoopMode, Quat, Rig, RigAttachment, RigBone,
+    VoxelModel, project,
 };
 use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{
@@ -1506,6 +1507,16 @@ fn load_any(path: &str) -> VoxelModel {
 
 /// A blank canvas with a single seed voxel at the centre, so the place
 /// tool has a face to build on.
+/// The frame index a clip attachment shows at rig playhead `time_ms`, advanced
+/// by its [`LayerPlayback`] (Q8 speed, ms phase). Lets a clip layer animate
+/// along the rig's clip while it plays.
+fn clip_frame_at(clip: &ClipDoc, playback: LayerPlayback, time_ms: i32) -> usize {
+    let t = (i64::from(time_ms) * i64::from(playback.speed_q8) / 256
+        + i64::from(playback.start_phase_ms))
+    .max(0);
+    clip.frame_at(u32::try_from(t).unwrap_or(u32::MAX))
+}
+
 fn new_model() -> VoxelModel {
     let mut m = VoxelModel::new(NEW_DIMS, NEW_DIMS, NEW_DIMS);
     let c = NEW_DIMS / 2;
@@ -5890,22 +5901,23 @@ impl App {
             }
             None => renderer.set_kfa_sprites(&mut []),
         }
-        // Each bone's extra attachments — the KFA limb path draws only the
-        // primary, so pose each extra from its bone's solved transform via
-        // `compose_attachment` (the same math `add_character` uses) and add it
-        // as a posed sprite. Re-registered every frame like the rig above
-        // (cheap for a preview's handful of small meshes).
+        // Bone attachments the KFA limb path doesn't draw: every extra, plus a
+        // clip *primary* (a clip primary gets an empty KFA limb, so it's drawn
+        // here too). Each is posed from its bone's solved transform via
+        // `compose_attachment` (the same math `add_character` uses); a clip
+        // attachment shows its frame at the rig playhead (× its playback).
+        // Re-registered every frame like the rig above (cheap for a preview).
         if let (Some(kfa), Some(rig)) = (self.kfa.as_ref(), self.editor.rig.as_ref()) {
+            let play_t = kfa.time();
             for (bi, bone) in rig.bones.iter().enumerate() {
-                if bone.extras.is_empty() {
+                if bone.extras.is_empty() && bone.primary_clip.is_none() {
                     continue;
                 }
                 let Some((bp, [bs, bh, bf])) = kfa.limb_pose(bi) else {
                     continue;
                 };
-                for ex in &bone.extras {
-                    let (s, h, f, pos) = compose_attachment(bs, bh, bf, bp, &ex.offset);
-                    let model = renderer.add_sprite_model(&ex.model.to_kv6());
+                let posed = |renderer: &mut SceneRenderer, kv6, s, h, f, pos| {
+                    let model = renderer.add_sprite_model(&kv6);
                     renderer.add_sprite_instance_posed(
                         model,
                         DynSpriteTransform {
@@ -5915,6 +5927,26 @@ impl App {
                             forward: f,
                         },
                     );
+                };
+                // Clip primary: at the bone pose (identity offset).
+                if let Some(clip) = &bone.primary_clip {
+                    let frame = clip_frame_at(clip, bone.primary_playback, play_t);
+                    if let Some(cf) = clip.frames.get(frame) {
+                        posed(renderer, cf.model.to_kv6(), bs, bh, bf, bp);
+                    }
+                }
+                // Extras: a clip frame or the static mesh, at the extra's offset.
+                for ex in &bone.extras {
+                    let (s, h, f, pos) = compose_attachment(bs, bh, bf, bp, &ex.offset);
+                    let kv6 = if let Some(clip) = &ex.clip {
+                        let frame = clip_frame_at(clip, ex.playback, play_t);
+                        clip.frames.get(frame).map(|cf| cf.model.to_kv6())
+                    } else {
+                        Some(ex.model.to_kv6())
+                    };
+                    if let Some(kv6) = kv6 {
+                        posed(renderer, kv6, s, h, f, pos);
+                    }
                 }
             }
         }

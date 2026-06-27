@@ -135,6 +135,21 @@ impl RigBone {
         }
     }
 
+    /// Mutable playback params of attachment `i`, or `None` when it's a mesh /
+    /// out of range (only a clip attachment has editable playback).
+    pub fn attachment_playback_mut(&mut self, i: usize) -> Option<&mut ClipPlayback> {
+        if i == 0 {
+            self.primary_clip
+                .is_some()
+                .then_some(&mut self.primary_playback)
+        } else {
+            self.extras
+                .get_mut(i - 1)
+                .filter(|e| e.clip.is_some())
+                .map(|e| &mut e.playback)
+        }
+    }
+
     /// The playback params of attachment `i` (default for a mesh / out of range).
     #[must_use]
     pub fn attachment_playback(&self, i: usize) -> ClipPlayback {

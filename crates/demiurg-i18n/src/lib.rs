@@ -148,6 +148,8 @@ pub enum Msg {
     ClipPadWarn,
     AddClipLayer,
     MakeClipLayer,
+    Speed,
+    Phase,
     Rig,
     Bones,
     Attachments,
@@ -220,7 +222,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 139] = [
+    pub const ALL: [Msg; 141] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -301,6 +303,8 @@ impl Msg {
         Msg::ClipPadWarn,
         Msg::AddClipLayer,
         Msg::MakeClipLayer,
+        Msg::Speed,
+        Msg::Phase,
         Msg::Rig,
         Msg::Bones,
         Msg::AddBone,
@@ -455,6 +459,8 @@ const fn en(msg: Msg) -> &'static str {
         Msg::ClipPadWarn => "Bounding box dwarfs the content — crop to shrink the clip",
         Msg::AddClipLayer => "+ Clip layer",
         Msg::MakeClipLayer => "To clip",
+        Msg::Speed => "Speed",
+        Msg::Phase => "Phase ms",
         Msg::Rig => "Rig",
         Msg::Bones => "Bones",
         Msg::AddBone => "Add bone",
@@ -602,6 +608,8 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::ClipPadWarn => "Рамка намного больше содержимого — обрежьте для сжатия клипа",
         Msg::AddClipLayer => "+ Слой-клип",
         Msg::MakeClipLayer => "В клип",
+        Msg::Speed => "Скорость",
+        Msg::Phase => "Фаза, мс",
         Msg::Rig => "Риг",
         Msg::Bones => "Кости",
         Msg::AddBone => "Добавить кость",
