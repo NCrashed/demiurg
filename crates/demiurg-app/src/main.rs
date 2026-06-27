@@ -160,6 +160,8 @@ enum DialogKind {
     /// the loader picks the format from the extension.
     Open,
     OpenReference,
+    /// Pick a `.rvc` to import as a new clip layer on the active bone.
+    ImportClipLayer,
     Save(SaveFormat),
 }
 
@@ -198,6 +200,13 @@ fn run_dialog(kind: DialogKind, dir: Option<PathBuf>, name: Option<&str>) -> Opt
                 "image",
                 &["png", "jpg", "jpeg", "bmp", "gif", "tga", "webp"],
             );
+            if let Some(dir) = dir {
+                dialog = dialog.set_directory(dir);
+            }
+            dialog.pick_file()
+        }
+        DialogKind::ImportClipLayer => {
+            let mut dialog = rfd::FileDialog::new().add_filter("voxel clip", &["rvc"]);
             if let Some(dir) = dir {
                 dialog = dialog.set_directory(dir);
             }
@@ -4129,6 +4138,9 @@ impl App {
         if a.make_clip_layer {
             self.make_active_attachment_clip();
         }
+        if a.import_clip_layer {
+            self.open_dialog(DialogKind::ImportClipLayer);
+        }
         if a.remove_attachment {
             self.remove_attachment();
         }
@@ -4281,6 +4293,7 @@ impl App {
         match kind {
             DialogKind::Open => self.open_and_record(path),
             DialogKind::OpenReference => self.load_reference(&path),
+            DialogKind::ImportClipLayer => self.import_clip_layer(&path),
             DialogKind::Save(format) => self.start_save(path, format, true),
         }
     }
@@ -5587,6 +5600,52 @@ impl App {
             self.load_active_bone(false);
             self.editor.rig_dirty = true;
         }
+    }
+
+    /// Import a `.rvc` file as a new clip layer on the active bone (named after
+    /// the file) and enter clip editing on it. Sculpt only; one undo step.
+    fn import_clip_layer(&mut self, path: &Path) {
+        if self.editor.rig.is_none() || self.editor.rig_mode != RigMode::Sculpt {
+            return;
+        }
+        let clip = match std::fs::read(path).map(|b| ClipDoc::from_rvc_bytes(&b)) {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
+                eprintln!("demiurg: {}: {e}", path.display());
+                return;
+            }
+            Err(e) => {
+                eprintln!("demiurg: read {}: {e}", path.display());
+                return;
+            }
+        };
+        self.editor.rig_checkpoint();
+        self.commit_active_bone();
+        let bone = self.editor.active_bone;
+        let Some(idx) = self
+            .editor
+            .rig
+            .as_mut()
+            .and_then(|r| r.bones.get_mut(bone))
+            .map(|b| b.add_clip_extra(clip))
+        else {
+            return;
+        };
+        // Name the layer after the imported file.
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            if let Some(ex) = self
+                .editor
+                .rig
+                .as_mut()
+                .and_then(|r| r.bones.get_mut(bone))
+                .and_then(|b| b.extras.get_mut(idx - 1))
+            {
+                ex.name = stem.to_string();
+            }
+        }
+        self.editor.active_attachment = idx;
+        self.load_active_bone(false);
+        self.editor.rig_dirty = true;
     }
 
     /// Remove the active attachment (an extra) from the active bone, falling

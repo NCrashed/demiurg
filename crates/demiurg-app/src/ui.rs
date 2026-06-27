@@ -119,6 +119,8 @@ pub struct UiActions {
     pub add_clip_layer: bool,
     /// Turn the active attachment into an animated clip (seeded from its mesh).
     pub make_clip_layer: bool,
+    /// Import a `.rvc` file as a new clip layer (file dialog).
+    pub import_clip_layer: bool,
     /// Remove the active (extra) attachment from the active bone.
     pub remove_attachment: bool,
     /// Append a new bone as a child of the active bone.
@@ -1522,12 +1524,22 @@ fn layer_label(
     i: usize,
     t: &impl Fn(Msg) -> &'static str,
 ) -> String {
-    if i == 0 {
-        return t(Msg::PrimaryMesh).to_string();
+    let base = if i == 0 {
+        t(Msg::PrimaryMesh).to_string()
+    } else {
+        rig.and_then(|r| r.bones.get(bone))
+            .and_then(|b| b.extras.get(i - 1))
+            .map_or_else(|| format!("{} {i}", t(Msg::Attachment)), |e| e.name.clone())
+    };
+    // Mark a clip layer with its frame count (e.g. "flame · 8f") — both the
+    // type indicator and useful at-a-glance info.
+    match rig
+        .and_then(|r| r.bones.get(bone))
+        .and_then(|b| b.attachment_clip(i))
+    {
+        Some(c) => format!("{base} · {}f", c.frame_count()),
+        None => base,
     }
-    rig.and_then(|r| r.bones.get(bone))
-        .and_then(|b| b.extras.get(i - 1))
-        .map_or_else(|| format!("{} {i}", t(Msg::Attachment)), |e| e.name.clone())
 }
 
 /// The Attachments section (Rig ▸ Sculpt): pick which of the active bone's
@@ -1589,6 +1601,9 @@ fn attachments_panel(
             .clicked()
         {
             actions.make_clip_layer = true;
+        }
+        if ui.button(t(Msg::ImportClipLayer)).clicked() {
+            actions.import_clip_layer = true;
         }
     });
 
