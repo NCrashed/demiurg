@@ -11,7 +11,7 @@ use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{AXIS_COLORS, RenderMode, ViewDir};
 use roxlap_render::egui;
 
-use demiurg_core::Quat;
+use demiurg_core::{LoopMode, Quat};
 
 use std::path::PathBuf;
 
@@ -76,6 +76,8 @@ pub struct UiActions {
     /// Rotate the selection 90 degrees about `editor.rotate_axis`:
     /// `Some(true)` = clockwise, `Some(false)` = counter-clockwise.
     pub rotate_sel: Option<bool>,
+    /// Start a fresh animated voxel clip (one empty frame).
+    pub new_clip: bool,
     /// Save the project (Ctrl+S): overwrite the known path or prompt.
     pub save: bool,
     /// Save the project to a new path (dialog).
@@ -85,6 +87,20 @@ pub struct UiActions {
     pub export_vox: bool,
     /// Export the rig as a `.rkc` character.
     pub export_rkc: bool,
+    /// Export the clip as a `.rvc` voxel clip.
+    pub export_rvc: bool,
+    /// Clip editor: switch the active frame (index into `clip.frames`).
+    pub select_frame: Option<usize>,
+    /// Clip editor: append a new empty frame after the active one.
+    pub add_frame: bool,
+    /// Clip editor: duplicate the frame at this index.
+    pub duplicate_frame: Option<usize>,
+    /// Clip editor: delete the frame at this index.
+    pub delete_frame: Option<usize>,
+    /// Clip editor: set the clip's default per-frame duration (ms).
+    pub set_clip_default_ms: Option<u32>,
+    /// Clip editor: set how the clip loops.
+    pub set_clip_loop_mode: Option<LoopMode>,
     /// Switch the active rig bone (index into `rig.bones`).
     pub select_bone: Option<usize>,
     /// Switch the active attachment of the active bone (`0` = primary mesh,
@@ -220,6 +236,10 @@ pub fn build(
                     actions.new_rig = true;
                     ui.close();
                 }
+                if ui.button(t(Msg::NewClip)).clicked() {
+                    actions.new_clip = true;
+                    ui.close();
+                }
                 // Wrap the current model as a one-bone rig (only when not
                 // already a rig).
                 ui.add_enabled_ui(editor.rig.is_none(), |ui| {
@@ -288,6 +308,13 @@ pub fn build(
                     ui.separator();
                     if ui.button(t(Msg::ExportCharacter)).clicked() {
                         actions.export_rkc = true;
+                        ui.close();
+                    }
+                }
+                if editor.clip.is_some() {
+                    ui.separator();
+                    if ui.button(t(Msg::ExportClip)).clicked() {
+                        actions.export_rvc = true;
                         ui.close();
                     }
                 }
@@ -380,6 +407,12 @@ pub fn build(
                 let rig_mode = editor.rig.is_some().then_some(editor.rig_mode);
                 if editor.rig.is_some() {
                     rig_panel(ui, editor, actions, &t);
+                }
+                // A clip shows its frames strip above the sculpt tools (which
+                // edit the active frame). A clip keeps `rig == None`, so the
+                // match below falls through to the voxel tools.
+                if editor.clip.is_some() {
+                    clip_panel(ui, editor, actions, &t);
                 }
                 match rig_mode {
                     None | Some(RigMode::Sculpt) => voxel_tools_panel(ui, editor, actions, &t),
@@ -821,6 +854,77 @@ fn clips_panel(
             }
         });
     }
+}
+
+/// The Clip editor panel (left side, when a clip document is open): the frames
+/// strip (select / add / duplicate / delete), the default frame duration, and
+/// the loop mode. The active frame's mesh is sculpted with the usual voxel
+/// tools below this panel. Emits [`UiActions`]; the host applies them.
+fn clip_panel(
+    ui: &mut egui::Ui,
+    editor: &Editor,
+    actions: &mut UiActions,
+    t: &impl Fn(Msg) -> &'static str,
+) {
+    let Some(clip) = &editor.clip else {
+        return;
+    };
+    let active = editor.active_frame.min(clip.frames.len() - 1);
+    ui.separator();
+    ui.label(t(Msg::Frames));
+    let durations = clip.durations();
+    egui::ScrollArea::vertical()
+        .max_height(160.0)
+        .show(ui, |ui| {
+            for (i, ms) in durations.iter().enumerate() {
+                // "Frame 3 · 80 ms" — 1-based for the artist.
+                let label = format!("{} {} · {ms} ms", t(Msg::Frame), i + 1);
+                if ui.selectable_label(i == active, label).clicked() {
+                    actions.select_frame = Some(i);
+                }
+            }
+        });
+    ui.horizontal(|ui| {
+        if ui.button(t(Msg::AddFrame)).clicked() {
+            actions.add_frame = true;
+        }
+        if ui.button(t(Msg::DuplicateFrame)).clicked() {
+            actions.duplicate_frame = Some(active);
+        }
+        ui.add_enabled_ui(clip.frames.len() > 1, |ui| {
+            if ui.button(t(Msg::DeleteFrame)).clicked() {
+                actions.delete_frame = Some(active);
+            }
+        });
+    });
+    // Default per-frame duration (ms): the playback rate when a frame has no
+    // override. Clamped to ≥ 1 by the host.
+    ui.horizontal(|ui| {
+        ui.label(t(Msg::FrameMs));
+        let mut ms = clip.default_frame_ms;
+        if ui
+            .add(egui::DragValue::new(&mut ms).speed(1.0).range(1..=10_000))
+            .changed()
+        {
+            actions.set_clip_default_ms = Some(ms);
+        }
+    });
+    // Loop mode: how playback advances past the last frame.
+    ui.horizontal(|ui| {
+        ui.label(t(Msg::LoopModeLabel));
+        for (mode, label) in [
+            (LoopMode::Loop, Msg::Loop),
+            (LoopMode::Once, Msg::Once),
+            (LoopMode::PingPong, Msg::PingPong),
+        ] {
+            if ui
+                .selectable_label(clip.loop_mode == mode, t(label))
+                .clicked()
+            {
+                actions.set_clip_loop_mode = Some(mode);
+            }
+        }
+    });
 }
 
 /// The Animation timeline bar (Rig ▸ Animate), drawn full-width along the

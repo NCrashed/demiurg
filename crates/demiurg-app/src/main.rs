@@ -43,7 +43,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use demiurg_core::{Document, KeyXform, Quat, Rig, RigAttachment, RigBone, VoxelModel, project};
+use demiurg_core::{
+    ClipDoc, Document, KeyXform, LoopMode, Quat, Rig, RigAttachment, RigBone, VoxelModel, project,
+};
 use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{
     AXIS_COLORS, KfaView, Line3, ModelView, OrbitCamera, PickHit, RenderMode, ViewDir, pick_voxel,
@@ -101,6 +103,9 @@ enum SaveFormat {
     /// A rigged character (`.rkc`). Encoded from the rig, not a model —
     /// handled directly in [`App::start_save`].
     Rkc,
+    /// An animated voxel clip (`.rvc`). Encoded from the clip document, not a
+    /// model — handled directly in [`App::start_save`].
+    Rvc,
 }
 
 impl SaveFormat {
@@ -112,6 +117,7 @@ impl SaveFormat {
             SaveFormat::Vxl => model.to_vxl_bytes(),
             SaveFormat::Vox => model.to_vox_bytes(),
             SaveFormat::Rkc => unreachable!("rkc is encoded from the rig in start_save"),
+            SaveFormat::Rvc => unreachable!("rvc is encoded from the clip in start_save"),
         }
     }
 
@@ -123,6 +129,7 @@ impl SaveFormat {
             SaveFormat::Vxl => ("vxl", "vxl", "model.vxl"),
             SaveFormat::Vox => ("vox", "vox", "model.vox"),
             SaveFormat::Rkc => ("character", "rkc", "character.rkc"),
+            SaveFormat::Rvc => ("voxel clip", "rvc", "clip.rvc"),
         }
     }
 }
@@ -169,9 +176,10 @@ fn run_dialog(kind: DialogKind, dir: Option<PathBuf>, name: Option<&str>) -> Opt
         // per-format filters let the user narrow if they want.
         DialogKind::Open => {
             let mut dialog = rfd::FileDialog::new()
-                .add_filter("voxel files", &["demiurg", "rkc", "kv6", "vox"])
+                .add_filter("voxel files", &["demiurg", "rkc", "rvc", "kv6", "vox"])
                 .add_filter("demiurg project", &["demiurg"])
                 .add_filter("rigged character", &["rkc"])
+                .add_filter("voxel clip", &["rvc"])
                 .add_filter("kv6 model", &["kv6"])
                 .add_filter("MagicaVoxel", &["vox"]);
             if let Some(dir) = dir {
@@ -892,6 +900,18 @@ struct Editor {
     /// Pre-edit snapshot for an in-progress sculpt stroke, committed to
     /// `rig_undo` on stroke end only if the stroke changed anything.
     rig_pending: Option<RigSnapshot>,
+    /// When editing an animated voxel clip: the clip being authored. `document`
+    /// holds the working copy of [`Self::active_frame`]'s model; the other
+    /// frames keep their last-committed model here. `None` = not a clip
+    /// (a bare model or a rig). Mutually exclusive with [`Self::rig`].
+    clip: Option<ClipDoc>,
+    /// The frame whose model `document` currently edits (index into
+    /// `clip.frames`). Meaningless when `clip` is `None`.
+    active_frame: usize,
+    /// The clip has unsaved edits in a frame other than the active one (whose
+    /// state lives in `document`). Set when a modified frame is committed on a
+    /// frame switch; cleared when the clip is saved. Mirrors `rig_modified`.
+    clip_modified: bool,
 }
 
 /// One whole-rig undo entry: the rig (every bone's mesh + hinge, clips, root)
@@ -981,6 +1001,9 @@ impl Editor {
             rig_undo: Vec::new(),
             rig_redo: Vec::new(),
             rig_pending: None,
+            clip: None,
+            active_frame: 0,
+            clip_modified: false,
         }
     }
 
@@ -3747,7 +3770,7 @@ impl App {
     /// Whether there's unsaved work: voxel-mesh edits (the document) or rig /
     /// animation edits (the rig).
     fn unsaved(&self) -> bool {
-        self.editor.document.is_modified() || self.editor.rig_modified
+        self.editor.document.is_modified() || self.editor.rig_modified || self.editor.clip_modified
     }
 
     /// Refresh the window title: `demiurg — <name>`, with a trailing `*`
@@ -3904,6 +3927,9 @@ impl App {
         if a.new_rig {
             self.new_rig();
         }
+        if a.new_clip {
+            self.new_clip();
+        }
         if a.convert_to_rig {
             self.convert_to_rig();
         }
@@ -3957,6 +3983,28 @@ impl App {
         }
         if a.export_rkc {
             self.save_to(SaveFormat::Rkc, true);
+        }
+        if a.export_rvc {
+            self.save_to(SaveFormat::Rvc, true);
+        }
+        // Clip editor: frame navigation + frame ops + clip settings.
+        if let Some(i) = a.select_frame {
+            self.select_frame(i);
+        }
+        if a.add_frame {
+            self.add_clip_frame();
+        }
+        if let Some(i) = a.duplicate_frame {
+            self.duplicate_clip_frame(i);
+        }
+        if let Some(i) = a.delete_frame {
+            self.delete_clip_frame(i);
+        }
+        if let Some(ms) = a.set_clip_default_ms {
+            self.set_clip_default_ms(ms);
+        }
+        if let Some(mode) = a.set_clip_loop_mode {
+            self.set_clip_loop_mode(mode);
         }
         if let Some(mode) = a.set_rig_mode {
             self.set_rig_mode(mode);
@@ -4191,13 +4239,11 @@ impl App {
                     self.project_path = Some(path);
                     true
                 }
-                // Clip documents are loaded once the clip editor is wired (C1).
-                Ok(Ok(project::Loaded::Clip(_))) => {
-                    eprintln!(
-                        "demiurg: {}: clip projects are not loadable yet",
-                        path.display()
-                    );
-                    false
+                Ok(Ok(project::Loaded::Clip(clip))) => {
+                    self.enter_clip(clip);
+                    self.doc_name = stem_of(&path);
+                    self.project_path = Some(path);
+                    true
                 }
                 Ok(Err(e)) => {
                     eprintln!("demiurg: {}: {e}", path.display());
@@ -4209,6 +4255,21 @@ impl App {
                 }
             },
             "rkc" => self.load_character(&path),
+            "rvc" => match std::fs::read(&path).map(|b| ClipDoc::from_rvc_bytes(&b)) {
+                Ok(Ok(clip)) => {
+                    self.enter_clip(clip); // an imported .rvc has no project path
+                    self.doc_name = stem_of(&path);
+                    true
+                }
+                Ok(Err(e)) => {
+                    eprintln!("demiurg: {}: {e}", path.display());
+                    false
+                }
+                Err(e) => {
+                    eprintln!("demiurg: read {}: {e}", path.display());
+                    false
+                }
+            },
             "kv6" => match std::fs::read(&path).map(|b| VoxelModel::from_kv6_bytes(&b)) {
                 Ok(Ok(m)) => {
                     self.load_model(m); // a .kv6 has no project path
@@ -4241,7 +4302,7 @@ impl App {
             },
             other => {
                 eprintln!(
-                    "demiurg: {}: unsupported format {other:?} (open .demiurg / .rkc / .kv6 / .vox)",
+                    "demiurg: {}: unsupported format {other:?} (open .demiurg / .rkc / .rvc / .kv6 / .vox)",
                     path.display()
                 );
                 false
@@ -4273,6 +4334,11 @@ impl App {
         // active bone's mesh). Other formats are model-only.
         let save_rig =
             self.editor.rig.is_some() && matches!(format, SaveFormat::Rkc | SaveFormat::Project);
+        // A clip document saves the whole clip: always for `.rvc`, and for a
+        // `.demiurg` project too (so the project keeps every frame, not just the
+        // active one's mesh). Other formats are model-only.
+        let save_clip =
+            self.editor.clip.is_some() && matches!(format, SaveFormat::Rvc | SaveFormat::Project);
         if save_rig {
             // Snapshot the rig (with the active bone's pending edits folded
             // in) and serialize off the event loop.
@@ -4284,6 +4350,20 @@ impl App {
                 let bytes = match format {
                     SaveFormat::Project => project::to_bytes_rig(&rig),
                     _ => rig.to_rkc_bytes(),
+                };
+                let _ = tx.send(std::fs::write(&job_path, bytes));
+            });
+        } else if save_clip {
+            // Fold the active frame's pending edits into the clip, then
+            // serialize the snapshot off the event loop.
+            self.commit_active_frame();
+            let Some(clip) = self.editor.clip.clone() else {
+                return; // not in clip mode
+            };
+            std::thread::spawn(move || {
+                let bytes = match format {
+                    SaveFormat::Project => project::to_bytes_clip(&clip),
+                    _ => clip.to_rvc_bytes(),
                 };
                 let _ = tx.send(std::fs::write(&job_path, bytes));
             });
@@ -4327,11 +4407,16 @@ impl App {
         match (result, done.user) {
             (Ok(()), true) => {
                 eprintln!("demiurg: saved {}", done.path.display());
-                // Both the project (`.demiurg`) and the `.rkc` export persist
-                // the rig, so either clears the rig's unsaved flag — and both are
-                // reopenable documents, so they join the recent list.
-                if matches!(done.format, SaveFormat::Project | SaveFormat::Rkc) {
+                // The project (`.demiurg`), the `.rkc` character, and the `.rvc`
+                // clip all persist their whole document, so each clears the
+                // matching unsaved flag — and all are reopenable, so they join
+                // the recent list.
+                if matches!(
+                    done.format,
+                    SaveFormat::Project | SaveFormat::Rkc | SaveFormat::Rvc
+                ) {
                     self.editor.rig_modified = false;
+                    self.editor.clip_modified = false;
                     self.recent = recent::push(&self.recent, &done.path);
                 }
                 if done.format == SaveFormat::Project {
@@ -4460,6 +4545,8 @@ impl App {
     fn load_model(&mut self, model: VoxelModel) {
         self.editor.rig = None; // leaving rig mode for a plain model
         self.editor.rig_mode = RigMode::Sculpt;
+        self.editor.clip = None; // …and not a clip either
+        self.editor.clip_modified = false;
         self.kfa = None;
         self.editor.document.replace_model(model);
         self.view
@@ -4497,6 +4584,8 @@ impl App {
     }
 
     fn enter_rig(&mut self, rig: Rig) {
+        self.editor.clip = None; // a rig and a clip are exclusive document kinds
+        self.editor.clip_modified = false;
         self.editor.rig = Some(rig);
         self.editor.active_bone = 0;
         self.editor.active_attachment = 0;
@@ -4510,6 +4599,149 @@ impl App {
         self.editor.rig_modified = false; // freshly loaded / created
         self.kfa = None;
         self.load_active_bone(true);
+    }
+
+    // ---- clip (animated voxel) editing -----------------------------------
+    //
+    // A clip mirrors a rig's working-model dance: `document` holds the active
+    // frame's mesh (edited with the usual sculpt tools), the other frames sit
+    // in `clip.frames`, and switching frames commits the working mesh back and
+    // loads the new one. Undo/redo is the per-frame `Document` history (clip
+    // mode keeps `rig == None`, so `do_undo`/`do_redo` take the model branch).
+
+    /// Start a fresh clip: one empty frame, entering clip mode on a clean
+    /// document.
+    fn new_clip(&mut self) {
+        self.enter_clip(ClipDoc::new([NEW_DIMS, NEW_DIMS, NEW_DIMS]));
+        self.doc_name = None;
+        self.project_path = None;
+    }
+
+    /// Enter clip-edit mode on the first frame.
+    fn enter_clip(&mut self, clip: ClipDoc) {
+        self.editor.rig = None; // a clip and a rig are exclusive document kinds
+        self.editor.rig_mode = RigMode::Sculpt;
+        self.kfa = None;
+        self.editor.clip = Some(clip);
+        self.editor.active_frame = 0;
+        self.editor.clip_modified = false;
+        self.load_active_frame(true);
+    }
+
+    /// Load the active frame's model into the document and rebuild the scene
+    /// (mirrors [`Self::load_active_bone`]).
+    fn load_active_frame(&mut self, reframe: bool) {
+        let Some(clip) = &self.editor.clip else {
+            return;
+        };
+        let model = clip
+            .frames
+            .get(self.editor.active_frame)
+            .map_or_else(|| VoxelModel::new(1, 1, 1), |f| f.model.clone());
+        self.editor.document.replace_model(model);
+        self.view
+            .set_model(self.editor.document.model(), self.editor.render_mode);
+        self.editor.refresh_palette();
+        self.editor.sync_resize_dims();
+        self.editor.selection.clear();
+        self.editor.float = None;
+        self.drag = None;
+        if reframe {
+            self.camera = self.view.framing_camera();
+        }
+        self.editor.dirty = false;
+    }
+
+    /// Write the document's working model back into the active frame, so the
+    /// clip reflects the edits (called before switching frames or saving).
+    /// Folds the active frame's "modified" state into `clip_modified` so a
+    /// frame edited then navigated away from still counts as unsaved.
+    fn commit_active_frame(&mut self) {
+        if self.editor.document.is_modified() {
+            self.editor.clip_modified = true;
+        }
+        let frame = self.editor.active_frame;
+        if let Some(m) = self
+            .editor
+            .clip
+            .as_mut()
+            .and_then(|c| c.frames.get_mut(frame))
+        {
+            m.model = self.editor.document.model().clone();
+        }
+    }
+
+    /// Switch which frame is active: commit the current working mesh, then load
+    /// the chosen frame. No-op outside a clip or for the active / out-of-range
+    /// frame.
+    fn select_frame(&mut self, i: usize) {
+        let in_range = self
+            .editor
+            .clip
+            .as_ref()
+            .is_some_and(|c| i < c.frames.len());
+        if !in_range || i == self.editor.active_frame {
+            return;
+        }
+        self.commit_active_frame();
+        self.editor.active_frame = i;
+        self.load_active_frame(false);
+    }
+
+    /// Append a new empty frame after the active one and select it.
+    fn add_clip_frame(&mut self) {
+        self.commit_active_frame();
+        let Some(clip) = self.editor.clip.as_mut() else {
+            return;
+        };
+        let i = clip.add_frame();
+        clip.move_frame(i, self.editor.active_frame + 1);
+        self.editor.clip_modified = true;
+        self.editor.active_frame += 1;
+        self.load_active_frame(false);
+    }
+
+    /// Duplicate frame `i` (its voxels + duration) and select the copy.
+    fn duplicate_clip_frame(&mut self, i: usize) {
+        self.commit_active_frame();
+        let Some(clip) = self.editor.clip.as_mut() else {
+            return;
+        };
+        let new = clip.duplicate_frame(i);
+        self.editor.clip_modified = true;
+        self.editor.active_frame = new;
+        self.load_active_frame(false);
+    }
+
+    /// Delete frame `i` (never the last one), clamping the active frame.
+    fn delete_clip_frame(&mut self, i: usize) {
+        let Some(clip) = self.editor.clip.as_mut() else {
+            return;
+        };
+        if !clip.remove_frame(i) {
+            return;
+        }
+        self.editor.clip_modified = true;
+        if self.editor.active_frame >= clip.frames.len() {
+            self.editor.active_frame = clip.frames.len() - 1;
+        }
+        self.load_active_frame(false);
+    }
+
+    /// Set the active clip's default per-frame duration (ms), clamped to ≥ 1.
+    fn set_clip_default_ms(&mut self, ms: u32) {
+        if let Some(clip) = self.editor.clip.as_mut() {
+            clip.default_frame_ms = ms.max(1);
+            self.editor.clip_modified = true;
+        }
+    }
+
+    /// Set how the active clip loops.
+    fn set_clip_loop_mode(&mut self, mode: LoopMode) {
+        if let Some(clip) = self.editor.clip.as_mut() {
+            clip.loop_mode = mode;
+            self.editor.clip_modified = true;
+        }
     }
 
     /// Switch the rig sub-mode, doing the scene swap each implies: Sculpt
