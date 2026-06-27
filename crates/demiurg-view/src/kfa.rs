@@ -34,7 +34,19 @@ impl KfaView {
     /// or `None` for the rest pose).
     #[must_use]
     pub fn from_rig(rig: Rig, clip: Option<usize>) -> Self {
-        let kfas = vec![rig.to_character().to_kfa_sprite(clip)];
+        // The KFA limb path draws exactly one mesh per bone — the first *static*
+        // attachment `to_kfa_sprite` finds. For a bone whose primary is a clip,
+        // that would be the first static *extra*, drawn (wrongly) at the bone
+        // origin and again (correctly) by the host's compose pass — a double
+        // draw. Build the limb sprites from an extras-stripped rig so each limb
+        // is just the primary (a mesh, or an empty limb for a clip primary);
+        // extras + clip layers are drawn solely by the compose pass. Stripping
+        // extras doesn't affect the solve (it reads hinges, not meshes).
+        let mut skel = rig.clone();
+        for b in &mut skel.bones {
+            b.extras.clear();
+        }
+        let kfas = vec![skel.to_character().to_kfa_sprite(clip)];
         Self { rig, kfas }
     }
 
