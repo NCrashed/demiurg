@@ -3721,6 +3721,24 @@ impl App {
         self.editor.dirty = true;
     }
 
+    /// Select every occupied voxel of the current model (Ctrl+A) and switch to
+    /// the Select tool so it's ready to delete / copy / move. No-op in the posed
+    /// preview modes (Skeleton / Animate), where the document isn't voxel-edited.
+    fn select_all(&mut self) {
+        if self.editor.rig.is_some() && self.editor.rig_mode != RigMode::Sculpt {
+            return;
+        }
+        self.commit_float(); // settle any floating layer first
+        let cells: Vec<[u32; 3]> = self
+            .editor
+            .display_model()
+            .occupied()
+            .map(|(x, y, z, _)| [x, y, z])
+            .collect();
+        self.editor.selection = cells.into_iter().collect();
+        self.editor.tool = Tool::Select;
+    }
+
     /// Copy the occupied selected voxels to the clipboard at their
     /// absolute positions, so a paste lands back where they came from.
     /// Settles any floating layer first, so the copy reads real voxels.
@@ -6114,6 +6132,8 @@ impl App {
             KeyCode::KeyZ if pressed && ctrl && !shift => self.do_undo(),
             KeyCode::KeyZ if pressed && ctrl && shift => self.do_redo(),
             KeyCode::KeyY if pressed && ctrl => self.do_redo(),
+            // Ctrl+A selects every occupied voxel of the current model.
+            KeyCode::KeyA if pressed && ctrl => self.select_all(),
             // Ctrl+C/X/V are context-sensitive: in Animate they copy / cut /
             // paste the selected keyframe's pose; elsewhere they copy / paste
             // the voxel selection (there's no voxel "cut", so Ctrl+X is
