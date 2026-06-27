@@ -99,8 +99,13 @@ pub struct UiActions {
     pub delete_frame: Option<usize>,
     /// Clip editor: set the clip's default per-frame duration (ms).
     pub set_clip_default_ms: Option<u32>,
+    /// Clip editor: set frame `.0`'s duration override (`Some(ms)` overrides the
+    /// clip default; `None` reverts to it).
+    pub set_frame_duration: Option<(usize, Option<u32>)>,
     /// Clip editor: set how the clip loops.
     pub set_clip_loop_mode: Option<LoopMode>,
+    /// Clip timeline: scrub the playhead to this absolute time (ms). Pauses.
+    pub seek_clip: Option<u32>,
     /// Switch the active rig bone (index into `rig.bones`).
     pub select_bone: Option<usize>,
     /// Switch the active attachment of the active bone (`0` = primary mesh,
@@ -388,6 +393,14 @@ pub fn build(
             .exact_size(64.0)
             .show_inside(ui, |ui| {
                 timeline_bar(ui, editor, actions, timeline, &t);
+            });
+    }
+    // The clip's frame timeline shares the bottom-bar slot.
+    if editor.clip.is_some() {
+        egui::Panel::bottom("clip_timeline")
+            .exact_size(48.0)
+            .show_inside(ui, |ui| {
+                clip_timeline_bar(ui, editor, actions, &t);
             });
     }
 
@@ -909,6 +922,27 @@ fn clip_panel(
             actions.set_clip_default_ms = Some(ms);
         }
     });
+    // The active frame's own duration: edit it to override the clip default;
+    // "↺" reverts the override.
+    ui.horizontal(|ui| {
+        ui.label(format!("{} {}", t(Msg::Frame), active + 1));
+        let cur = clip.frames[active].duration_ms;
+        let mut ms = cur.unwrap_or(clip.default_frame_ms);
+        if ui
+            .add(
+                egui::DragValue::new(&mut ms)
+                    .speed(1.0)
+                    .range(1..=10_000)
+                    .suffix(" ms"),
+            )
+            .changed()
+        {
+            actions.set_frame_duration = Some((active, Some(ms)));
+        }
+        if cur.is_some() && ui.button("↺").clicked() {
+            actions.set_frame_duration = Some((active, None));
+        }
+    });
     // Loop mode: how playback advances past the last frame.
     ui.horizontal(|ui| {
         ui.label(t(Msg::LoopModeLabel));
@@ -924,6 +958,64 @@ fn clip_panel(
                 actions.set_clip_loop_mode = Some(mode);
             }
         }
+    });
+}
+
+/// The Clip timeline bar (bottom, when a clip is open): transport (play/pause,
+/// prev/next frame) + a frame scrubber + a `frame / count` readout. The
+/// playhead and the edited frame are unified, so scrubbing also selects the
+/// frame for editing. Emits [`UiActions`].
+fn clip_timeline_bar(
+    ui: &mut egui::Ui,
+    editor: &Editor,
+    actions: &mut UiActions,
+    t: &impl Fn(Msg) -> &'static str,
+) {
+    let Some(clip) = &editor.clip else {
+        return;
+    };
+    let n = clip.frames.len();
+    let active = editor.active_frame.min(n - 1);
+    ui.horizontal(|ui| {
+        // Play / pause (Space). Reuses `toggle_play`; the host routes it to the
+        // clip when a clip is open.
+        let label = if editor.anim_playing {
+            t(Msg::Pause)
+        } else {
+            t(Msg::Play)
+        };
+        if ui.button(label).clicked() {
+            actions.toggle_play = true;
+        }
+        // Prev / next frame (`,` / `.`); scrubbing pauses.
+        if ui
+            .add_enabled(active > 0, egui::Button::new("◀"))
+            .on_hover_text(",")
+            .clicked()
+        {
+            actions.seek_clip = Some(clip.frame_start_ms(active - 1));
+        }
+        if ui
+            .add_enabled(active + 1 < n, egui::Button::new("▶"))
+            .on_hover_text(".")
+            .clicked()
+        {
+            actions.seek_clip = Some(clip.frame_start_ms(active + 1));
+        }
+        // Frame scrubber: a slider over frame indices. Single-frame clips have
+        // nothing to scrub, so the slider is omitted.
+        if n > 1 {
+            let mut idx = active;
+            let resp = ui.add(
+                egui::Slider::new(&mut idx, 0..=(n - 1))
+                    .integer()
+                    .show_value(false),
+            );
+            if resp.changed() {
+                actions.seek_clip = Some(clip.frame_start_ms(idx));
+            }
+        }
+        ui.label(format!("{} {} / {n}", t(Msg::Frame), active + 1));
     });
 }
 

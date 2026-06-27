@@ -912,6 +912,11 @@ struct Editor {
     /// state lives in `document`). Set when a modified frame is committed on a
     /// frame switch; cleared when the clip is saved. Mirrors `rig_modified`.
     clip_modified: bool,
+    /// Clip playback head in ms. Drives which frame the viewport shows while
+    /// playing / scrubbing; kept in sync with `active_frame` (the playhead and
+    /// the edited frame are one and the same). Reuses `anim_playing` for the
+    /// play/pause state.
+    clip_time_ms: u32,
 }
 
 /// One whole-rig undo entry: the rig (every bone's mesh + hinge, clips, root)
@@ -1004,6 +1009,7 @@ impl Editor {
             clip: None,
             active_frame: 0,
             clip_modified: false,
+            clip_time_ms: 0,
         }
     }
 
@@ -4003,14 +4009,26 @@ impl App {
         if let Some(ms) = a.set_clip_default_ms {
             self.set_clip_default_ms(ms);
         }
+        if let Some((i, ms)) = a.set_frame_duration {
+            self.set_frame_duration(i, ms);
+        }
         if let Some(mode) = a.set_clip_loop_mode {
             self.set_clip_loop_mode(mode);
+        }
+        if let Some(ms) = a.seek_clip {
+            self.seek_clip(ms);
         }
         if let Some(mode) = a.set_rig_mode {
             self.set_rig_mode(mode);
         }
         if a.toggle_play {
-            self.editor.anim_playing = !self.editor.anim_playing;
+            // A clip's play/pause has its own (Once-rewind) logic; the rig
+            // timeline just flips the flag.
+            if self.editor.clip.is_some() {
+                self.toggle_clip_play();
+            } else {
+                self.editor.anim_playing = !self.editor.anim_playing;
+            }
         }
         if let Some(ms) = a.seek {
             // Scrubbing implies pause; the next redraw re-poses at the new time.
@@ -4625,6 +4643,8 @@ impl App {
         self.editor.clip = Some(clip);
         self.editor.active_frame = 0;
         self.editor.clip_modified = false;
+        self.editor.clip_time_ms = 0;
+        self.editor.anim_playing = false; // a freshly opened clip starts paused
         self.load_active_frame(true);
     }
 
@@ -4686,6 +4706,17 @@ impl App {
         self.commit_active_frame();
         self.editor.active_frame = i;
         self.load_active_frame(false);
+        self.sync_clip_time(); // a user frame pick snaps the playhead to it
+    }
+
+    /// Snap the playhead to the start of the active frame — done after any
+    /// *user* frame change (pick / step / add / delete) so play resumes from
+    /// the shown frame. Playback frame switches deliberately skip this (the
+    /// playhead drives them, not the reverse).
+    fn sync_clip_time(&mut self) {
+        if let Some(clip) = &self.editor.clip {
+            self.editor.clip_time_ms = clip.frame_start_ms(self.editor.active_frame);
+        }
     }
 
     /// Append a new empty frame after the active one and select it.
@@ -4699,6 +4730,7 @@ impl App {
         self.editor.clip_modified = true;
         self.editor.active_frame += 1;
         self.load_active_frame(false);
+        self.sync_clip_time();
     }
 
     /// Duplicate frame `i` (its voxels + duration) and select the copy.
@@ -4711,6 +4743,7 @@ impl App {
         self.editor.clip_modified = true;
         self.editor.active_frame = new;
         self.load_active_frame(false);
+        self.sync_clip_time();
     }
 
     /// Delete frame `i` (never the last one), clamping the active frame.
@@ -4726,6 +4759,87 @@ impl App {
             self.editor.active_frame = clip.frames.len() - 1;
         }
         self.load_active_frame(false);
+        self.sync_clip_time();
+    }
+
+    /// Step the active frame one back / forward (clamped), pausing playback.
+    /// Drives the `,` / `.` transport keys and the timeline's prev/next.
+    fn step_clip_frame(&mut self, forward: bool) {
+        let Some(clip) = &self.editor.clip else {
+            return;
+        };
+        self.editor.anim_playing = false;
+        let i = self.editor.active_frame;
+        let next = if forward {
+            (i + 1).min(clip.frames.len() - 1)
+        } else {
+            i.saturating_sub(1)
+        };
+        self.select_frame(next);
+    }
+
+    /// Toggle clip playback. Starting from the end of a one-shot clip rewinds
+    /// to the first frame so play is never a no-op.
+    fn toggle_clip_play(&mut self) {
+        let at_end = self.editor.clip.as_ref().is_some_and(|c| {
+            c.loop_mode == LoopMode::Once && self.editor.active_frame + 1 >= c.frames.len()
+        });
+        self.editor.anim_playing = !self.editor.anim_playing;
+        if self.editor.anim_playing && at_end {
+            self.select_frame(0);
+        }
+    }
+
+    /// Scrub the playhead to `ms` (pausing) and show the frame there. Drives the
+    /// timeline scrub.
+    fn seek_clip(&mut self, ms: u32) {
+        self.editor.anim_playing = false;
+        let Some(clip) = &self.editor.clip else {
+            return;
+        };
+        let frame = clip.frame_at(ms);
+        // Snap the time to the frame start so the playhead sits on a frame
+        // boundary (frame-accurate scrubbing), then switch to it.
+        self.select_frame(frame);
+    }
+
+    /// Advance clip playback by one redraw tick, switching the shown frame when
+    /// the playhead crosses into a new one. Called every frame from `redraw`;
+    /// a no-op unless a clip is playing. The playhead drives `active_frame`, so
+    /// stopping leaves the shown frame editable.
+    fn advance_clip_playback(&mut self) {
+        if !self.editor.anim_playing {
+            return;
+        }
+        let Some(clip) = &self.editor.clip else {
+            return;
+        };
+        let total = clip.total_ms().max(1);
+        #[allow(clippy::cast_possible_truncation)]
+        let mut t = self.editor.clip_time_ms + FRAME_DT.as_millis() as u32;
+        let mut stop = false;
+        match clip.loop_mode {
+            LoopMode::Loop => t %= total,
+            LoopMode::PingPong => t %= 2 * total,
+            LoopMode::Once => {
+                if t >= total {
+                    t = total;
+                    stop = true; // hold the last frame
+                }
+            }
+        }
+        self.editor.clip_time_ms = t;
+        let target = clip.frame_at(t);
+        if stop {
+            self.editor.anim_playing = false;
+        }
+        if target != self.editor.active_frame {
+            // A playback frame switch: load the frame for display (and editing
+            // when stopped) without snapping the playhead back to its start.
+            self.commit_active_frame();
+            self.editor.active_frame = target;
+            self.load_active_frame(false);
+        }
     }
 
     /// Set the active clip's default per-frame duration (ms), clamped to ≥ 1.
@@ -4741,6 +4855,17 @@ impl App {
         if let Some(clip) = self.editor.clip.as_mut() {
             clip.loop_mode = mode;
             self.editor.clip_modified = true;
+        }
+    }
+
+    /// Set frame `i`'s duration override (`Some(ms)` clamped to ≥ 1, or `None`
+    /// to use the clip default). Re-syncs the playhead since frame start times
+    /// shift.
+    fn set_frame_duration(&mut self, i: usize, ms: Option<u32>) {
+        if let Some(f) = self.editor.clip.as_mut().and_then(|c| c.frames.get_mut(i)) {
+            f.duration_ms = ms.map(|m| m.max(1));
+            self.editor.clip_modified = true;
+            self.sync_clip_time();
         }
     }
 
@@ -5539,6 +5664,8 @@ impl App {
             };
             kfa.advance(dt);
         }
+        // Clip playback advances the playhead and swaps the shown frame.
+        self.advance_clip_playback();
 
         // Editor lines (uses the pick ray from the last frame's
         // projection — fine at redraw cadence). Built before the mutable
@@ -5643,6 +5770,22 @@ impl App {
         self.editor.rig.is_some() && self.editor.rig_mode == RigMode::Animate
     }
 
+    /// Clip transport keys: Space toggles play, `,` / `.` step frames. Mirrors
+    /// the Animate transport, but a clip is always "playable" (no rig sub-mode),
+    /// so these apply whenever a clip is open. Returns whether the key was used.
+    fn on_clip_key(&mut self, code: KeyCode) -> bool {
+        if self.editor.clip.is_none() {
+            return false;
+        }
+        match code {
+            KeyCode::Space => self.toggle_clip_play(),
+            KeyCode::Comma => self.step_clip_frame(false),
+            KeyCode::Period => self.step_clip_frame(true),
+            _ => return false,
+        }
+        true
+    }
+
     /// Handle a key that's only meaningful while animating: R/G/S switch the
     /// gizmo mode (rotate / grab-translate / scale), Space toggles play/pause,
     /// and `,` / `.` step the playhead to the previous / next keyframe. Returns
@@ -5674,6 +5817,11 @@ impl App {
         // Animate-only keys (gizmo mode + playback transport) get first crack,
         // so they don't clobber the global tool/camera hotkeys (e.g. S=zoom-out).
         if pressed && self.on_animate_key(code, ctrl) {
+            return;
+        }
+        // Clip transport (Space / `,` / `.`): only Space/comma/period, so the
+        // sculpt hotkeys (1-8, S=zoom) keep working while editing a frame.
+        if pressed && self.on_clip_key(code) {
             return;
         }
         match code {

@@ -191,6 +191,17 @@ impl ClipDoc {
         voxel_clip::frame_at(&self.durations(), self.loop_mode, elapsed_ms)
     }
 
+    /// The playback time (ms) at which frame `i` begins — the sum of all earlier
+    /// frame durations. Out-of-range `i` clamps to [`Self::total_ms`]. Lets the
+    /// editor snap the playhead to a frame the artist selected.
+    #[must_use]
+    pub fn frame_start_ms(&self, i: usize) -> u32 {
+        self.durations()
+            .iter()
+            .take(i)
+            .fold(0u32, |acc, &d| acc.saturating_add(d))
+    }
+
     /// Resize every frame to `dims` (origin-anchored, like
     /// [`VoxelModel::resized`]) and adopt them as the clip's new bbox. Pivot is
     /// clamped to the new box.
@@ -428,6 +439,19 @@ mod tests {
         clip.frames[1].duration_ms = Some(200);
         assert_eq!(clip.durations(), vec![50, 200]);
         assert_eq!(clip.total_ms(), 250);
+    }
+
+    #[test]
+    fn frame_start_ms_accumulates_durations() {
+        let mut clip = ClipDoc::new([1, 1, 1]);
+        clip.default_frame_ms = 100;
+        clip.add_frame();
+        clip.frames[1].duration_ms = Some(50);
+        clip.add_frame(); // frame 2, default 100
+        assert_eq!(clip.frame_start_ms(0), 0);
+        assert_eq!(clip.frame_start_ms(1), 100);
+        assert_eq!(clip.frame_start_ms(2), 150);
+        assert_eq!(clip.frame_start_ms(99), clip.total_ms(), "past end clamps");
     }
 
     #[test]
