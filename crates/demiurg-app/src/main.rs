@@ -55,7 +55,7 @@ use roxlap_core::kfa_draw::compose_attachment;
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_render::{
     DynSpriteTransform, FrameParams, ImageFacing, ImageId, ImageSprite, Material, RenderOptions,
-    SceneRenderer, egui,
+    SceneRenderer, SpriteInstanceId, SpriteSet, egui,
 };
 use ui::UiActions;
 use winit::application::ApplicationHandler;
@@ -1506,6 +1506,7 @@ fn main() {
         clip_regen_due: None,
         material_dirty: true,
         material_id_ceiling: 0,
+        clip_player: None,
     };
 
     let event_loop = EventLoop::new().expect("winit: create event loop");
@@ -1553,6 +1554,40 @@ fn new_model() -> VoxelModel {
     let c = NEW_DIMS / 2;
     m.set(c, c, c, 0x80c8_c8c8);
     m
+}
+
+/// A cheap content fingerprint of a clip's frames, materials, and timing — so
+/// the clip-player flipbook is re-registered only when the played content
+/// actually changes (a frame committed, added/removed, retimed, or a material
+/// edit), not every frame. Active-frame *uncommitted* edits don't change
+/// `clip.frames`, so they don't perturb this; they show via `update_clip_frame`.
+fn clip_fingerprint(clip: &ClipDoc) -> u64 {
+    // FNV-1a over the per-frame voxel buffers + durations + the clip-level
+    // materials, loop mode, and dims. Editor clips are small, so hashing the
+    // dense buffers each playing frame is cheap.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |v: u64| {
+        h ^= v;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    let (x, y, z) = (clip.dims[0], clip.dims[1], clip.dims[2]);
+    mix(u64::from(x));
+    mix(u64::from(y));
+    mix(u64::from(z));
+    mix(clip.loop_mode as u64);
+    mix(u64::from(clip.default_frame_ms));
+    for (&color, m) in &clip.materials {
+        mix(u64::from(color));
+        mix(u64::from(m.alpha));
+        mix(u64::from(m.mode.as_u8()));
+    }
+    for f in &clip.frames {
+        mix(u64::from(f.duration_ms.unwrap_or(0)));
+        for &v in f.model.voxels() {
+            mix(u64::from(v));
+        }
+    }
+    h
 }
 
 /// Clamp an `i32` cell into `[0, dims)` per axis.
@@ -1684,6 +1719,29 @@ struct App {
     /// Highest material id installed via `define_material` last refresh, so
     /// stale ids can be reset to opaque when the palette shrinks.
     material_id_ceiling: u8,
+    /// While a clip is **playing**, the preview is driven by roxlap's actual
+    /// clip player (flipbook + per-voxel materials) instead of the per-frame
+    /// model — engine-accurate playback. `None` when not playing a clip. The
+    /// flipbook is (re)registered when the clip's content fingerprint changes.
+    clip_player: Option<ClipPlayer>,
+}
+
+/// Identity sprite transform at the world origin — the clip player instance
+/// pose (the clip carries its own pivot), matching the editor's origin framing.
+const CLIP_INSTANCE_XF: DynSpriteTransform = DynSpriteTransform {
+    pos: [0.0, 0.0, 0.0],
+    right: [1.0, 0.0, 0.0],
+    up: [0.0, 1.0, 0.0],
+    forward: [0.0, 0.0, 1.0],
+};
+
+/// A clip registered with roxlap's clip player for engine-accurate playback.
+/// The flipbook itself is wiped from the renderer by the next `set_sprites`
+/// (on leaving playback), so only the instance handle + fingerprint are kept.
+struct ClipPlayer {
+    instance: SpriteInstanceId,
+    /// Content fingerprint the flipbook was built from; a change re-registers.
+    fingerprint: u64,
 }
 
 impl App {
@@ -4816,10 +4874,14 @@ impl App {
         let Some(clip) = &self.editor.clip else {
             return;
         };
-        let model = clip
+        let mut model = clip
             .frames
             .get(self.editor.active_frame)
             .map_or_else(|| VoxelModel::new(1, 1, 1), |f| f.model.clone());
+        // Mirror the clip-level materials onto the working frame so the
+        // preview composites the clip's translucency (frames are pure
+        // geometry; the clip owns the one material table).
+        clip.apply_materials_to(&mut model);
         self.editor.document.replace_model(model);
         self.refresh_clip_view(); // shows onion-skin ghosts when enabled
         self.editor.refresh_palette();
@@ -4842,13 +4904,16 @@ impl App {
             self.editor.clip_modified = true;
         }
         let frame = self.editor.active_frame;
-        if let Some(m) = self
-            .editor
-            .clip
-            .as_mut()
-            .and_then(|c| c.frames.get_mut(frame))
-        {
-            m.model = self.editor.document.model().clone();
+        // The working model carries the clip's materials (mirrored in on load).
+        // Lift them back to the clip level and store the frame as pure
+        // geometry, so the one material table stays authoritative.
+        let mut model = self.editor.document.model().clone();
+        let materials = std::mem::take(&mut model.materials);
+        if let Some(clip) = self.editor.clip.as_mut() {
+            clip.materials = materials;
+            if let Some(f) = clip.frames.get_mut(frame) {
+                f.model = model;
+            }
         }
     }
 
@@ -5142,10 +5207,22 @@ impl App {
         Some(base)
     }
 
+    /// Whether the clip preview is driven by roxlap's clip player rather than
+    /// the per-frame model: a clip is open and **playing**. While playing, the
+    /// editor's own grid/sprites are emptied and the registered flipbook draws.
+    fn use_clip_player(&self) -> bool {
+        self.editor.clip.is_some() && self.editor.anim_playing
+    }
+
     /// Set the viewport model for the active clip frame, applying onion-skin
     /// ghosts when enabled. The shared helper behind a frame load and the
-    /// per-edit rebuild.
+    /// per-edit rebuild. While the clip player drives the preview (playing),
+    /// the editor model is emptied so it doesn't draw over the played clip.
     fn refresh_clip_view(&mut self) {
+        if self.use_clip_player() {
+            self.view.clear_scene();
+            return;
+        }
         let mode = self.editor.render_mode;
         match self.clip_render_model() {
             Some(ghosted) => self.view.set_model(&ghosted, mode),
@@ -6041,9 +6118,12 @@ impl App {
         if self.editor.dirty && self.kfa.is_none() {
             // Render the document with the floating layer composited on top (a
             // borrow when nothing floats, a clone while it does), plus onion-skin
-            // ghosts when editing a clip.
+            // ghosts when editing a clip. While a clip is playing the model is
+            // emptied — roxlap's clip player draws the frame instead.
             let mode = self.editor.render_mode;
-            if let Some(ghosted) = self.clip_render_model() {
+            if self.use_clip_player() {
+                self.view.clear_scene();
+            } else if let Some(ghosted) = self.clip_render_model() {
                 self.view.set_model(&ghosted, mode);
             } else {
                 let display = self.editor.display_model();
@@ -6132,99 +6212,153 @@ impl App {
             self.editor.ref_image_dirty = false;
         }
         renderer.set_flip_x(self.editor.flip_x);
-        renderer.set_sprites(self.view.sprites());
-        // Transparent-voxel materials (roxlap TV stage): install the model's
-        // global material palette, then apply its colour→material map to the
-        // active render path. Voxel mode composites via the terrain map;
-        // sprite mode registers the model with per-voxel materials (the
-        // `set_sprites` path above left it empty when materials exist, so it
-        // isn't double-drawn opaque). All inert for an all-opaque model.
-        if self.material_dirty {
-            // Reset any ids the previous palette used past the current one,
-            // so a removed material reverts to opaque.
-            for id in 1..=self.material_id_ceiling {
-                renderer.define_material(id, Material::OPAQUE);
-            }
-            self.material_id_ceiling = 0;
-            for &(id, mat) in self.view.material_defs() {
-                renderer.define_material(id, mat);
-                self.material_id_ceiling = self.material_id_ceiling.max(id);
-            }
-            self.material_dirty = false;
-        }
-        match self.editor.render_mode {
-            RenderMode::Voxel => renderer.set_terrain_materials(self.view.material_map()),
-            RenderMode::Sprite => {
-                renderer.set_terrain_materials(&[]);
-                if let Some(kv6) = self.view.sprite_kv6() {
-                    let model =
-                        renderer.add_sprite_model_with_materials(kv6, self.view.material_map());
-                    renderer.add_sprite_instance(model, [0.0, 0.0, 0.0]);
+        // A playing clip renders through roxlap's actual clip player (flipbook +
+        // per-voxel materials) for engine-accurate preview; the flipbook is
+        // registered once and re-registered only when the clip's content
+        // fingerprint changes (cheap `set_clip_instance_frame` otherwise). A
+        // paused/edited clip, a plain model, and rigs use the per-frame path.
+        // (Inlined, not `use_clip_player()`, so it stays a disjoint field
+        // borrow alongside the `renderer` mutable borrow.)
+        let player_active = self.editor.anim_playing && self.editor.clip.is_some();
+        if let Some(clip) = self.editor.clip.as_ref().filter(|_| player_active) {
+            let fp = clip_fingerprint(clip);
+            let stale = self
+                .clip_player
+                .as_ref()
+                .is_none_or(|p| p.fingerprint != fp);
+            if stale {
+                // Reset the sprite/clip registry, install the clip's materials,
+                // then register the flipbook with its colour→material map.
+                renderer.set_sprites(&SpriteSet {
+                    models: Vec::new(),
+                    instances: Vec::new(),
+                    carve_model: None,
+                });
+                let (defs, map) = clip.material_palette();
+                for id in 1..=self.material_id_ceiling {
+                    renderer.define_material(id, Material::OPAQUE);
                 }
-            }
-        }
-        // The KFA rig's limb sprites. set_sprites resets the registry each
-        // frame, so re-establish the rig after it, then apply the current
-        // pose — or clear it (empty set) when there's no preview, so leaving
-        // Animate mode doesn't leave the posed rig drawn over the editor.
-        // (Re-establishing every frame is wasteful on GPU; a later pass can
-        // do set_kfa_sprites only when the set changes.)
-        match &mut self.kfa {
-            Some(kfa) => {
-                renderer.set_kfa_sprites(kfa.kfas_mut());
-                renderer.update_kfa_poses(kfa.kfas_mut());
-            }
-            None => renderer.set_kfa_sprites(&mut []),
-        }
-        // Bone attachments the KFA limb path doesn't draw: every extra, plus a
-        // clip *primary* (a clip primary gets an empty KFA limb, so it's drawn
-        // here too). Each is posed from its bone's solved transform via
-        // `compose_attachment` (the same math `add_character` uses); a clip
-        // attachment shows its frame at the rig playhead (× its playback).
-        // Re-registered every frame like the rig above (cheap for a preview).
-        if let (Some(kfa), Some(rig)) = (self.kfa.as_ref(), self.editor.rig.as_ref()) {
-            let play_t = kfa.time();
-            for (bi, bone) in rig.bones.iter().enumerate() {
-                if bone.extras.is_empty() && bone.primary_clip.is_none() {
-                    continue;
+                self.material_id_ceiling = 0;
+                for &(id, mat) in &defs {
+                    renderer.define_material(id, mat);
+                    self.material_id_ceiling = self.material_id_ceiling.max(id);
                 }
-                let Some((bp, [bs, bh, bf])) = kfa.limb_pose(bi) else {
-                    continue;
+                self.clip_player = match clip.to_voxel_clip().decode() {
+                    Ok(decoded) => {
+                        let cid = renderer.add_voxel_clip_with_materials(&decoded, &map);
+                        let instance = renderer.add_clip_instance_posed(cid, CLIP_INSTANCE_XF);
+                        Some(ClipPlayer {
+                            instance,
+                            fingerprint: fp,
+                        })
+                    }
+                    Err(_) => None,
                 };
-                let posed = |renderer: &mut SceneRenderer, kv6, s, h, f, pos| {
-                    let model = renderer.add_sprite_model(&kv6);
-                    renderer.add_sprite_instance_posed(
-                        model,
-                        DynSpriteTransform {
-                            pos,
-                            right: s,
-                            up: h,
-                            forward: f,
-                        },
-                    );
-                };
-                // Clip primary: at the bone pose (identity offset).
-                if let Some(clip) = &bone.primary_clip {
-                    let frame = clip_frame_at(clip, bone.primary_playback, play_t);
-                    if let Some(cf) = clip.frames.get(frame) {
-                        posed(renderer, cf.model.to_kv6(), bs, bh, bf, bp);
+            }
+            if let Some(p) = &self.clip_player {
+                let frame = u32::try_from(self.editor.active_frame).unwrap_or(0);
+                renderer.set_clip_instance_frame(p.instance, frame);
+            }
+        } else {
+            // Leaving playback: the next `set_sprites` wipes the resident clip;
+            // force a view rebuild so the edited frame reappears.
+            if self.clip_player.take().is_some() {
+                self.editor.dirty = true;
+            }
+            renderer.set_sprites(self.view.sprites());
+            // Transparent-voxel materials (roxlap TV stage): install the model's
+            // global material palette, then apply its colour→material map to the
+            // active render path. Voxel mode composites via the terrain map;
+            // sprite mode registers the model with per-voxel materials (the
+            // `set_sprites` path above left it empty when materials exist, so it
+            // isn't double-drawn opaque). All inert for an all-opaque model.
+            if self.material_dirty {
+                // Reset any ids the previous palette used past the current one,
+                // so a removed material reverts to opaque.
+                for id in 1..=self.material_id_ceiling {
+                    renderer.define_material(id, Material::OPAQUE);
+                }
+                self.material_id_ceiling = 0;
+                for &(id, mat) in self.view.material_defs() {
+                    renderer.define_material(id, mat);
+                    self.material_id_ceiling = self.material_id_ceiling.max(id);
+                }
+                self.material_dirty = false;
+            }
+            match self.editor.render_mode {
+                RenderMode::Voxel => renderer.set_terrain_materials(self.view.material_map()),
+                RenderMode::Sprite => {
+                    renderer.set_terrain_materials(&[]);
+                    if let Some(kv6) = self.view.sprite_kv6() {
+                        let model =
+                            renderer.add_sprite_model_with_materials(kv6, self.view.material_map());
+                        renderer.add_sprite_instance(model, [0.0, 0.0, 0.0]);
                     }
                 }
-                // Extras: a clip frame or the static mesh, at the extra's offset.
-                for ex in &bone.extras {
-                    let (s, h, f, pos) = compose_attachment(bs, bh, bf, bp, &ex.offset);
-                    let kv6 = if let Some(clip) = &ex.clip {
-                        let frame = clip_frame_at(clip, ex.playback, play_t);
-                        clip.frames.get(frame).map(|cf| cf.model.to_kv6())
-                    } else {
-                        Some(ex.model.to_kv6())
+            }
+            // The KFA rig's limb sprites. set_sprites resets the registry each
+            // frame, so re-establish the rig after it, then apply the current
+            // pose — or clear it (empty set) when there's no preview, so leaving
+            // Animate mode doesn't leave the posed rig drawn over the editor.
+            // (Re-establishing every frame is wasteful on GPU; a later pass can
+            // do set_kfa_sprites only when the set changes.)
+            match &mut self.kfa {
+                Some(kfa) => {
+                    renderer.set_kfa_sprites(kfa.kfas_mut());
+                    renderer.update_kfa_poses(kfa.kfas_mut());
+                }
+                None => renderer.set_kfa_sprites(&mut []),
+            }
+            // Bone attachments the KFA limb path doesn't draw: every extra, plus a
+            // clip *primary* (a clip primary gets an empty KFA limb, so it's drawn
+            // here too). Each is posed from its bone's solved transform via
+            // `compose_attachment` (the same math `add_character` uses); a clip
+            // attachment shows its frame at the rig playhead (× its playback).
+            // Re-registered every frame like the rig above (cheap for a preview).
+            if let (Some(kfa), Some(rig)) = (self.kfa.as_ref(), self.editor.rig.as_ref()) {
+                let play_t = kfa.time();
+                for (bi, bone) in rig.bones.iter().enumerate() {
+                    if bone.extras.is_empty() && bone.primary_clip.is_none() {
+                        continue;
+                    }
+                    let Some((bp, [bs, bh, bf])) = kfa.limb_pose(bi) else {
+                        continue;
                     };
-                    if let Some(kv6) = kv6 {
-                        posed(renderer, kv6, s, h, f, pos);
+                    let posed = |renderer: &mut SceneRenderer, kv6, s, h, f, pos| {
+                        let model = renderer.add_sprite_model(&kv6);
+                        renderer.add_sprite_instance_posed(
+                            model,
+                            DynSpriteTransform {
+                                pos,
+                                right: s,
+                                up: h,
+                                forward: f,
+                            },
+                        );
+                    };
+                    // Clip primary: at the bone pose (identity offset).
+                    if let Some(clip) = &bone.primary_clip {
+                        let frame = clip_frame_at(clip, bone.primary_playback, play_t);
+                        if let Some(cf) = clip.frames.get(frame) {
+                            posed(renderer, cf.model.to_kv6(), bs, bh, bf, bp);
+                        }
+                    }
+                    // Extras: a clip frame or the static mesh, at the extra's offset.
+                    for ex in &bone.extras {
+                        let (s, h, f, pos) = compose_attachment(bs, bh, bf, bp, &ex.offset);
+                        let kv6 = if let Some(clip) = &ex.clip {
+                            let frame = clip_frame_at(clip, ex.playback, play_t);
+                            clip.frames.get(frame).map(|cf| cf.model.to_kv6())
+                        } else {
+                            Some(ex.model.to_kv6())
+                        };
+                        if let Some(kv6) = kv6 {
+                            posed(renderer, kv6, s, h, f, pos);
+                        }
                     }
                 }
             }
-        }
+        } // end of the non-player (per-frame) establishment branch
         renderer.render(self.view.scene_mut(), &camera, &frame);
         // Depth-tested editor gizmos land in the framebuffer; paint_egui
         // then draws the panels on top.

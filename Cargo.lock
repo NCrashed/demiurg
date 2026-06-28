@@ -2651,18 +2651,18 @@ dependencies = [
 
 [[package]]
 name = "roxlap-cavegen"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76fbd13480c14a4dce3a48d73944995bfcbcacde8d22f09a24acfb7268a1c000"
+checksum = "ce733a09e0a610d89d3f604d58d3f17ab548ef04aab1bafada2b00a3d903becb"
 dependencies = [
  "roxlap-formats",
 ]
 
 [[package]]
 name = "roxlap-core"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72f99029c29449c12562cf38f581338235e0d39929039758552eb73f3733865d"
+checksum = "e937c8dd5e2cff623db7fde15db794e6be1f49ff5b7766d288ef84d6c74e6ec5"
 dependencies = [
  "rayon",
  "roxlap-formats",
@@ -2670,18 +2670,18 @@ dependencies = [
 
 [[package]]
 name = "roxlap-formats"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eab9a2d0826836f653d62d275ec5128851519ae9e20e1ed6d70196c6f95e01d7"
+checksum = "17e028a71fc145f607b83ba958317657e6cdf7134190e2183e3eaf79d08c35fa"
 dependencies = [
  "miniz_oxide",
 ]
 
 [[package]]
 name = "roxlap-gpu"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1343b9ab9f07d14e44e6f2916e4746fde9b16659d4240dc7a38c1cb095f7f9e6"
+checksum = "f53906417781109715ec3a8e2a39a72ca67a26ecee3c36b2e80170e9878012fc"
 dependencies = [
  "bytemuck",
  "egui",
@@ -2696,9 +2696,9 @@ dependencies = [
 
 [[package]]
 name = "roxlap-render"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2715f16d1aeb1366e407e1fe5c7ccd9172500075482dd1b9642d72c32fc7420c"
+checksum = "c55b709207a8ce1d89f7e7fc8391bb548978dde5052ccce1f120d3be3e93cc57"
 dependencies = [
  "bytemuck",
  "egui",
@@ -2716,9 +2716,9 @@ dependencies = [
 
 [[package]]
 name = "roxlap-scene"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf514276e000f4e59cea164173e35d8dce28e55b5de7f7fce2e12da51a5cd650"
+checksum = "446dd106a3a7a2a956738b094a116a4ba8f47c8faf4a8e70d67f15fe633fc343"
 dependencies = [
  "crossbeam-channel",
  "glam",

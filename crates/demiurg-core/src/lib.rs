@@ -410,27 +410,38 @@ impl VoxelModel {
     /// 255 translucent slots — extra distinct materials fall back to opaque.
     #[must_use]
     pub fn material_palette(&self) -> (MaterialDefs, MaterialColorMap) {
-        let mut defs: MaterialDefs = Vec::new();
-        let mut color_map: MaterialColorMap = Vec::new();
-        for (&color, &mat) in &self.materials {
-            if mat.is_opaque() {
-                continue;
-            }
-            // Reuse an existing id for an identical material, else mint one.
-            let id = if let Some(&(id, _)) = defs.iter().find(|(_, m)| *m == mat) {
-                id
-            } else {
-                // ids 1..=255; bail once the palette is full.
-                let Ok(id) = u8::try_from(defs.len() + 1) else {
-                    continue;
-                };
-                defs.push((id, mat));
-                id
-            };
-            color_map.push((color & 0x00ff_ffff, id));
-        }
-        (defs, color_map)
+        material_palette(&self.materials)
     }
+}
+
+/// Build the renderer material palette from a colour→[`Material`] map: a
+/// deduplicated `(id, material)` list (ids `1..=255`, identical materials
+/// sharing one id) and a `0xRRGGBB`→id colour map. Shared by
+/// [`VoxelModel::material_palette`] and `ClipDoc::material_palette` so the
+/// dense-model and clip paths assign ids identically. Empty for an all-opaque
+/// map.
+#[must_use]
+pub fn material_palette(materials: &BTreeMap<u32, Material>) -> (MaterialDefs, MaterialColorMap) {
+    let mut defs: MaterialDefs = Vec::new();
+    let mut color_map: MaterialColorMap = Vec::new();
+    for (&color, &mat) in materials {
+        if mat.is_opaque() {
+            continue;
+        }
+        // Reuse an existing id for an identical material, else mint one.
+        let id = if let Some(&(id, _)) = defs.iter().find(|(_, m)| *m == mat) {
+            id
+        } else {
+            // ids 1..=255; bail once the palette is full.
+            let Ok(id) = u8::try_from(defs.len() + 1) else {
+                continue;
+            };
+            defs.push((id, mat));
+            id
+        };
+        color_map.push((color & 0x00ff_ffff, id));
+    }
+    (defs, color_map)
 }
 
 #[cfg(test)]

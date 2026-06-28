@@ -11,6 +11,8 @@
 //! [`postcard`] (compact, no_std-friendly); the schema is the [`Doc`] enum,
 //! versioned by its layout.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::VoxelModel;
@@ -139,6 +141,11 @@ pub struct ClipProject {
     /// `#[serde(default)]` so projects written before generators still load.
     #[serde(default)]
     pub generator: Option<ClipGenerator>,
+    /// Clip-level per-colour render materials: `(colour_word, alpha,
+    /// blend_mode_tag)`, shared by every frame. `#[serde(default)]` so clips
+    /// written before materials still load (as all-opaque).
+    #[serde(default)]
+    pub materials: Vec<(u32, u8, u8)>,
 }
 
 /// One dense frame of a [`ClipProject`].
@@ -178,6 +185,11 @@ impl ClipProject {
             default_frame_ms: c.default_frame_ms,
             frames,
             generator: c.generator.clone(),
+            materials: c
+                .materials
+                .iter()
+                .map(|(&color, m)| (color, m.alpha, m.mode.as_u8()))
+                .collect(),
         }
     }
 
@@ -214,6 +226,15 @@ impl ClipProject {
                 duration_ms: f.duration_ms,
             });
         }
+        // Clip-level materials (frames stay pure geometry; the editor mirrors
+        // these onto the working frame for preview). An unknown blend-mode tag
+        // from a newer file is skipped, leaving that colour opaque.
+        let mut materials = BTreeMap::new();
+        for (color, alpha, mode_tag) in self.materials {
+            if let Some(mode) = BlendMode::from_u8(mode_tag) {
+                materials.insert(color, Material { alpha, mode });
+            }
+        }
         Some(ClipDoc {
             name: self.name,
             dims: self.dims,
@@ -222,6 +243,7 @@ impl ClipProject {
             loop_mode: clip::loop_mode_from_u8(self.loop_mode),
             default_frame_ms: self.default_frame_ms,
             frames,
+            materials,
             generator: self.generator,
         })
     }
@@ -416,6 +438,39 @@ mod tests {
             "interior voxel survives the project round-trip"
         );
         assert_eq!(back.frames[0].model.get(1, 1, 1), 0x8080_8080);
+    }
+
+    #[test]
+    fn clip_materials_survive_the_project_round_trip() {
+        use crate::clip::ClipDoc;
+
+        let mut clip = ClipDoc::new([3, 3, 3]);
+        clip.frames[0].model.set(0, 0, 0, 0x8000_ff00);
+        // Clip-level glass material, shared by every frame.
+        clip.set_material(0x8000_ff00, Material::alpha_blend(64));
+        assert_eq!(clip.material(0x8000_ff00), Material::alpha_blend(64));
+
+        let Loaded::Clip(back) = from_bytes(&to_bytes_clip(&clip)).expect("round-trips") else {
+            panic!("expected a clip");
+        };
+        assert_eq!(back.material(0x8000_ff00), Material::alpha_blend(64));
+        // Frame models stay pure geometry — the clip owns the one table.
+        assert!(back.frames[0].model.materials.is_empty());
+    }
+
+    #[test]
+    fn from_model_lifts_materials_to_the_clip() {
+        use crate::clip::ClipDoc;
+
+        let mut m = VoxelModel::new(2, 2, 2);
+        m.set(0, 0, 0, 0x80ff_0000);
+        m.set_material(0x80ff_0000, Material::additive(180));
+        let clip = ClipDoc::from_model(m);
+        assert_eq!(clip.material(0x80ff_0000), Material::additive(180));
+        assert!(
+            clip.frames[0].model.materials.is_empty(),
+            "lifted off the frame to the clip level"
+        );
     }
 
     #[test]

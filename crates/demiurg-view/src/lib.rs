@@ -197,6 +197,18 @@ impl ModelView {
         &self.material_map
     }
 
+    /// Empty the previewed model — drop the grid's voxel chunk and clear the
+    /// sprite set + material palette. Used when the clip preview is driven by
+    /// roxlap's clip player instead of the per-frame model, so the editor's
+    /// own grid/sprites don't draw on top of the played clip.
+    pub fn clear_scene(&mut self) {
+        self.drop_grid_chunk();
+        self.sprites = empty_sprite_set();
+        self.sprite_kv6 = None;
+        self.material_defs.clear();
+        self.material_map.clear();
+    }
+
     /// In **sprite** mode with translucent materials, the model's compiled
     /// `.kv6` for the host to register via
     /// `SceneRenderer::add_sprite_model_with_materials` (paired with

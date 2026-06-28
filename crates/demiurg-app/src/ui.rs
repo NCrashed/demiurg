@@ -1061,6 +1061,8 @@ sphere(cx,cy,cz,r,col)
 box(x0,y0,z0,x1,y1,z1,col)
 rgb(r,g,b)        // channels 0..255
 hsv(h,s,v)        // each 0..1
+material(col,mode,a) // mode: opaque|
+  alpha|additive|volumetric; a 0..255
 noise(x,y,z)      // stable 0..1 field
 fbm(x,y,z,oct)    // fractal 0..1
 rand()  rand(a,b) // per-frame
@@ -2083,8 +2085,9 @@ fn voxel_tools_panel(
     // Per-colour render materials (blend mode + opacity) — roxlap's
     // transparency stage. Each used colour gets a blend mode and, when
     // translucent, an opacity slider; the live preview composites it
-    // (CPU backend). Plain-model only: the `.rkc` rig export carries no
-    // materials, so they aren't offered while editing a rig.
+    // (CPU backend). For a clip these edit the clip-level table mirrored onto
+    // the working frame (commit lifts it back). Not offered while editing a
+    // rig: the `.rkc` export carries no materials.
     if editor.rig.is_none() && !editor.model_palette.is_empty() {
         ui.separator();
         ui.label(t(Msg::Materials));
@@ -2092,6 +2095,7 @@ fn voxel_tools_panel(
             BlendMode::Opaque => Msg::BlendOpaque,
             BlendMode::AlphaBlend => Msg::BlendAlpha,
             BlendMode::Additive => Msg::BlendAdditive,
+            BlendMode::Volumetric => Msg::BlendVolumetric,
         };
         let used = editor.model_palette.clone();
         let mut change: Option<(u32, Material)> = None;
@@ -2109,6 +2113,7 @@ fn voxel_tools_panel(
                             BlendMode::Opaque,
                             BlendMode::AlphaBlend,
                             BlendMode::Additive,
+                            BlendMode::Volumetric,
                         ] {
                             ui.selectable_value(&mut mode, m, t(mode_msg(m)));
                         }

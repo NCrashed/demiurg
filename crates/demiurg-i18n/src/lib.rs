@@ -83,6 +83,7 @@ pub enum Msg {
     BlendOpaque,
     BlendAlpha,
     BlendAdditive,
+    BlendVolumetric,
     Mirror,
     Rotate,
     RotateCw,
@@ -248,7 +249,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 166] = [
+    pub const ALL: [Msg; 167] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -265,6 +266,7 @@ impl Msg {
         Msg::BlendOpaque,
         Msg::BlendAlpha,
         Msg::BlendAdditive,
+        Msg::BlendVolumetric,
         Msg::Attachments,
         Msg::PrimaryMesh,
         Msg::Attachment,
@@ -446,6 +448,7 @@ const fn en(msg: Msg) -> &'static str {
         Msg::BlendOpaque => "Opaque",
         Msg::BlendAlpha => "Alpha",
         Msg::BlendAdditive => "Additive",
+        Msg::BlendVolumetric => "Volumetric",
         Msg::Attachments => "Layers",
         Msg::PrimaryMesh => "Base layer",
         Msg::Attachment => "Layer",
@@ -620,6 +623,7 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::BlendOpaque => "Непрозр.",
         Msg::BlendAlpha => "Альфа",
         Msg::BlendAdditive => "Аддитив.",
+        Msg::BlendVolumetric => "Объёмный",
         Msg::Attachments => "Слои",
         Msg::PrimaryMesh => "Базовый слой",
         Msg::Attachment => "Слой",

@@ -29,24 +29,28 @@ demiurg-core = { path = "crates/demiurg-core", version = "0.10.0" }
 demiurg-i18n = { path = "crates/demiurg-i18n", version = "0.10.0" }
 demiurg-view = { path = "crates/demiurg-view", version = "0.10.0" }
 
-# demiurg depends on roxlap ONLY (see DESIGN.md §1). crates.io 0.16.0 ships the
-# transparent-voxel materials API (TV stage) the editor's blend-mode authoring
-# builds on, on top of 0.15's animated-voxel-clips API + renderer (VCL.5/RF.1).
+# demiurg depends on roxlap ONLY (see DESIGN.md §1). crates.io 0.17.0 ships the
+# per-voxel materials for voxel clips (`add_voxel_clip_with_materials` +
+# `BlendMode::Volumetric`) the clip-player preview + procedural-preset
+# transparency build on, on top of 0.16's transparent-voxel materials (TV stage)
+# and 0.15's animated-voxel-clips API + renderer (VCL.5/RF.1).
 # (The local `../roxlap/crates/*` path pin used while co-developing was restored
 # to a published version once each release shipped.)
 #
 # roxlap-formats: kv6/character/kfa read/write + shaded surface extraction;
-#                 voxel materials (`material::{BlendMode, Material, MaterialTable}`).
+#                 voxel materials (`material::{BlendMode, Material, MaterialTable}`,
+#                 BlendMode now Opaque/AlphaBlend/Additive/Volumetric).
 # roxlap-core:    Camera, OpticastSettings, kfa_draw (compose_attachment).
 # roxlap-scene:   Scene graph the renderer composites.
 # roxlap-render:  unified CPU/GPU facade (SceneRenderer, draw_lines, sprites,
 #                 image sprites, set_kfa_sprites, add_character; define_material,
-#                 set_terrain_materials, add_sprite_model_with_materials).
+#                 set_terrain_materials, add_sprite_model_with_materials,
+#                 add_voxel_clip_with_materials).
 # roxlap-voxvideo lands at M5.
-roxlap-formats = "0.16.0"
-roxlap-core = "0.16.0"
-roxlap-scene = "0.16.0"
-roxlap-render = "0.16.0"
+roxlap-formats = "0.17.0"
+roxlap-core = "0.17.0"
+roxlap-scene = "0.17.0"
+roxlap-render = "0.17.0"
 
 # Render-side world math (f64 orbit camera). Mirrors roxlap's pin so
 # the workspaces share one glam.

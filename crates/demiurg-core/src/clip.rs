@@ -28,6 +28,9 @@
 //! That generator is a separate feature; this module deliberately keeps the
 //! frame the single source of truth so it can be added without disruption.
 
+use std::collections::BTreeMap;
+
+use roxlap_formats::material::Material;
 use roxlap_formats::voxel_clip::{self, DecodeError, ParseError, VoxelClip};
 
 use crate::VoxelModel;
@@ -91,6 +94,15 @@ pub struct ClipDoc {
     pub default_frame_ms: u32,
     /// The frames, in playback order. Length ≥ 1.
     pub frames: Vec<ClipFrame>,
+    /// Per-colour render materials (blend mode + opacity), **shared by every
+    /// frame** — a clip-level property like [`Self::pivot`] / [`Self::dims`].
+    /// Keyed by the `0x80RRGGBB` colour word; only non-opaque entries are
+    /// stored, so an all-opaque clip keeps an empty map. The editor mirrors
+    /// this onto each frame's working [`VoxelModel`] for preview, but the
+    /// frame models themselves stay pure geometry — this is the one store.
+    /// Carried in the `.demiurg` project; the `.rvc` export drops it (the
+    /// format has no material channel yet), like interior voxels.
+    pub materials: BTreeMap<u32, Material>,
     /// A procedural generator that (re)builds [`Self::frames`] from a script, or
     /// `None` for a hand-sculpted clip. The frames stay the single source of
     /// truth (encode/preview/timeline read only them); the generator just fills
@@ -112,17 +124,21 @@ impl ClipDoc {
             loop_mode: LoopMode::Loop,
             default_frame_ms: DEFAULT_FRAME_MS,
             frames: vec![ClipFrame::new(model)],
+            materials: BTreeMap::new(),
             generator: None,
         }
     }
 
     /// A single-frame clip whose first frame **is** `model` — turns a sculpted
     /// mesh into a clip you can then extend frame by frame. Dims/pivot come from
-    /// the model.
+    /// the model. The model's per-colour materials are lifted to the clip
+    /// level (and cleared from the frame), so a translucent sculpt stays
+    /// translucent as a clip.
     #[must_use]
-    pub fn from_model(model: VoxelModel) -> Self {
+    pub fn from_model(mut model: VoxelModel) -> Self {
         let (x, y, z) = model.dims();
         let pivot = model.pivot;
+        let materials = std::mem::take(&mut model.materials);
         Self {
             name: String::new(),
             dims: [x, y, z],
@@ -131,8 +147,45 @@ impl ClipDoc {
             loop_mode: LoopMode::Loop,
             default_frame_ms: DEFAULT_FRAME_MS,
             frames: vec![ClipFrame::new(model)],
+            materials,
             generator: None,
         }
+    }
+
+    /// The clip-level render [`Material`] for colour word `color`
+    /// ([`Material::OPAQUE`] for any colour without one).
+    #[must_use]
+    pub fn material(&self, color: u32) -> Material {
+        self.materials
+            .get(&color)
+            .copied()
+            .unwrap_or(Material::OPAQUE)
+    }
+
+    /// Assign colour word `color`'s clip-level [`Material`]. Setting it opaque
+    /// clears the entry, so the map holds only translucent colours.
+    pub fn set_material(&mut self, color: u32, mat: Material) {
+        if mat.is_opaque() {
+            self.materials.remove(&color);
+        } else {
+            self.materials.insert(color, mat);
+        }
+    }
+
+    /// Copy the clip-level materials onto `model` — the mirror the editor
+    /// applies to a frame's working model so the preview composites the clip's
+    /// translucency. The frame's own (empty) material map is overwritten.
+    pub fn apply_materials_to(&self, model: &mut VoxelModel) {
+        model.materials = self.materials.clone();
+    }
+
+    /// Build the renderer material palette for this clip: `(id, material)`
+    /// defs to install via `define_material` and a `0xRRGGBB`→id colour map
+    /// for `add_voxel_clip_with_materials`. Same id assignment as
+    /// [`VoxelModel::material_palette`](crate::VoxelModel::material_palette).
+    #[must_use]
+    pub fn material_palette(&self) -> (crate::MaterialDefs, crate::MaterialColorMap) {
+        crate::material_palette(&self.materials)
     }
 
     /// Re-run the [`generator`](Self::generator) script and replace every frame
@@ -147,9 +200,12 @@ impl ClipDoc {
         let Some(g) = &self.generator else {
             return Ok(());
         };
-        let models = generator::generate(self.dims, self.pivot, g)?;
-        if !models.is_empty() {
-            self.frames = models.into_iter().map(ClipFrame::new).collect();
+        let produced = generator::generate(self.dims, self.pivot, g)?;
+        if !produced.frames.is_empty() {
+            self.frames = produced.frames.into_iter().map(ClipFrame::new).collect();
+            // The procedural script is authoritative: replace the clip-level
+            // materials with whatever it declared (empty ⇒ an opaque clip).
+            self.materials = produced.materials;
         }
         Ok(())
     }
@@ -412,7 +468,8 @@ impl ClipDoc {
             loop_mode: decoded.loop_mode,
             default_frame_ms: clip.default_frame_ms,
             frames,
-            generator: None, // a `.rvc` carries only baked frames, no script
+            materials: BTreeMap::new(), // `.rvc` has no material channel yet
+            generator: None,            // a `.rvc` carries only baked frames, no script
         })
     }
 
@@ -626,5 +683,23 @@ mod tests {
         }
         // origin-anchored: the painted voxels keep their coordinates.
         assert_eq!(clip.frames[0].model.get(0, 0, 0), 0x80ff_0000);
+    }
+
+    #[test]
+    fn material_palette_builds_defs_and_color_map() {
+        let mut clip = sample_clip();
+        clip.set_material(0x80ff_0000, Material::alpha_blend(120));
+        clip.set_material(0x8000_ff00, Material::additive(200));
+        let (defs, map) = clip.material_palette();
+        assert_eq!(defs.len(), 2);
+        assert_eq!(map.len(), 2);
+        // Map keys are RGB (high byte stripped); every id is defined.
+        for (rgb, id) in &map {
+            assert_eq!(rgb & 0xff00_0000, 0);
+            assert!(defs.iter().any(|(d, _)| d == id));
+        }
+        // All-opaque clip → empty palette (renderer stays on the fast path).
+        let plain = sample_clip();
+        assert_eq!(plain.material_palette(), (Vec::new(), Vec::new()));
     }
 }

@@ -11,6 +11,12 @@
 //!   `get(x,y,z) -> col`. `sphere(cx,cy,cz, r, col)`, `box(x0,y0,z0, x1,y1,z1, col)`.
 //! - `rgb(r,g,b) -> col`, `hsv(h,s,v) -> col` — packed `0x80RRGGBB` colours
 //!   (`r,g,b` are `0..255` ints; `h,s,v` are `0.0..1.0` floats).
+//! - `material(col, mode, alpha)` — declare a **clip-level** render material
+//!   for a colour: `mode` is `"opaque"` / `"alpha"` (glass) / `"additive"`
+//!   (glow — for fire/energy) / `"volumetric"` (depth-weighted fog — for
+//!   smoke); `alpha` is `0..255`. Shared by every frame; declare it once at the
+//!   top of the script. Lets a procedural effect be translucent (see the smoke
+//!   and energy presets).
 //! - `noise(x,y,z) -> 0.0..1.0` — a stable value-noise field (same every frame,
 //!   so animate by feeding `t` into a coordinate). `fbm(x,y,z,octaves)` — summed
 //!   octaves of `noise` for richer, more organic detail. `rand() -> 0.0..1.0`
@@ -25,7 +31,24 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "generator")]
+use std::collections::BTreeMap;
+
+#[cfg(feature = "generator")]
+use roxlap_formats::material::Material;
+
+#[cfg(feature = "generator")]
 use crate::VoxelModel;
+
+/// What a generator run produced: the per-frame models plus the clip-level
+/// render materials the script declared via `material(col, mode, alpha)` (an
+/// empty map ⇒ an all-opaque clip). The materials are clip-level (shared by
+/// every frame), matching [`ClipDoc::materials`](crate::clip::ClipDoc::materials).
+#[cfg(feature = "generator")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Generated {
+    pub frames: Vec<VoxelModel>,
+    pub materials: BTreeMap<u32, Material>,
+}
 
 /// A procedural generator attached to a clip: the Rhai source, how many frames
 /// to produce, and the seed driving `rand()` / `noise()`.
@@ -102,8 +125,16 @@ for z in 0..d {
 ";
 
 /// Preset: a soft grey smoke plume billowing upward (base at high `z`).
-pub const SMOKE_SCRIPT: &str = r"// Smoke — a soft grey plume billowing upward.
+pub const SMOKE_SCRIPT: &str = r#"// Smoke — a soft, translucent grey plume billowing upward.
 // World is z-down: the dense base sits at high z (the visual bottom).
+// Three quantized greys, all "volumetric" (depth-weighted opacity), so the
+// plume reads as wispy fog you can see through instead of solid voxels.
+let wisp = rgb(205, 205, 205);
+let body = rgb(165, 165, 165);
+let core = rgb(125, 125, 125);
+material(wisp, "volumetric", 55);   // sheer outer wisps
+material(body, "volumetric", 110);  // mid plume
+material(core, "volumetric", 175);  // dense base
 let scale = 0.13;
 for z in 0..d {
     let hf = 1.0 - z.to_float() / d.to_float();
@@ -112,16 +143,23 @@ for z in 0..d {
         for x in 0..w {
             let n = fbm(x.to_float()*scale, y.to_float()*scale, z.to_float()*scale + t*3.0, 5);
             if n > thresh {
-                let v = (150.0 + 90.0*(n - thresh)).to_int();
-                set(x, y, z, rgb(v, v, v));
+                let dens = n - thresh;
+                let col = if dens < 0.06 { wisp } else if dens < 0.16 { body } else { core };
+                set(x, y, z, col);
             }
         }
     }
 }
-";
+"#;
 
 /// Preset: an expanding spherical shell plus a few sparks.
-pub const ENERGY_SCRIPT: &str = r"// Energy splash — an expanding shell + sparks.
+pub const ENERGY_SCRIPT: &str = r#"// Energy sphere — an expanding additive-glow shell + sparks.
+// "additive" makes the cyan shell and white sparks glow and read through each
+// other (commutative, order-independent) instead of occluding like solid voxels.
+let glow = rgb(70, 200, 255);    // cyan shell
+let spark = rgb(200, 245, 255);  // bright sparks
+material(glow, "additive", 190);
+material(spark, "additive", 255);
 let cx = w/2; let cy = h/2; let cz = d/2;
 let radius = t * (w.to_float() * 0.5);
 for z in 0..d {
@@ -132,7 +170,7 @@ for z in 0..d {
             let dz = (z - cz).to_float();
             let dist = sqrt(dx*dx + dy*dy + dz*dz);
             if dist > radius - 1.2 && dist < radius + 1.2 {
-                set(x, y, z, hsv(0.55 + 0.08*rand(), 0.85, 1.0));
+                set(x, y, z, glow);
             }
         }
     }
@@ -141,9 +179,9 @@ for i in 0..14 {
     set((rand()*w.to_float()).to_int(),
         (rand()*h.to_float()).to_int(),
         (rand()*d.to_float()).to_int(),
-        rgb(190, 240, 255));
+        spark);
 }
-";
+"#;
 
 /// Preset: a swirling, colour-shifting plasma volume (fbm field + fbm hue).
 pub const PLASMA_SCRIPT: &str = r"// Plasma — a swirling coloured volume.
@@ -192,11 +230,7 @@ for i in 0..count {
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss
 )]
-pub fn generate(
-    dims: [u32; 3],
-    pivot: [f32; 3],
-    g: &ClipGenerator,
-) -> Result<Vec<VoxelModel>, GenError> {
+pub fn generate(dims: [u32; 3], pivot: [f32; 3], g: &ClipGenerator) -> Result<Generated, GenError> {
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -215,8 +249,11 @@ pub fn generate(
     // The working frame + the per-frame PRNG state, shared with the host fns.
     let frame = Rc::new(RefCell::new(VoxelModel::new(dims[0], dims[1], dims[2])));
     let prng = Rc::new(RefCell::new(0u64));
+    // Clip-level materials the script declares via `material(col, mode, alpha)`.
+    // Shared across frames (re-declared identically each frame); collected once.
+    let materials = Rc::new(RefCell::new(BTreeMap::<u32, Material>::new()));
 
-    register_api(&mut engine, &frame, &prng, seed);
+    register_api(&mut engine, &frame, &prng, &materials, seed);
 
     let ast = engine
         .compile(&g.script)
@@ -250,7 +287,10 @@ pub fn generate(
 
         out.push(frame.borrow().clone());
     }
-    Ok(out)
+    Ok(Generated {
+        frames: out,
+        materials: materials.borrow().clone(),
+    })
 }
 
 /// Register the imperative-globals host API on `engine`.
@@ -266,6 +306,7 @@ fn register_api(
     engine: &mut rhai::Engine,
     frame: &std::rc::Rc<std::cell::RefCell<VoxelModel>>,
     prng: &std::rc::Rc<std::cell::RefCell<u64>>,
+    materials: &std::rc::Rc<std::cell::RefCell<BTreeMap<u32, Material>>>,
     seed: u64,
 ) {
     // Coordinate → Option<(u32,u32,u32)> within the frame, for the geometry fns.
@@ -288,6 +329,32 @@ fn register_api(
                 m.set(x, y, z, col as u32);
             }
         });
+    }
+    // material(col, mode, alpha): declare a clip-level render material for a
+    // colour. `mode` is "opaque" | "alpha" | "additive" (aliases "add"/"glow")
+    // | "volumetric" (aliases "vol"/"smoke"); `alpha` is 0..255 (opacity for
+    // alpha/volumetric, intensity for additive). Opaque clears the entry.
+    {
+        let mats = materials.clone();
+        engine.register_fn(
+            "material",
+            move |col: i64, mode: rhai::ImmutableString, alpha: i64| {
+                let col = col as u32;
+                let alpha = alpha.clamp(0, 255) as u8;
+                let mat = match mode.as_str() {
+                    "alpha" | "blend" => Material::alpha_blend(alpha),
+                    "additive" | "add" | "glow" => Material::additive(alpha),
+                    "volumetric" | "vol" | "smoke" => Material::volumetric(alpha),
+                    _ => Material::OPAQUE,
+                };
+                let mut m = mats.borrow_mut();
+                if mat.is_opaque() {
+                    m.remove(&col);
+                } else {
+                    m.insert(col, mat);
+                }
+            },
+        );
     }
     // get(x,y,z): the voxel colour, or 0.
     {
@@ -483,7 +550,8 @@ mod tests {
             [4.0, 4.0, 4.0],
             &make("set(frame, 0, 0, rgb(255, 0, 0));", 4, 1),
         )
-        .expect("runs");
+        .expect("runs")
+        .frames;
         assert_eq!(frames.len(), 4);
         for (i, f) in frames.iter().enumerate() {
             assert_eq!(f.occupied_count(), 1);
@@ -507,7 +575,8 @@ mod tests {
             [0.0; 3],
             &make("sphere(0, 0, 0, 10, rgb(9,9,9));", 1, 0),
         )
-        .expect("runs");
+        .expect("runs")
+        .frames;
         assert_eq!(frames[0].occupied_count(), 4 * 4 * 4, "whole grid filled");
     }
 
@@ -543,7 +612,9 @@ mod tests {
 
     #[test]
     fn demo_script_fills_every_frame() {
-        let frames = generate([16, 16, 16], [8.0; 3], &ClipGenerator::demo()).expect("runs");
+        let frames = generate([16, 16, 16], [8.0; 3], &ClipGenerator::demo())
+            .expect("runs")
+            .frames;
         assert_eq!(frames.len(), 16);
         assert!(frames.iter().all(|f| f.occupied_count() > 0));
     }
@@ -558,13 +629,49 @@ mod tests {
             ("plasma", PLASMA_SCRIPT),
             ("sparkle", SPARKLE_SCRIPT),
         ] {
-            let frames = generate([16, 16, 16], [8.0; 3], &make(script, 6, 7))
+            let produced = generate([16, 16, 16], [8.0; 3], &make(script, 6, 7))
                 .unwrap_or_else(|e| panic!("preset {name} failed: {e}"));
-            assert_eq!(frames.len(), 6);
+            assert_eq!(produced.frames.len(), 6);
             assert!(
-                frames.iter().any(|f| f.occupied_count() > 0),
+                produced.frames.iter().any(|f| f.occupied_count() > 0),
                 "preset {name} produced no voxels in any frame",
             );
         }
+    }
+
+    #[test]
+    fn material_fn_declares_clip_materials() {
+        use roxlap_formats::material::BlendMode;
+        let g = make(
+            r#"material(rgb(10,20,30), "additive", 200); set(0,0,0, rgb(10,20,30));"#,
+            2,
+            0,
+        );
+        let out = generate([4, 4, 4], [0.0; 3], &g).expect("runs");
+        let mat = out.materials.get(&0x800a_141e).copied().expect("declared");
+        assert_eq!(mat, Material::additive(200));
+        assert_eq!(mat.mode, BlendMode::Additive);
+    }
+
+    #[test]
+    fn smoke_preset_is_volumetric_energy_is_additive() {
+        use roxlap_formats::material::BlendMode;
+        let smoke = generate([16, 16, 16], [8.0; 3], &make(SMOKE_SCRIPT, 4, 3)).expect("runs");
+        assert!(!smoke.materials.is_empty(), "smoke declares materials");
+        assert!(
+            smoke
+                .materials
+                .values()
+                .all(|m| m.mode == BlendMode::Volumetric),
+            "smoke is volumetric fog",
+        );
+        let energy = generate([16, 16, 16], [8.0; 3], &make(ENERGY_SCRIPT, 4, 3)).expect("runs");
+        assert!(
+            energy
+                .materials
+                .values()
+                .all(|m| m.mode == BlendMode::Additive),
+            "energy is additive glow",
+        );
     }
 }
