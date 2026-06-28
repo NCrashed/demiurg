@@ -7,6 +7,40 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-28
+
+Transparency: give voxels a blend mode and opacity, so models, clips, and
+procedural effects can be glass, glowing energy, or soft smoke instead of solid.
+Requires roxlap 0.17 (per-voxel clip materials + the volumetric blend mode).
+
+### Added
+
+- **Per-colour materials.** Each colour used in a model gets a blend mode and an
+  opacity in the tool panel's new "Materials" section, composited live in the
+  preview:
+  - **Alpha** — front-to-back glass / water.
+  - **Additive** — order-independent glow, for spells / fire / energy.
+  - **Volumetric** — depth-weighted opacity, for soft smoke / fog.
+
+  Opaque is the default, so an all-opaque model renders exactly as before.
+  Material edits are undoable (a slider drag is one step) and saved in the
+  `.demiurg` project.
+- **Clip transparency.** A clip carries one material table shared by every
+  frame; converting a translucent model to a clip keeps its materials. While a
+  clip is **playing**, the preview runs through the engine's real clip player so
+  the transparency matches what the game shows.
+- **Translucent procedural presets.** The Rhai generator gains a
+  `material(col, mode, alpha)` call so a script can declare its own materials —
+  the **Smoke** preset is now volumetric fog and the **Energy** preset an
+  additive-glow sphere.
+
+### Notes
+
+- Materials are kept in the lossless `.demiurg` project only; the `.kv6` and
+  `.rvc` exports have no material channel yet, so they load back as opaque (the
+  same boundary as enclosed interior voxels). Projects saved before this release
+  load unchanged (all-opaque).
+
 ## [0.10.0] - 2026-06-28
 
 Bring skeletal animation and voxel clips closer together: bake a rig into a
