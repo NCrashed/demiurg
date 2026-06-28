@@ -21,8 +21,11 @@
 //! the format, not a bug; the lossless editor source is the forthcoming
 //! `.demiurg` project file (M2), not `.kv6`.
 
+use std::collections::BTreeMap;
+
 use roxlap_formats::Rgb6;
 use roxlap_formats::kv6::{self, Kv6};
+use roxlap_formats::material::Material;
 use roxlap_formats::vxl::{self, Vxl};
 
 pub mod clip;
@@ -34,6 +37,16 @@ pub mod vox;
 pub use clip::{ClipDoc, ClipFrame, LoopMode};
 pub use edit::Document;
 pub use rig::{Easing, KeyXform, Keyframe, LayerPlayback, Quat, Rig, RigAttachment, RigBone};
+
+/// The renderer's global material palette: `(id, material)` entries to
+/// install via `SceneRenderer::define_material`. Produced by
+/// [`VoxelModel::material_palette`].
+pub type MaterialDefs = Vec<(u8, Material)>;
+
+/// A `0xRRGGBB`→material-id colour map for `set_terrain_materials` /
+/// `add_sprite_model_with_materials`. Produced by
+/// [`VoxelModel::material_palette`].
+pub type MaterialColorMap = Vec<(u32, u8)>;
 
 /// A dense, editable voxel model: the in-memory document the editor
 /// mutates and previews.
@@ -52,6 +65,14 @@ pub struct VoxelModel {
     /// Optional 6-bit-per-channel palette, carried through to the
     /// exported `.kv6` (`"SPal"` section).
     pub palette: Option<[Rgb6; 256]>,
+    /// Per-colour render [`Material`] (blend mode + alpha) for transparent
+    /// voxels — roxlap's TV stage. Keyed by the full `0x80RRGGBB` colour
+    /// word (the same key the "colours used" palette lists), so every voxel
+    /// painted that colour shares the material. Only non-[`Material::OPAQUE`]
+    /// entries are stored; an absent key is opaque, so an all-opaque model
+    /// keeps an empty map and renders byte-for-byte as before. Carried in
+    /// the `.demiurg` project but not the surface-only `.kv6` export.
+    pub materials: BTreeMap<u32, Material>,
     /// Dense grid, indexed `x + xsiz·(y + ysiz·z)`. Length is
     /// `xsiz·ysiz·zsiz`. `0` = empty.
     voxels: Vec<u32>,
@@ -86,6 +107,7 @@ impl VoxelModel {
             zsiz,
             pivot: [xsiz as f32 * 0.5, ysiz as f32 * 0.5, zsiz as f32 * 0.5],
             palette: None,
+            materials: BTreeMap::new(),
             voxels: vec![0; len],
         }
     }
@@ -263,6 +285,7 @@ impl VoxelModel {
         ];
         let mut out = VoxelModel::new(dims[0], dims[1], dims[2]);
         out.palette = self.palette;
+        out.materials = self.materials.clone();
         out.pivot = clamp_pivot(
             [
                 self.pivot[0] - voxel_f32(min[0]),
@@ -283,6 +306,7 @@ impl VoxelModel {
     pub fn resized(&self, dims: [u32; 3]) -> VoxelModel {
         let mut out = VoxelModel::new(dims[0], dims[1], dims[2]);
         out.palette = self.palette;
+        out.materials = self.materials.clone();
         out.pivot = clamp_pivot(self.pivot, dims);
         for (x, y, z, col) in self.occupied() {
             out.set(x, y, z, col); // set ignores out-of-range coords
@@ -305,6 +329,7 @@ impl VoxelModel {
         }
         let mut out = VoxelModel::new(dims[0], dims[1], dims[2]);
         out.palette = self.palette;
+        out.materials = self.materials.clone();
         out.pivot = clamp_pivot(pivot, dims);
         for (x, y, z, col) in self.occupied() {
             out.set(x + shift[0], y + shift[1], z + shift[2], col);
@@ -346,8 +371,65 @@ impl VoxelModel {
             zsiz,
             pivot,
             palette,
+            materials: BTreeMap::new(),
             voxels,
         })
+    }
+
+    /// The render [`Material`] for colour word `color` — [`Material::OPAQUE`]
+    /// for any colour without an explicit material (the default).
+    #[must_use]
+    pub fn material(&self, color: u32) -> Material {
+        self.materials
+            .get(&color)
+            .copied()
+            .unwrap_or(Material::OPAQUE)
+    }
+
+    /// Assign colour word `color`'s render [`Material`]. Setting it back to
+    /// [`Material::OPAQUE`] (or any opaque mode) clears the entry, so the map
+    /// holds only the translucent colours.
+    pub fn set_material(&mut self, color: u32, mat: Material) {
+        if mat.is_opaque() {
+            self.materials.remove(&color);
+        } else {
+            self.materials.insert(color, mat);
+        }
+    }
+
+    /// Build the renderer's global material palette from the per-colour
+    /// materials: a list of `(id, material)` to install via
+    /// [`SceneRenderer::define_material`](https://docs.rs/roxlap-render)
+    /// and a colour→id map (`0xRRGGBB` → id) for
+    /// `set_terrain_materials` / `add_sprite_model_with_materials`.
+    ///
+    /// Identical materials share one id (so many glass shades of one
+    /// opacity cost one palette slot); ids start at `1` (id `0` is the
+    /// reserved opaque slot). Empty when the model is all-opaque, which
+    /// keeps the renderer on its opaque fast path. Capped at the palette's
+    /// 255 translucent slots — extra distinct materials fall back to opaque.
+    #[must_use]
+    pub fn material_palette(&self) -> (MaterialDefs, MaterialColorMap) {
+        let mut defs: MaterialDefs = Vec::new();
+        let mut color_map: MaterialColorMap = Vec::new();
+        for (&color, &mat) in &self.materials {
+            if mat.is_opaque() {
+                continue;
+            }
+            // Reuse an existing id for an identical material, else mint one.
+            let id = if let Some(&(id, _)) = defs.iter().find(|(_, m)| *m == mat) {
+                id
+            } else {
+                // ids 1..=255; bail once the palette is full.
+                let Ok(id) = u8::try_from(defs.len() + 1) else {
+                    continue;
+                };
+                defs.push((id, mat));
+                id
+            };
+            color_map.push((color & 0x00ff_ffff, id));
+        }
+        (defs, color_map)
     }
 }
 
@@ -485,5 +567,63 @@ mod tests {
         assert!(!m.set(2, 0, 0, 0x8011_2233));
         assert_eq!(m.get(9, 9, 9), 0);
         assert_eq!(m.occupied_count(), 0);
+    }
+
+    #[test]
+    fn set_material_stores_only_translucent_entries() {
+        let mut m = VoxelModel::new(1, 1, 1);
+        assert_eq!(m.material(0x80ff_ffff), Material::OPAQUE);
+        m.set_material(0x80ff_ffff, Material::alpha_blend(128));
+        assert_eq!(m.material(0x80ff_ffff), Material::alpha_blend(128));
+        assert_eq!(m.materials.len(), 1);
+        // Setting it opaque again clears the entry, so the map stays sparse.
+        m.set_material(0x80ff_ffff, Material::OPAQUE);
+        assert!(m.materials.is_empty());
+    }
+
+    #[test]
+    fn material_palette_dedupes_identical_materials() {
+        let mut m = VoxelModel::new(1, 1, 1);
+        // Two colours, same glass material → one palette id, two map entries.
+        m.set_material(0x80ff_0000, Material::alpha_blend(80));
+        m.set_material(0x8000_ff00, Material::alpha_blend(80));
+        // A third colour with a distinct material → a second id.
+        m.set_material(0x8000_00ff, Material::additive(255));
+        let (defs, map) = m.material_palette();
+        assert_eq!(defs.len(), 2, "identical materials share one id");
+        assert_eq!(map.len(), 3, "every translucent colour is mapped");
+        // The map keys are RGB (high byte stripped) and every id is defined.
+        for (rgb, id) in &map {
+            assert_eq!(rgb & 0xff00_0000, 0, "map key is 0xRRGGBB");
+            assert!(defs.iter().any(|(d, _)| d == id));
+        }
+    }
+
+    #[test]
+    fn all_opaque_model_has_an_empty_material_palette() {
+        let mut m = VoxelModel::new(2, 2, 2);
+        m.set(0, 0, 0, 0x80ab_cdef);
+        let (defs, map) = m.material_palette();
+        assert!(defs.is_empty() && map.is_empty());
+    }
+
+    #[test]
+    fn structural_edits_carry_materials() {
+        let mut m = VoxelModel::new(3, 3, 3);
+        m.set(1, 1, 1, 0x8012_3456);
+        m.set_material(0x8012_3456, Material::alpha_blend(64));
+        // crop / resize / grow all preserve the per-colour materials.
+        assert_eq!(
+            m.cropped().unwrap().material(0x8012_3456),
+            Material::alpha_blend(64)
+        );
+        assert_eq!(
+            m.resized([4, 4, 4]).material(0x8012_3456),
+            Material::alpha_blend(64)
+        );
+        assert_eq!(
+            m.grown(0, true).material(0x8012_3456),
+            Material::alpha_blend(64)
+        );
     }
 }

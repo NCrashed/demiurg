@@ -13,6 +13,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use roxlap_formats::material::Material;
+
 use crate::VoxelModel;
 
 /// One voxel's before/after within an [`Edit`].
@@ -29,16 +31,30 @@ struct Delta {
 /// from before the edit.
 #[derive(Debug, Clone)]
 enum Edit {
-    Voxels { deltas: Vec<Delta>, id: u64 },
+    Voxels {
+        deltas: Vec<Delta>,
+        id: u64,
+    },
     // Boxed: a `VoxelModel` (with its 256-entry palette) is much larger
     // than the `Voxels` variant.
-    Replace { before: Box<VoxelModel>, id: u64 },
+    Replace {
+        before: Box<VoxelModel>,
+        id: u64,
+    },
+    /// A per-colour render-material change (blend mode + alpha). Stores the
+    /// colour and its before/after material, so undo restores the old one.
+    Material {
+        color: u32,
+        before: Material,
+        after: Material,
+        id: u64,
+    },
 }
 
 impl Edit {
     fn id(&self) -> u64 {
         match self {
-            Edit::Voxels { id, .. } | Edit::Replace { id, .. } => *id,
+            Edit::Voxels { id, .. } | Edit::Replace { id, .. } | Edit::Material { id, .. } => *id,
         }
     }
 }
@@ -221,6 +237,44 @@ impl Document {
         self.model.pivot = pivot;
     }
 
+    /// Assign colour word `color`'s render [`Material`] (blend mode + alpha)
+    /// as one undoable step. Returns `false` (a no-op) if it already has
+    /// that material.
+    ///
+    /// Consecutive tweaks to the *same* colour coalesce into one undo step
+    /// (so dragging an opacity slider is a single undo), keeping the
+    /// original pre-edit material as the step's `before`. The saved state is
+    /// never coalesced into, so a change after a save still reads modified.
+    pub fn set_material(&mut self, color: u32, mat: Material) -> bool {
+        if self.model.material(color) == mat {
+            return false;
+        }
+        // Coalesce into the open step only if the top edit is a material
+        // change to this colour that isn't the last-saved state.
+        let coalesce = matches!(
+            self.undo.last(),
+            Some(Edit::Material { color: c, id, .. }) if *c == color && *id != self.saved_id
+        );
+        let before = if coalesce {
+            match self.undo.pop() {
+                Some(Edit::Material { before, .. }) => before,
+                _ => unreachable!("guarded by `coalesce`"),
+            }
+        } else {
+            self.model.material(color)
+        };
+        self.model.set_material(color, mat);
+        let id = self.alloc_id();
+        self.undo.push(Edit::Material {
+            color,
+            before,
+            after: mat,
+            id,
+        });
+        self.redo.clear();
+        true
+    }
+
     #[must_use]
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
@@ -285,6 +339,20 @@ impl Document {
                     id,
                 });
             }
+            Edit::Material {
+                color,
+                before,
+                after,
+                id,
+            } => {
+                self.model.set_material(color, before);
+                self.redo.push(Edit::Material {
+                    color,
+                    before,
+                    after,
+                    id,
+                });
+            }
         }
         true
     }
@@ -306,6 +374,20 @@ impl Document {
                 let cur = std::mem::replace(&mut self.model, *before);
                 self.undo.push(Edit::Replace {
                     before: Box::new(cur),
+                    id,
+                });
+            }
+            Edit::Material {
+                color,
+                before,
+                after,
+                id,
+            } => {
+                self.model.set_material(color, after);
+                self.undo.push(Edit::Material {
+                    color,
+                    before,
+                    after,
                     id,
                 });
             }
@@ -696,6 +778,46 @@ mod tests {
         assert_eq!(d.model().get(3, 1, 1), 0, "no mirror copy from set_cells");
         d.undo();
         assert_eq!(d.model().occupied_count(), 0, "both cells in one undo step");
+    }
+
+    #[test]
+    fn set_material_is_undoable_and_marks_modified() {
+        let mut d = doc(4);
+        d.set_voxel([0, 0, 0], RED);
+        d.mark_saved();
+        assert!(!d.is_modified());
+
+        assert!(d.set_material(RED, Material::alpha_blend(100)));
+        assert_eq!(d.model().material(RED), Material::alpha_blend(100));
+        assert!(d.is_modified(), "a material change reads modified");
+
+        d.undo();
+        assert_eq!(d.model().material(RED), Material::OPAQUE);
+        assert!(!d.is_modified(), "undo back to the saved state");
+
+        d.redo();
+        assert_eq!(d.model().material(RED), Material::alpha_blend(100));
+    }
+
+    #[test]
+    fn consecutive_material_tweaks_coalesce_into_one_step() {
+        let mut d = doc(4);
+        d.set_voxel([0, 0, 0], RED);
+        // Dragging an opacity slider: many sets to the same colour.
+        assert!(d.set_material(RED, Material::alpha_blend(10)));
+        assert!(d.set_material(RED, Material::alpha_blend(50)));
+        assert!(d.set_material(RED, Material::alpha_blend(200)));
+        // One undo reverts the whole drag back to opaque (its pre-edit value).
+        d.undo();
+        assert_eq!(d.model().material(RED), Material::OPAQUE);
+        assert!(!d.can_undo() || d.model().material(RED) == Material::OPAQUE);
+    }
+
+    #[test]
+    fn no_op_material_set_does_nothing() {
+        let mut d = doc(4);
+        assert!(!d.set_material(RED, Material::OPAQUE), "already opaque");
+        assert!(!d.can_undo());
     }
 
     #[test]

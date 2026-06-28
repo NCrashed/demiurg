@@ -29,22 +29,24 @@ demiurg-core = { path = "crates/demiurg-core", version = "0.10.0" }
 demiurg-i18n = { path = "crates/demiurg-i18n", version = "0.10.0" }
 demiurg-view = { path = "crates/demiurg-view", version = "0.10.0" }
 
-# demiurg depends on roxlap ONLY (see DESIGN.md §1). crates.io 0.15.0 ships the
-# animated-voxel-clips API + renderer (VCL.5/RF.1) the multi-attachment editor
-# builds on, on top of 0.13's `roxlap_formats::character` TRS-keyframe container.
-# (The local `../roxlap/crates/*` path pin used while co-developing 0.14/0.15 was
-# restored to a published version once 0.15.0 shipped.)
+# demiurg depends on roxlap ONLY (see DESIGN.md §1). crates.io 0.16.0 ships the
+# transparent-voxel materials API (TV stage) the editor's blend-mode authoring
+# builds on, on top of 0.15's animated-voxel-clips API + renderer (VCL.5/RF.1).
+# (The local `../roxlap/crates/*` path pin used while co-developing was restored
+# to a published version once each release shipped.)
 #
-# roxlap-formats: kv6/character/kfa read/write + shaded surface extraction.
+# roxlap-formats: kv6/character/kfa read/write + shaded surface extraction;
+#                 voxel materials (`material::{BlendMode, Material, MaterialTable}`).
 # roxlap-core:    Camera, OpticastSettings, kfa_draw (compose_attachment).
 # roxlap-scene:   Scene graph the renderer composites.
 # roxlap-render:  unified CPU/GPU facade (SceneRenderer, draw_lines, sprites,
-#                 image sprites, set_kfa_sprites, add_character).
+#                 image sprites, set_kfa_sprites, add_character; define_material,
+#                 set_terrain_materials, add_sprite_model_with_materials).
 # roxlap-voxvideo lands at M5.
-roxlap-formats = "0.15.0"
-roxlap-core = "0.15.0"
-roxlap-scene = "0.15.0"
-roxlap-render = "0.15.0"
+roxlap-formats = "0.16.0"
+roxlap-core = "0.16.0"
+roxlap-scene = "0.16.0"
+roxlap-render = "0.16.0"
 
 # Render-side world math (f64 orbit camera). Mirrors roxlap's pin so
 # the workspaces share one glam.

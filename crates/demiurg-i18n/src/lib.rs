@@ -79,6 +79,10 @@ pub enum Msg {
     Radius,
     Colour,
     ModelColours,
+    Materials,
+    BlendOpaque,
+    BlendAlpha,
+    BlendAdditive,
     Mirror,
     Rotate,
     RotateCw,
@@ -244,7 +248,7 @@ pub enum Msg {
 
 impl Msg {
     /// Every message, for catalogue-completeness tests / tooling.
-    pub const ALL: [Msg; 162] = [
+    pub const ALL: [Msg; 166] = [
         Msg::Tools,
         Msg::Place,
         Msg::Erase,
@@ -257,6 +261,10 @@ impl Msg {
         Msg::Radius,
         Msg::Colour,
         Msg::ModelColours,
+        Msg::Materials,
+        Msg::BlendOpaque,
+        Msg::BlendAlpha,
+        Msg::BlendAdditive,
         Msg::Attachments,
         Msg::PrimaryMesh,
         Msg::Attachment,
@@ -434,6 +442,10 @@ const fn en(msg: Msg) -> &'static str {
         Msg::Radius => "Radius",
         Msg::Colour => "Colour",
         Msg::ModelColours => "Colours in model",
+        Msg::Materials => "Materials",
+        Msg::BlendOpaque => "Opaque",
+        Msg::BlendAlpha => "Alpha",
+        Msg::BlendAdditive => "Additive",
         Msg::Attachments => "Layers",
         Msg::PrimaryMesh => "Base layer",
         Msg::Attachment => "Layer",
@@ -604,6 +616,10 @@ const fn ru(msg: Msg) -> &'static str {
         Msg::Radius => "Радиус",
         Msg::Colour => "Цвет",
         Msg::ModelColours => "Цвета модели",
+        Msg::Materials => "Материалы",
+        Msg::BlendOpaque => "Непрозр.",
+        Msg::BlendAlpha => "Альфа",
+        Msg::BlendAdditive => "Аддитив.",
         Msg::Attachments => "Слои",
         Msg::PrimaryMesh => "Базовый слой",
         Msg::Attachment => "Слой",

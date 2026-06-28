@@ -32,7 +32,8 @@ pub use roxlap_render::Line3;
 
 use demiurg_core::VoxelModel;
 use glam::{DVec3, IVec3};
-use roxlap_render::{Sprite, SpriteInstanceDesc, SpriteSet};
+use roxlap_formats::kv6::Kv6;
+use roxlap_render::{Material, Sprite, SpriteInstanceDesc, SpriteSet};
 use roxlap_scene::{GridId, GridTransform, Scene};
 
 /// Sprite pivot world position. Kept at the origin; the camera orbits
@@ -63,6 +64,19 @@ pub struct ModelView {
     /// sprite mode leaves it empty).
     grid_id: GridId,
     sprites: SpriteSet,
+    /// The model compiled to a `.kv6`, kept only in sprite mode **when the
+    /// model has translucent materials** — then `sprites` is left empty and
+    /// the host registers this kv6 via
+    /// `SceneRenderer::add_sprite_model_with_materials` (the `set_sprites`
+    /// path carries no material map). `None` for the opaque sprite path
+    /// (drawn straight from `sprites`) and in voxel mode.
+    sprite_kv6: Option<Kv6>,
+    /// Renderer material palette derived from the model: `(id, material)`
+    /// to install via `define_material`, plus a `0xRRGGBB`→id colour map for
+    /// `set_terrain_materials` (voxel mode) / `add_sprite_model_with_materials`
+    /// (sprite mode). Empty for an all-opaque model.
+    material_defs: Vec<(u8, Material)>,
+    material_map: Vec<(u32, u8)>,
     /// Largest model dimension in voxels — the camera frames to it.
     extent: f64,
 }
@@ -77,6 +91,9 @@ impl ModelView {
             scene,
             grid_id,
             sprites: empty_sprite_set(),
+            sprite_kv6: None,
+            material_defs: Vec::new(),
+            material_map: Vec::new(),
             extent: 1.0,
         };
         view.set_model(model, mode);
@@ -89,6 +106,11 @@ impl ModelView {
         let (xsiz, ysiz, zsiz) = model.dims();
         self.extent = f64::from(xsiz.max(ysiz).max(zsiz)).max(1.0);
 
+        // Renderer material palette for this model (empty when all-opaque).
+        let (defs, map) = model.material_palette();
+        self.material_defs = defs;
+        self.material_map = map;
+
         // Keep the grid aligned to -pivot so a voxel (x, y, z) sits at world
         // (x, y, z) - pivot, matching the picker, in both modes.
         let p = model.pivot;
@@ -100,18 +122,29 @@ impl ModelView {
         match mode {
             RenderMode::Sprite => {
                 self.drop_grid_chunk();
-                let sprite = Sprite::axis_aligned(model.to_kv6(), ORIGIN);
-                self.sprites = SpriteSet {
-                    models: vec![sprite],
-                    instances: vec![SpriteInstanceDesc {
-                        model: 0,
-                        pos: ORIGIN,
-                    }],
-                    carve_model: None,
-                };
+                let kv6 = model.to_kv6();
+                if self.material_map.is_empty() {
+                    // Opaque: the plain `set_sprites` path, unchanged.
+                    self.sprite_kv6 = None;
+                    self.sprites = SpriteSet {
+                        models: vec![Sprite::axis_aligned(kv6, ORIGIN)],
+                        instances: vec![SpriteInstanceDesc {
+                            model: 0,
+                            pos: ORIGIN,
+                        }],
+                        carve_model: None,
+                    };
+                } else {
+                    // Translucent: hand the kv6 to the host to register with
+                    // its material map (`set_sprites` has no material param),
+                    // and leave `sprites` empty so it isn't double-drawn opaque.
+                    self.sprites = empty_sprite_set();
+                    self.sprite_kv6 = Some(kv6);
+                }
             }
             RenderMode::Voxel => {
                 self.sprites = empty_sprite_set();
+                self.sprite_kv6 = None;
                 self.rebuild_grid_chunk(model);
             }
         }
@@ -147,6 +180,31 @@ impl ModelView {
     #[must_use]
     pub fn sprites(&self) -> &SpriteSet {
         &self.sprites
+    }
+
+    /// The renderer material palette `(id, material)` to install via
+    /// `SceneRenderer::define_material`. Empty for an all-opaque model.
+    #[must_use]
+    pub fn material_defs(&self) -> &[(u8, Material)] {
+        &self.material_defs
+    }
+
+    /// The `0xRRGGBB`→material-id colour map for `set_terrain_materials`
+    /// (voxel mode) / `add_sprite_model_with_materials` (sprite mode). Empty
+    /// for an all-opaque model.
+    #[must_use]
+    pub fn material_map(&self) -> &[(u32, u8)] {
+        &self.material_map
+    }
+
+    /// In **sprite** mode with translucent materials, the model's compiled
+    /// `.kv6` for the host to register via
+    /// `SceneRenderer::add_sprite_model_with_materials` (paired with
+    /// [`material_map`](Self::material_map)). `None` for the opaque sprite
+    /// path (drawn from [`sprites`](Self::sprites)) and in voxel mode.
+    #[must_use]
+    pub fn sprite_kv6(&self) -> Option<&Kv6> {
+        self.sprite_kv6.as_ref()
     }
 
     /// The scene to hand to `SceneRenderer::render`.
@@ -187,7 +245,8 @@ impl ModelView {
         anginc: f32,
     ) -> Vec<u32> {
         use roxlap_core::OpticastSettings;
-        use roxlap_scene::render::{CpuFog, render_scene_composed};
+        use roxlap_formats::material::MaterialTable;
+        use roxlap_scene::render::{CpuFog, render_scene_composed_with_materials};
 
         let cam = camera.to_roxlap();
         let pixels = (width as usize) * (height as usize);
@@ -208,7 +267,16 @@ impl ModelView {
             max_scan_dist: 0,
             side_shades,
         };
-        render_scene_composed(
+        // Compose translucent voxels (voxel mode) the same way the live
+        // viewport does, so a `--shot` screenshot matches the window. The
+        // global palette is built from the model's material defs; an
+        // all-opaque model passes `None` and renders byte-for-byte as before.
+        let mut table = MaterialTable::new();
+        for &(id, mat) in &self.material_defs {
+            table.set(id, mat);
+        }
+        let materials = (!self.material_defs.is_empty()).then_some(&table);
+        render_scene_composed_with_materials(
             &mut fb,
             &mut zb,
             width as usize,
@@ -220,6 +288,8 @@ impl ModelView {
             &settings,
             sky_color,
             None,
+            materials,
+            &self.material_map,
         );
 
         if flip_x {
@@ -250,6 +320,59 @@ mod tests {
         let view = ModelView::new(&m, RenderMode::Sprite);
         assert_eq!(view.sprites().models.len(), 1);
         assert_eq!(view.sprites().instances.len(), 1);
+        // Opaque: no material data, the host draws straight from `sprites`.
+        assert!(view.sprite_kv6().is_none());
+        assert!(view.material_map().is_empty());
+    }
+
+    #[test]
+    fn translucent_voxels_change_the_cpu_render() {
+        use roxlap_render::Material;
+        // A solid slab the camera looks through.
+        let mut m = VoxelModel::new(6, 6, 6);
+        for y in 0..6 {
+            for x in 0..6 {
+                m.set(x, y, 3, 0x80ff_0000);
+            }
+        }
+        let (w, h) = (120, 100);
+        let sky = 0x0020_3040;
+        let render = |model: &VoxelModel| {
+            let mut view = ModelView::new(model, RenderMode::Voxel);
+            let cam = view.framing_camera();
+            view.render_cpu(&cam, w, h, [0; 6], sky, false, 1.0)
+        };
+
+        let opaque = render(&m);
+        // Same geometry, now glass: the slab lets the sky behind it through,
+        // so the framebuffer must differ from the opaque render.
+        m.set_material(0x80ff_0000, Material::alpha_blend(48));
+        let glass = render(&m);
+        assert_ne!(opaque, glass, "materials must affect the CPU render");
+        // The render is deterministic — opaque renders twice are identical.
+        assert_eq!(
+            opaque,
+            render(&{
+                let mut m2 = m.clone();
+                m2.set_material(0x80ff_0000, Material::OPAQUE);
+                m2
+            })
+        );
+    }
+
+    #[test]
+    fn sprite_mode_with_materials_defers_to_the_host() {
+        use roxlap_render::Material;
+        let mut m = VoxelModel::new(4, 4, 4);
+        m.set(1, 1, 1, 0x80ff_ffff);
+        m.set_material(0x80ff_ffff, Material::alpha_blend(120));
+        let view = ModelView::new(&m, RenderMode::Sprite);
+        // The `set_sprites` set is empty (no opaque double-draw); the host
+        // registers `sprite_kv6` with the material map instead.
+        assert!(view.sprites().instances.is_empty());
+        assert!(view.sprite_kv6().is_some());
+        assert_eq!(view.material_map().len(), 1);
+        assert_eq!(view.material_defs().len(), 1);
     }
 
     #[test]

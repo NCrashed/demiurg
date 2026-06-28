@@ -17,6 +17,7 @@ use crate::VoxelModel;
 use crate::clip::{self, ClipDoc, ClipFrame, ClipGenerator};
 use crate::rig::Rig;
 use roxlap_formats::Rgb6;
+use roxlap_formats::material::{BlendMode, Material};
 
 /// On-disk top-level document: a bare model, a rigged character (its `.rkc`
 /// bytes), or an animated voxel clip. Postcard tags the variant, so the loader
@@ -55,6 +56,11 @@ pub struct Project {
     pub palette: Option<Vec<[u8; 3]>>,
     /// Dense voxel buffer, `x + xsiz·(y + ysiz·z)` order, `0` = empty.
     pub voxels: Vec<u32>,
+    /// Per-colour render materials (TV stage): `(colour_word, alpha,
+    /// blend_mode_tag)` for each translucent colour. `#[serde(default)]` so
+    /// projects written before materials still load (as all-opaque).
+    #[serde(default)]
+    pub materials: Vec<(u32, u8, u8)>,
 }
 
 impl Project {
@@ -66,11 +72,17 @@ impl Project {
             .palette
             .as_ref()
             .map(|p| p.iter().map(|c| [c.r, c.g, c.b]).collect());
+        let materials = model
+            .materials
+            .iter()
+            .map(|(&color, m)| (color, m.alpha, m.mode.as_u8()))
+            .collect();
         Self {
             dims: [x, y, z],
             pivot: model.pivot,
             palette,
             voxels: model.voxels().to_vec(),
+            materials,
         }
     }
 
@@ -89,14 +101,22 @@ impl Project {
             }
             arr
         });
-        VoxelModel::from_parts(
+        let mut model = VoxelModel::from_parts(
             self.dims[0],
             self.dims[1],
             self.dims[2],
             self.pivot,
             palette,
             self.voxels,
-        )
+        )?;
+        // Restore per-colour materials (an unknown blend-mode tag from a
+        // newer file is skipped, leaving that colour opaque).
+        for (color, alpha, mode_tag) in self.materials {
+            if let Some(mode) = BlendMode::from_u8(mode_tag) {
+                model.set_material(color, Material { alpha, mode });
+            }
+        }
+        Some(model)
     }
 }
 
@@ -330,6 +350,37 @@ mod tests {
     }
 
     #[test]
+    fn materials_survive_the_project_round_trip() {
+        let mut m = VoxelModel::new(2, 2, 2);
+        m.set(0, 0, 0, 0x8080_8080);
+        m.set(1, 0, 0, 0x80ff_2200);
+        // A glass colour and an additive-glow colour.
+        m.set_material(0x8080_8080, Material::alpha_blend(96));
+        m.set_material(0x80ff_2200, Material::additive(200));
+
+        let back = from_bytes_model(&to_bytes(&m)).expect("round-trips");
+        assert_eq!(back.material(0x8080_8080), Material::alpha_blend(96));
+        assert_eq!(back.material(0x80ff_2200), Material::additive(200));
+        // A colour without a material stays opaque.
+        assert_eq!(back.material(0x80aa_aaaa), Material::OPAQUE);
+    }
+
+    #[test]
+    fn projects_without_materials_still_load() {
+        // A pre-materials project has no `materials` field on the wire;
+        // `#[serde(default)]` must decode it as all-opaque.
+        let doc = Doc::Model(Box::new(Project {
+            dims: [1, 1, 1],
+            pivot: [0.5, 0.5, 0.5],
+            palette: None,
+            voxels: vec![0x80ff_ffff],
+            materials: Vec::new(),
+        }));
+        let back = from_bytes_model(&postcard::to_allocvec(&doc).unwrap()).expect("loads");
+        assert_eq!(back.material(0x80ff_ffff), Material::OPAQUE);
+    }
+
+    #[test]
     #[allow(clippy::float_cmp)] // pivot/size literals are exact in f32
     fn clip_round_trips_losslessly_including_interior() {
         use crate::clip::{ClipDoc, LoopMode};
@@ -393,6 +444,7 @@ mod tests {
             pivot: [1.0, 1.0, 1.0],
             palette: None,
             voxels: vec![0; 3], // should be 8
+            materials: Vec::new(),
         }));
         let bytes = postcard::to_allocvec(&doc).unwrap();
         assert!(matches!(from_bytes(&bytes), Err(LoadError::DimsMismatch)));

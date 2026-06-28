@@ -54,7 +54,7 @@ use demiurg_view::{
 use roxlap_core::kfa_draw::compose_attachment;
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_render::{
-    DynSpriteTransform, FrameParams, ImageFacing, ImageId, ImageSprite, RenderOptions,
+    DynSpriteTransform, FrameParams, ImageFacing, ImageId, ImageSprite, Material, RenderOptions,
     SceneRenderer, egui,
 };
 use ui::UiActions;
@@ -1504,6 +1504,8 @@ fn main() {
         kfa: None,
         next_frame: Instant::now(),
         clip_regen_due: None,
+        material_dirty: true,
+        material_id_ceiling: 0,
     };
 
     let event_loop = EventLoop::new().expect("winit: create event loop");
@@ -1675,6 +1677,13 @@ struct App {
     /// When a debounced auto-generate of the procedural clip is due (set on a
     /// script/param edit while Auto is on; fired and cleared in `redraw`).
     clip_regen_due: Option<Instant>,
+    /// The model's render materials changed (a blend-mode/opacity edit or a
+    /// model swap): re-install the renderer's global material palette on the
+    /// next frame. See [`apply_materials`](App::apply_materials).
+    material_dirty: bool,
+    /// Highest material id installed via `define_material` last refresh, so
+    /// stale ids can be reset to opaque when the palette shrinks.
+    material_id_ceiling: u8,
 }
 
 impl App {
@@ -6043,6 +6052,9 @@ impl App {
             self.editor.refresh_palette();
             self.prune_selection();
             self.editor.dirty = false;
+            // The view recomputed its material palette from the new model;
+            // re-install it on the renderer this frame.
+            self.material_dirty = true;
         }
         // A skeleton edit (Skeleton mode) changed the rig — rebuild the
         // posed preview so the rest pose reflects it.
@@ -6121,6 +6133,36 @@ impl App {
         }
         renderer.set_flip_x(self.editor.flip_x);
         renderer.set_sprites(self.view.sprites());
+        // Transparent-voxel materials (roxlap TV stage): install the model's
+        // global material palette, then apply its colour→material map to the
+        // active render path. Voxel mode composites via the terrain map;
+        // sprite mode registers the model with per-voxel materials (the
+        // `set_sprites` path above left it empty when materials exist, so it
+        // isn't double-drawn opaque). All inert for an all-opaque model.
+        if self.material_dirty {
+            // Reset any ids the previous palette used past the current one,
+            // so a removed material reverts to opaque.
+            for id in 1..=self.material_id_ceiling {
+                renderer.define_material(id, Material::OPAQUE);
+            }
+            self.material_id_ceiling = 0;
+            for &(id, mat) in self.view.material_defs() {
+                renderer.define_material(id, mat);
+                self.material_id_ceiling = self.material_id_ceiling.max(id);
+            }
+            self.material_dirty = false;
+        }
+        match self.editor.render_mode {
+            RenderMode::Voxel => renderer.set_terrain_materials(self.view.material_map()),
+            RenderMode::Sprite => {
+                renderer.set_terrain_materials(&[]);
+                if let Some(kv6) = self.view.sprite_kv6() {
+                    let model =
+                        renderer.add_sprite_model_with_materials(kv6, self.view.material_map());
+                    renderer.add_sprite_instance(model, [0.0, 0.0, 0.0]);
+                }
+            }
+        }
         // The KFA rig's limb sprites. set_sprites resets the registry each
         // frame, so re-establish the rig after it, then apply the current
         // pose — or clear it (empty set) when there's no preview, so leaving

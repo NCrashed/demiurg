@@ -10,6 +10,7 @@
 use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{AXIS_COLORS, RenderMode, ViewDir};
 use roxlap_render::egui;
+use roxlap_render::{BlendMode, Material};
 
 use demiurg_core::{LoopMode, Quat};
 
@@ -2077,6 +2078,65 @@ fn voxel_tools_panel(
                 }
             }
         });
+    }
+
+    // Per-colour render materials (blend mode + opacity) — roxlap's
+    // transparency stage. Each used colour gets a blend mode and, when
+    // translucent, an opacity slider; the live preview composites it
+    // (CPU backend). Plain-model only: the `.rkc` rig export carries no
+    // materials, so they aren't offered while editing a rig.
+    if editor.rig.is_none() && !editor.model_palette.is_empty() {
+        ui.separator();
+        ui.label(t(Msg::Materials));
+        let mode_msg = |m: BlendMode| match m {
+            BlendMode::Opaque => Msg::BlendOpaque,
+            BlendMode::AlphaBlend => Msg::BlendAlpha,
+            BlendMode::Additive => Msg::BlendAdditive,
+        };
+        let used = editor.model_palette.clone();
+        let mut change: Option<(u32, Material)> = None;
+        for c in used {
+            let mat = editor.document.model().material(c);
+            ui.horizontal(|ui| {
+                if swatch(ui, c).clicked() {
+                    editor.color = c;
+                }
+                let mut mode = mat.mode;
+                egui::ComboBox::from_id_salt(("blend", c))
+                    .selected_text(t(mode_msg(mode)))
+                    .show_ui(ui, |ui| {
+                        for m in [
+                            BlendMode::Opaque,
+                            BlendMode::AlphaBlend,
+                            BlendMode::Additive,
+                        ] {
+                            ui.selectable_value(&mut mode, m, t(mode_msg(m)));
+                        }
+                    });
+                let mut alpha = mat.alpha;
+                let alpha_changed = mode != BlendMode::Opaque
+                    && ui
+                        .add(egui::Slider::new(&mut alpha, 0..=255).text(t(Msg::Opacity)))
+                        .changed();
+                if mode != mat.mode || alpha_changed {
+                    change = Some((
+                        c,
+                        if mode == BlendMode::Opaque {
+                            Material::OPAQUE
+                        } else {
+                            Material { alpha, mode }
+                        },
+                    ));
+                }
+            });
+        }
+        // Apply the one widget the artist touched this frame (undoable;
+        // the preview rebuilds because the document is now dirty).
+        if let Some((c, mat)) = change {
+            if editor.document.set_material(c, mat) {
+                editor.dirty = true;
+            }
+        }
     }
 
     ui.separator();
