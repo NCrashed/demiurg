@@ -238,6 +238,15 @@ pub struct Modals {
     pub recovered: bool,
 }
 
+/// Transient screen-space overlays painted on top of the 3D viewport.
+#[derive(Clone, Copy, Default)]
+pub struct Overlays {
+    /// The live selection rectangle while dragging the Select tool.
+    pub marquee: Option<[(f64, f64); 2]>,
+    /// The voxel cell under the cursor, shown as a corner coordinate readout.
+    pub hover: Option<[i32; 3]>,
+}
+
 /// Draw the editor chrome for one frame (menus, tool panel, quit modal).
 /// The 3D reference lines / hover box are drawn by the host via
 /// `SceneRenderer::draw_lines`, not here.
@@ -247,7 +256,7 @@ pub fn build(
     editor: &mut Editor,
     actions: &mut UiActions,
     modals: Modals,
-    marquee: Option<[(f64, f64); 2]>,
+    overlays: Overlays,
     timeline: Timeline,
     recent: &[PathBuf],
 ) {
@@ -472,7 +481,8 @@ pub fn build(
             });
         });
 
-    draw_marquee(ui, marquee);
+    draw_marquee(ui, overlays.marquee);
+    draw_hover_coords(ui, overlays.hover, lang);
 
     // In-app quit confirmation (replaces a native message box, which the
     // XDG portal doesn't reliably show here).
@@ -2359,6 +2369,37 @@ fn draw_marquee(ui: &egui::Ui, marquee: Option<[(f64, f64); 2]>) {
         egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 220, 220)),
         egui::StrokeKind::Middle,
     );
+}
+
+/// Bottom-right readout of the voxel cell the cursor currently points at
+/// (the same cell the hover wire box highlights). Absent when the pointer
+/// is off any voxel or resting over a panel, so it never lingers stale.
+fn draw_hover_coords(ui: &egui::Ui, hover: Option<[i32; 3]>, lang: Lang) {
+    let Some([x, y, z]) = hover else {
+        return;
+    };
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("hover_coords"),
+    ));
+    let galley = painter.layout_no_wrap(
+        format!("{}  {x}  {y}  {z}", tr(lang, Msg::Cell)),
+        egui::FontId::monospace(13.0),
+        egui::Color32::WHITE,
+    );
+    let pad = egui::vec2(8.0, 5.0);
+    let screen = ui.ctx().content_rect();
+    let pos = egui::pos2(
+        screen.right() - pad.x - galley.size().x,
+        screen.bottom() - pad.y - galley.size().y,
+    );
+    let bg = egui::Rect::from_min_size(pos, galley.size()).expand2(pad);
+    painter.rect_filled(
+        bg,
+        egui::CornerRadius::same(4),
+        egui::Color32::from_black_alpha(160),
+    );
+    painter.galley(pos, galley, egui::Color32::WHITE);
 }
 
 /// A small square colour button for `0x80RRGGBB`.

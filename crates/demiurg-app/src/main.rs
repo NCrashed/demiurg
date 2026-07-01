@@ -4031,7 +4031,7 @@ impl App {
     fn run_ui(
         &mut self,
         window: &Window,
-        marquee: Option<[(f64, f64); 2]>,
+        overlays: ui::Overlays,
     ) -> (
         Vec<egui::ClippedPrimitive>,
         egui::TexturesDelta,
@@ -4056,7 +4056,7 @@ impl App {
         let editor = &mut self.editor;
         let mut actions = UiActions::default();
         let out = ctx.run_ui(raw, |ui| {
-            ui::build(ui, editor, &mut actions, modals, marquee, timeline, recent);
+            ui::build(ui, editor, &mut actions, modals, overlays, timeline, recent);
         });
         self.egui_state
             .as_mut()
@@ -6087,7 +6087,15 @@ impl App {
         // While dragging a marquee, the live screen rectangle (anchor ->
         // current cursor) is drawn by the UI as a 2D overlay.
         let marquee = self.marquee.as_ref().map(|m| [m.start, self.cursor]);
-        let (jobs, textures, ppp, actions) = self.run_ui(&window, marquee);
+        // The cell the cursor points at (matches the hover wire box), shown
+        // as a corner readout. None mid-drag or when the pointer is off-model.
+        let hover = if self.drag.is_none() && self.ref_drag.is_none() {
+            self.hover_cell()
+        } else {
+            None
+        };
+        let overlays = ui::Overlays { marquee, hover };
+        let (jobs, textures, ppp, actions) = self.run_ui(&window, overlays);
         self.apply_actions(&actions);
         if actions.quit_confirm {
             self.do_exit(event_loop);
