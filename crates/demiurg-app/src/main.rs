@@ -36,7 +36,7 @@ mod ui;
 use reference::Reference;
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::Arc;
@@ -1503,6 +1503,7 @@ fn main() {
         // Animate toggle revives it.
         kfa: None,
         next_frame: Instant::now(),
+        egui_texture_replay: EguiTextureReplay::default(),
         clip_regen_due: None,
         material_dirty: true,
         material_id_ceiling: 0,
@@ -1634,6 +1635,47 @@ struct Keys {
     zoom_out: bool,
 }
 
+/// Retains egui texture updates so a partial update can recreate its texture.
+///
+/// `roxlap-gpu` skips all egui work when no surface frame is pending. Its first
+/// scene upload can take that path, discarding the font atlas allocation even
+/// though egui considers it delivered. A later partial atlas update then makes
+/// `egui-wgpu` panic because the texture does not exist. Before each partial
+/// update, replaying that texture's history guarantees the full allocation is
+/// present regardless of how long surface startup took.
+#[derive(Default)]
+struct EguiTextureReplay {
+    history: HashMap<egui::TextureId, Vec<egui::epaint::ImageDelta>>,
+}
+
+impl EguiTextureReplay {
+    fn prepare(&mut self, delta: &mut egui::TexturesDelta) {
+        let updates = std::mem::take(&mut delta.set);
+        let mut set = Vec::with_capacity(updates.len());
+        let mut replayed = HashSet::new();
+        for (id, image) in updates {
+            if image.pos.is_none() {
+                self.history.insert(id, vec![image.clone()]);
+                replayed.insert(id);
+            } else {
+                if replayed.insert(id) {
+                    if let Some(history) = self.history.get(&id) {
+                        set.extend(history.iter().cloned().map(|old| (id, old)));
+                    }
+                }
+                if let Some(history) = self.history.get_mut(&id) {
+                    history.push(image.clone());
+                }
+            }
+            set.push((id, image));
+        }
+        delta.set = set;
+        for id in &delta.free {
+            self.history.remove(id);
+        }
+    }
+}
+
 #[allow(clippy::struct_excessive_bools)] // independent input/UI flags, not a state enum
 struct App {
     window: Option<Arc<Window>>,
@@ -1709,6 +1751,8 @@ struct App {
     kfa: Option<KfaView>,
     /// When the next frame should render (drives the ~60 fps cap).
     next_frame: Instant,
+    /// Lets partial egui updates recreate textures missed by the GPU backend.
+    egui_texture_replay: EguiTextureReplay,
     /// When a debounced auto-generate of the procedural clip is due (set on a
     /// script/param edit while Auto is on; fired and cleared in `redraw`).
     clip_regen_due: Option<Instant>,
@@ -6095,7 +6139,8 @@ impl App {
             None
         };
         let overlays = ui::Overlays { marquee, hover };
-        let (jobs, textures, ppp, actions) = self.run_ui(&window, overlays);
+        let (jobs, mut textures, ppp, actions) = self.run_ui(&window, overlays);
+        self.egui_texture_replay.prepare(&mut textures);
         self.apply_actions(&actions);
         if actions.quit_confirm {
             self.do_exit(event_loop);
@@ -6780,6 +6825,50 @@ impl ApplicationHandler for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn egui_texture_replay_rebuilds_history_before_partial_updates() {
+        let id = egui::TextureId::Managed(0);
+        let image = || egui::ColorImage::filled([1, 1], egui::Color32::WHITE);
+        let full = || egui::epaint::ImageDelta::full(image(), egui::TextureOptions::LINEAR);
+        let partial =
+            || egui::epaint::ImageDelta::partial([1, 1], image(), egui::TextureOptions::LINEAR);
+        let delta = |image| egui::TexturesDelta {
+            set: vec![(id, image)],
+            free: Vec::new(),
+        };
+
+        let mut replay = EguiTextureReplay::default();
+        let mut initial = delta(full());
+        replay.prepare(&mut initial);
+        assert_eq!(
+            initial.set.len(),
+            1,
+            "the original full upload is unchanged"
+        );
+
+        let mut first = delta(partial());
+        replay.prepare(&mut first);
+        assert_eq!(first.set.len(), 2);
+        assert_eq!(first.set[0].1.pos, None, "full upload comes first");
+        assert_eq!(first.set[1].1.pos, Some([1, 1]));
+
+        let mut second = delta(partial());
+        replay.prepare(&mut second);
+        assert_eq!(second.set.len(), 3);
+        assert_eq!(second.set[0].1.pos, None);
+        assert_eq!(second.set[1].1.pos, Some([1, 1]));
+        assert_eq!(second.set[2].1.pos, Some([1, 1]));
+
+        let mut freed = egui::TexturesDelta {
+            set: Vec::new(),
+            free: vec![id],
+        };
+        replay.prepare(&mut freed);
+        let mut reused_without_full = delta(partial());
+        replay.prepare(&mut reused_without_full);
+        assert_eq!(reused_without_full.set.len(), 1, "free clears the history");
+    }
 
     #[test]
     fn rotate_cells_90_swaps_extents_and_reverses() {
