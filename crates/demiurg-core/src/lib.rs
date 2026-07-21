@@ -23,10 +23,10 @@
 
 use std::collections::BTreeMap;
 
-use roxlap_formats::Rgb6;
 use roxlap_formats::kv6::{self, Kv6};
 use roxlap_formats::material::Material;
 use roxlap_formats::vxl::{self, Vxl};
+use roxlap_formats::{Rgb6, VoxColor};
 
 pub mod clip;
 pub mod edit;
@@ -196,7 +196,7 @@ impl VoxelModel {
     pub fn to_kv6(&self) -> Kv6 {
         let mut kv6 = Kv6::from_fn_shaded(self.xsiz, self.ysiz, self.zsiz, |x, y, z| {
             let col = self.get(x, y, z);
-            (col != 0).then_some(col)
+            (col != 0).then_some(VoxColor(col))
         });
         kv6.xpiv = self.pivot[0];
         kv6.ypiv = self.pivot[1];
@@ -228,7 +228,7 @@ impl VoxelModel {
         let vsid = self.xsiz.max(self.ysiz).max(1).next_power_of_two();
         let vxl = Vxl::from_dense(vsid, |x, y, z| {
             let col = self.get(x, y, z);
-            (col != 0).then_some(col)
+            (col != 0).then_some(VoxColor(col))
         });
         vxl::serialize(&vxl)
     }

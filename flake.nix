@@ -17,60 +17,114 @@
     let
       forAllSystems = f:
         nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ]
-          (system: f {
-            pkgs = import nixpkgs {
-              inherit system;
-              overlays = [ rust-overlay.overlays.default ];
-            };
-          });
+          (system:
+            let
+              pkgs = import nixpkgs {
+                inherit system;
+                overlays = [ rust-overlay.overlays.default ];
+              };
+
+              # Runtime libs the editor viewport dlopens on Linux: winit +
+              # softbuffer (CPU present) and roxlap-gpu's wgpu (Vulkan ICD
+              # loader). Needed whenever demiurg-app opens a window; macOS
+              # uses Cocoa/Metal and needs none.
+              linuxRuntimeLibs = with pkgs; [
+                libxkbcommon
+                wayland
+                libx11
+                libxcursor
+                libxi
+                libxrandr
+                libxcb
+                vulkan-loader
+              ];
+
+              # Single source of truth: the same rust-toolchain.toml cargo
+              # reads. Bundles rust-src (for `-Z build-std`) and the
+              # wasm32-unknown-unknown target.
+              rustToolchain =
+                pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+            in
+            f { inherit pkgs linuxRuntimeLibs rustToolchain; });
     in {
-      devShells = forAllSystems ({ pkgs }:
+      packages = forAllSystems ({ pkgs, linuxRuntimeLibs, rustToolchain }:
         let
-          # Runtime libs the editor viewport dlopens on Linux: winit +
-          # softbuffer (CPU present) and roxlap-gpu's wgpu (Vulkan ICD
-          # loader). Needed from M1 onward when demiurg-app opens a
-          # window; harmless to ship now. macOS uses Cocoa/Metal and
-          # needs none.
-          linuxRuntimeLibs = with pkgs; [
-            libxkbcommon
-            wayland
-            libx11
-            libxcursor
-            libxi
-            libxrandr
-            libxcb
-            vulkan-loader
-          ];
-
-          # Single source of truth: the same rust-toolchain.toml cargo
-          # reads. Bundles rust-src (for `-Z build-std`) and the
-          # wasm32-unknown-unknown target.
-          rustToolchain =
-            pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-        in {
-          default = pkgs.mkShell {
-            packages = with pkgs; [
-              rustToolchain
-              pkg-config
-              # wasm32 needs an LLD-class linker; nixpkgs rustc doesn't
-              # bundle rust-lld, so provide the system one.
-              lld
-              # demiurg-web (M3) browser build: wasm-bindgen-cli emits the
-              # JS shim, trunk is the dev-server / bundler, Node runs the
-              # wasm test harness.
-              wasm-bindgen-cli
-              nodejs
-              trunk
-            ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux linuxRuntimeLibs;
-
-            # mkShell only sets PATH / PKG_CONFIG_PATH; the dlopen'd render
-            # libs need an explicit search path. macOS skips this.
-            shellHook = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-              export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath linuxRuntimeLibs}:''${LD_LIBRARY_PATH:-}"
-            '';
+          # Build with the pinned toolchain (roxlap 0.30 needs rustc 1.92+;
+          # our nightly clears it) instead of nixpkgs' default rustc.
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = rustToolchain;
+            rustc = rustToolchain;
           };
+
+          demiurg = rustPlatform.buildRustPackage {
+            pname = "demiurg";
+            version = "0.11.0";
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+
+            # Only the editor binary crate (the workspace has no other bins,
+            # and this skips building the libs' test-only deps).
+            cargoBuildFlags = [ "-p" "demiurg-app" ];
+
+            nativeBuildInputs = [ pkgs.pkg-config pkgs.makeWrapper ];
+            buildInputs =
+              pkgs.lib.optionals pkgs.stdenv.isLinux linuxRuntimeLibs;
+
+            # Tests want a display / GPU; the CI job runs them separately.
+            doCheck = false;
+
+            # The render libs are dlopen'd at runtime, so an rpath can't
+            # reach them — wrap the binary with an explicit library search
+            # path. macOS links Metal/Cocoa directly and needs no wrapper.
+            postInstall = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+              wrapProgram $out/bin/demiurg \
+                --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath linuxRuntimeLibs}"
+            '';
+
+            meta = {
+              description =
+                "Voxel asset editor for roxlap (kv6 models, kfa animations, voxel-clips)";
+              homepage = "https://github.com/NCrashed/demiurg";
+              license = with pkgs.lib.licenses; [ mit asl20 ];
+              mainProgram = "demiurg";
+            };
+          };
+        in {
+          default = demiurg;
+          demiurg = demiurg;
         });
 
-      formatter = forAllSystems ({ pkgs }: pkgs.nixpkgs-fmt);
+      apps = forAllSystems ({ pkgs, ... }: {
+        default = {
+          type = "app";
+          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/demiurg";
+        };
+      });
+
+      devShells = forAllSystems ({ pkgs, linuxRuntimeLibs, rustToolchain }: {
+        default = pkgs.mkShell {
+          packages = with pkgs; [
+            rustToolchain
+            pkg-config
+            # wasm32 needs an LLD-class linker; nixpkgs rustc doesn't
+            # bundle rust-lld, so provide the system one.
+            lld
+            # demiurg-web (M3) browser build: wasm-bindgen-cli emits the
+            # JS shim, trunk is the dev-server / bundler, Node runs the
+            # wasm test harness.
+            wasm-bindgen-cli
+            nodejs
+            trunk
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux linuxRuntimeLibs;
+
+          # mkShell only sets PATH / PKG_CONFIG_PATH; the dlopen'd render
+          # libs need an explicit search path. macOS skips this.
+          shellHook = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath linuxRuntimeLibs}:''${LD_LIBRARY_PATH:-}"
+          '';
+        };
+      });
+
+      formatter = forAllSystems ({ pkgs, ... }: pkgs.nixpkgs-fmt);
     };
 }

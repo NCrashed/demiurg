@@ -115,7 +115,14 @@ impl Project {
         // newer file is skipped, leaving that colour opaque).
         for (color, alpha, mode_tag) in self.materials {
             if let Some(mode) = BlendMode::from_u8(mode_tag) {
-                model.set_material(color, Material { alpha, mode });
+                model.set_material(
+                    color,
+                    Material {
+                        alpha,
+                        mode,
+                        ..Material::OPAQUE
+                    },
+                );
             }
         }
         Some(model)
@@ -232,7 +239,14 @@ impl ClipProject {
         let mut materials = BTreeMap::new();
         for (color, alpha, mode_tag) in self.materials {
             if let Some(mode) = BlendMode::from_u8(mode_tag) {
-                materials.insert(color, Material { alpha, mode });
+                materials.insert(
+                    color,
+                    Material {
+                        alpha,
+                        mode,
+                        ..Material::OPAQUE
+                    },
+                );
             }
         }
         Some(ClipDoc {

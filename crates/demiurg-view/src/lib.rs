@@ -33,6 +33,7 @@ pub use roxlap_render::Line3;
 use demiurg_core::VoxelModel;
 use glam::{DVec3, IVec3};
 use roxlap_formats::kv6::Kv6;
+use roxlap_formats::{Rgb, VoxColor};
 use roxlap_render::{Material, Sprite, SpriteInstanceDesc, SpriteSet};
 use roxlap_scene::{GridId, GridTransform, Scene};
 
@@ -169,7 +170,13 @@ impl ModelView {
         grid.chunks.remove(&IVec3::ZERO);
         let chunk = grid.ensure_chunk(IVec3::ZERO);
         for (x, y, z, col) in model.occupied() {
-            roxlap_formats::edit::set_cube(chunk, x as i32, y as i32, z as i32, Some(col));
+            roxlap_formats::edit::set_cube(
+                chunk,
+                x as i32,
+                y as i32,
+                z as i32,
+                Some(VoxColor(col)),
+            );
         }
         // `chunk_versions` survives the remove above, so this strictly
         // increases the version → `refresh_dirty` re-uploads the chunk.
@@ -288,6 +295,13 @@ impl ModelView {
             table.set(id, mat);
         }
         let materials = (!self.material_defs.is_empty()).then_some(&table);
+        // roxlap 0.23 keys colour→material maps by `Rgb` (0x00RRGGBB); our
+        // stored keys are already stripped to that packing.
+        let terrain_materials: Vec<(Rgb, u8)> = self
+            .material_map
+            .iter()
+            .map(|&(c, id)| (Rgb(c), id))
+            .collect();
         render_scene_composed_with_materials(
             &mut fb,
             &mut zb,
@@ -301,7 +315,11 @@ impl ModelView {
             sky_color,
             None,
             materials,
-            &self.material_map,
+            &terrain_materials,
+            // Editor `--shot` renders unlit (baked shade only); no dynamic
+            // light rig, no sprite-cast terrain shadows.
+            roxlap_core::CpuLights::default(),
+            None,
         );
 
         if flip_x {

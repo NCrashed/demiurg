@@ -32,7 +32,7 @@ const BUILD_INFO: &str = concat!(
 /// so panel axis labels match the gizmo.
 #[allow(clippy::cast_possible_truncation)] // channels masked to 0..=255
 fn axis_color(axis: usize) -> egui::Color32 {
-    let c = AXIS_COLORS[axis];
+    let c = AXIS_COLORS[axis].0;
     egui::Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
 
@@ -2139,7 +2139,11 @@ fn voxel_tools_panel(
                         if mode == BlendMode::Opaque {
                             Material::OPAQUE
                         } else {
-                            Material { alpha, mode }
+                            Material {
+                                alpha,
+                                mode,
+                                ..Material::OPAQUE
+                            }
                         },
                     ));
                 }

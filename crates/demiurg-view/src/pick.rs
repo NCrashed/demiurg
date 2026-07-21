@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use demiurg_core::VoxelModel;
 use glam::DVec3;
 use roxlap_core::Camera;
+use roxlap_formats::OverlayColor;
 use roxlap_render::Line3;
 
 /// A resolved voxel pick.
@@ -168,7 +169,11 @@ fn ray_box(o: [f64; 3], d: [f64; 3], dims: [f64; 3]) -> Option<(f64, f64, usize)
 
 /// Axis gizmo colours (`0xAARRGGBB`): X red, Y green, Z blue. Shared with
 /// the editor's tool panel so an artist maps panel axes to the viewport.
-pub const AXIS_COLORS: [u32; 3] = [0xffe0_5a5a, 0xff6e_c86e, 0xff6e_96eb];
+pub const AXIS_COLORS: [OverlayColor; 3] = [
+    OverlayColor(0xffe0_5a5a),
+    OverlayColor(0xff6e_c86e),
+    OverlayColor(0xff6e_96eb),
+];
 
 /// Corner indices of a unit/box wireframe: index `i = x | y<<1 | z<<2`.
 const BOX_EDGES: [(usize, usize); 12] = [
@@ -190,7 +195,7 @@ const BOX_EDGES: [(usize, usize); 12] = [
 fn box_lines(
     lo: [f64; 3],
     hi: [f64; 3],
-    color: u32,
+    color: OverlayColor,
     width_px: f32,
     depth_test: bool,
 ) -> Vec<Line3> {
@@ -235,7 +240,7 @@ const VOXEL_FACES: [([i32; 3], [[i32; 3]; 4]); 6] = [
 pub fn voxel_edge_lines_3d(
     model: &VoxelModel,
     pivot: [f32; 3],
-    color: u32,
+    color: OverlayColor,
     width_px: f32,
 ) -> Vec<Line3> {
     let pv = [
@@ -302,7 +307,7 @@ pub fn selection_lines_3d(pivot: [f32; 3], cells: &[[u32; 3]]) -> Vec<Line3> {
             f64::from(c[2]) - pv[2],
         ];
         let hi = [lo[0] + 1.0, lo[1] + 1.0, lo[2] + 1.0];
-        lines.extend(box_lines(lo, hi, 0xff19_e6e6, 1.5, false));
+        lines.extend(box_lines(lo, hi, OverlayColor(0xff19_e6e6), 1.5, false));
     }
     lines
 }
@@ -385,7 +390,7 @@ pub fn voxel_box_lines_3d(pivot: [f32; 3], cell: [i32; 3]) -> Vec<Line3> {
         f64::from(cell[2]) - pv[2],
     ];
     let hi = [lo[0] + 1.0, lo[1] + 1.0, lo[2] + 1.0];
-    box_lines(lo, hi, 0xffff_e600, 1.5, false)
+    box_lines(lo, hi, OverlayColor(0xffff_e600), 1.5, false)
 }
 
 /// The reference overlay as world-space `Line3`s: the volume bounding box,
@@ -401,7 +406,7 @@ pub fn reference_lines_3d(pivot: [f32; 3], dims: (u32, u32, u32)) -> Vec<Line3> 
     let (dx, dy, dz) = (f64::from(dims.0), f64::from(dims.1), f64::from(dims.2));
     // voxel-space -> world.
     let w = |p: [f64; 3]| [p[0] - pv[0], p[1] - pv[1], p[2] - pv[2]];
-    let line = |a: [f64; 3], b: [f64; 3], color: u32, width: f32| Line3 {
+    let line = |a: [f64; 3], b: [f64; 3], color: OverlayColor, width: f32| Line3 {
         a: w(a),
         b: w(b),
         color,
@@ -409,14 +414,20 @@ pub fn reference_lines_3d(pivot: [f32; 3], dims: (u32, u32, u32)) -> Vec<Line3> 
         depth_test: true,
     };
 
-    let mut lines = box_lines(w([0.0, 0.0, 0.0]), w([dx, dy, dz]), 0xc0c8_cdde, 1.0, true);
+    let mut lines = box_lines(
+        w([0.0, 0.0, 0.0]),
+        w([dx, dy, dz]),
+        OverlayColor(0xc0c8_cdde),
+        1.0,
+        true,
+    );
 
     // Floor grid on the max-z face (z is down → this is the bottom).
     for x in 0..=dims.0 {
         lines.push(line(
             [f64::from(x), 0.0, dz],
             [f64::from(x), dy, dz],
-            0x70a0_a8b8,
+            OverlayColor(0x70a0_a8b8),
             1.0,
         ));
     }
@@ -424,7 +435,7 @@ pub fn reference_lines_3d(pivot: [f32; 3], dims: (u32, u32, u32)) -> Vec<Line3> 
         lines.push(line(
             [0.0, f64::from(y), dz],
             [dx, f64::from(y), dz],
-            0x70a0_a8b8,
+            OverlayColor(0x70a0_a8b8),
             1.0,
         ));
     }
@@ -524,7 +535,7 @@ mod tests {
         // 12 unique edges (shared face edges deduplicated).
         let mut m = VoxelModel::new(4, 4, 4);
         m.set(1, 1, 1, 0x80ff_0000);
-        let edges = voxel_edge_lines_3d(&m, [0.0; 3], 0xffff_ffff, 1.0);
+        let edges = voxel_edge_lines_3d(&m, [0.0; 3], OverlayColor(0xffff_ffff), 1.0);
         assert_eq!(edges.len(), 12, "one voxel = 12 cube edges");
         assert!(edges.iter().all(|l| l.depth_test), "edges are depth-tested");
 
@@ -534,7 +545,7 @@ mod tests {
         let mut pair = VoxelModel::new(4, 4, 4);
         pair.set(1, 1, 1, 0x80ff_0000);
         pair.set(2, 1, 1, 0x8000_ff00);
-        let edges = voxel_edge_lines_3d(&pair, [0.0; 3], 0xffff_ffff, 1.0);
+        let edges = voxel_edge_lines_3d(&pair, [0.0; 3], OverlayColor(0xffff_ffff), 1.0);
         assert_eq!(edges.len(), 20, "shared face hidden, seam ring kept");
     }
 

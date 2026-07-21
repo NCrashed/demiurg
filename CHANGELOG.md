@@ -7,6 +7,22 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **Updated to roxlap 0.30** (from 0.17). Tracks the colour-newtype family
+  (`VoxColor` / `Rgb` / `OverlayColor`), the `#[non_exhaustive]` `FrameParams`
+  built via `FrameParams::new`, `RenderOptions.backend: BackendPreference`
+  (replacing `want_gpu`), the `emissive` field on `Material`, and the wider
+  `render_scene_composed_with_materials` signature (dynamic-light rig + sprite
+  occluder). No behavioural change to the editor; the new emissive/lighting
+  hooks are left at their defaults.
+
+### Added
+
+- **Nix package + app output.** `nix profile add .` (or `nix build` / `nix run`)
+  now installs the editor. The binary is wrapped with the runtime library path
+  the render backends dlopen, so it runs outside a dev shell.
+
 ## [0.11.0] - 2026-06-28
 
 Transparency: give voxels a blend mode and opacity, so models, clips, and

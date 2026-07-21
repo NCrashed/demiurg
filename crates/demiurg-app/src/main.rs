@@ -54,8 +54,8 @@ use demiurg_view::{
 use roxlap_core::kfa_draw::compose_attachment;
 use roxlap_core::opticast::OpticastSettings;
 use roxlap_render::{
-    DynSpriteTransform, FrameParams, ImageFacing, ImageId, ImageSprite, Material, RenderOptions,
-    SceneRenderer, SpriteInstanceId, SpriteSet, egui,
+    BackendPreference, DynSpriteTransform, FrameParams, ImageFacing, ImageId, ImageSprite,
+    Material, OverlayColor, RenderOptions, Rgb, SceneRenderer, SpriteInstanceId, SpriteSet, egui,
 };
 use ui::UiActions;
 use winit::application::ApplicationHandler;
@@ -91,11 +91,11 @@ const ONION_NEXT: u32 = 0x8060_3030;
 /// **light** grey. Light (not dark) so edges lift out of dark shadowed
 /// faces — where boundaries otherwise vanish — while staying subtle on
 /// already-readable lit faces.
-const VOXEL_EDGE_COLOR: u32 = 0x66d4_d8e0;
+const VOXEL_EDGE_COLOR: OverlayColor = OverlayColor(0x66d4_d8e0);
 /// Rotation-axis gizmo (Animate posing): an opaque orange line through the
 /// pivot, and a translucent orange ring in the rotation plane.
-const GIZMO_AXIS_COLOR: u32 = 0xffff_8c1a;
-const GIZMO_RING_COLOR: u32 = 0x99ff_8c1a;
+const GIZMO_AXIS_COLOR: OverlayColor = OverlayColor(0xffff_8c1a);
+const GIZMO_RING_COLOR: OverlayColor = OverlayColor(0x99ff_8c1a);
 /// Screen-pixel radius for grabbing the scale gizmo's centre (uniform) knob.
 const GIZMO_CENTER_PX: f64 = 16.0;
 /// How often a background autosave is written while there are unsaved
@@ -614,7 +614,7 @@ fn ring_lines(
     center: [f64; 3],
     normal: [f64; 3],
     r: f64,
-    color: u32,
+    color: OverlayColor,
     width: f32,
 ) {
     const SEG: usize = 32;
@@ -649,7 +649,7 @@ fn cube_lines(
     center: [f64; 3],
     axes: [[f64; 3]; 3],
     half: f64,
-    color: u32,
+    color: OverlayColor,
     width: f32,
 ) {
     const EDGES: [(usize, usize); 12] = [
@@ -684,6 +684,13 @@ fn cube_lines(
             depth_test: false,
         });
     }
+}
+
+/// roxlap 0.23 keys colour→material maps by [`Rgb`] (`0x00RRGGBB`); our stored
+/// keys are already that packing, so this just re-tags the tuples into the type
+/// the renderer's material APIs now take.
+fn rgb_material_map(map: &[(u32, u8)]) -> Vec<(Rgb, u8)> {
+    map.iter().map(|&(c, id)| (Rgb(c), id)).collect()
 }
 
 fn point_dist_2d(p: [f64; 2], a: [f64; 2]) -> f64 {
@@ -6165,19 +6172,14 @@ impl App {
             RenderMode::Voxel if self.editor.lighting => VOXEL_SIDE_SHADES,
             _ => [0; 6],
         };
-        let frame = FrameParams {
-            settings: &settings,
-            sky_color: SKY_COLOR,
-            sky: None,
-            fog_color: 0,
-            fog_max_scan_dist: 0,
-            treat_z_max_as_air: true,
-            gpu_mip_scan_dist: 64.0,
-            gpu_max_outer_steps: 64,
-            gpu_fov_y_rad: 1.2,
-            draw_sprites: true,
-            side_shades,
-        };
+        // roxlap 0.22 made `FrameParams` `#[non_exhaustive]`: build from
+        // `new(&settings)` and override. The GPU mip-scan / step-budget / FOV
+        // that used to live here are now derived from `settings` (or set on
+        // `RenderOptions`), so we only carry the sky, fog-off and side shades.
+        let mut frame = FrameParams::new(&settings);
+        frame.sky_color = Rgb(SKY_COLOR);
+        frame.fog_color = Rgb(0);
+        frame.side_shades = side_shades;
 
         // Advance the KFA rig's animation (and re-solve its bones) before
         // building gizmo lines, so the skeleton overlay tracks the pose.
@@ -6253,12 +6255,16 @@ impl App {
                 }
                 self.clip_player = match clip.to_voxel_clip().decode() {
                     Ok(decoded) => {
-                        let cid = renderer.add_voxel_clip_with_materials(&decoded, &map);
-                        let instance = renderer.add_clip_instance_posed(cid, CLIP_INSTANCE_XF);
-                        Some(ClipPlayer {
-                            instance,
-                            fingerprint: fp,
-                        })
+                        let cid = renderer
+                            .add_voxel_clip_with_materials(&decoded, &rgb_material_map(&map));
+                        // roxlap 0.22 (QE.1c) made spawn methods return `Option`
+                        // (the slot pool can be exhausted); no instance ⇒ no player.
+                        renderer
+                            .add_clip_instance_posed(cid, CLIP_INSTANCE_XF)
+                            .map(|instance| ClipPlayer {
+                                instance,
+                                fingerprint: fp,
+                            })
                     }
                     Err(_) => None,
                 };
@@ -6294,12 +6300,16 @@ impl App {
                 self.material_dirty = false;
             }
             match self.editor.render_mode {
-                RenderMode::Voxel => renderer.set_terrain_materials(self.view.material_map()),
+                RenderMode::Voxel => {
+                    renderer.set_terrain_materials(&rgb_material_map(self.view.material_map()));
+                }
                 RenderMode::Sprite => {
                     renderer.set_terrain_materials(&[]);
                     if let Some(kv6) = self.view.sprite_kv6() {
-                        let model =
-                            renderer.add_sprite_model_with_materials(kv6, self.view.material_map());
+                        let model = renderer.add_sprite_model_with_materials(
+                            kv6,
+                            &rgb_material_map(self.view.material_map()),
+                        );
                         renderer.add_sprite_instance(model, [0.0, 0.0, 0.0]);
                     }
                 }
@@ -6387,7 +6397,7 @@ impl App {
                         origin,
                         facing: ImageFacing::World { u, v },
                         size,
-                        tint: (alpha << 24) | 0x00FF_FFFF,
+                        tint: OverlayColor((alpha << 24) | 0x00FF_FFFF),
                         alpha_cutoff: 0.0, // blend all texels (current reference behaviour)
                         depth_test: true,
                         double_sided: true,
@@ -6600,11 +6610,18 @@ impl ApplicationHandler for App {
             std::env::var("ROXLAP_GPU").is_ok_and(|v| v == "1")
         };
         let mut opts = RenderOptions {
-            want_gpu,
+            // roxlap 0.22 (QE.7): `want_gpu: bool` became `backend:
+            // BackendPreference` — `PreferGpu` still falls back to CPU on
+            // WGPU init failure, matching the old `want_gpu: true`.
+            backend: if want_gpu {
+                BackendPreference::PreferGpu
+            } else {
+                BackendPreference::Cpu
+            },
             // The empty (sprite-only) scene's background comes from the
             // construction-time clear colour, so set it here too — not
             // just FrameParams.sky_color (which feeds sky-miss / GPU).
-            clear_sky: SKY_COLOR,
+            clear_sky: Rgb(SKY_COLOR),
             ..RenderOptions::default()
         };
         // Present uncapped (no forced vsync). The ~60 fps `about_to_wait`

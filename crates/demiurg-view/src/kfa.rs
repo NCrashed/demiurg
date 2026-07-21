@@ -10,6 +10,7 @@
 use demiurg_core::{Easing, Rig, RigBone, VoxelModel};
 use glam::DVec3;
 use roxlap_core::kfa_draw::solve_kfa_limbs;
+use roxlap_formats::OverlayColor;
 use roxlap_formats::character::{Clip, ClipData};
 use roxlap_formats::kfa::{Hinge, KfaSprite, Point3, Seq};
 use roxlap_formats::xform::BoneXform;
@@ -17,10 +18,10 @@ use roxlap_formats::xform::BoneXform;
 use crate::{Line3, OrbitCamera};
 
 /// Colour of the skeleton gizmo (always-on-top yellow, like the hover box).
-const BONE_COLOR: u32 = 0xffff_e600;
+const BONE_COLOR: OverlayColor = OverlayColor(0xffff_e600);
 /// Colour of the active (selected) bone in the gizmo — bright cyan, thicker,
 /// so the bone being posed stands out from the yellow skeleton.
-const ACTIVE_BONE_COLOR: u32 = 0xff00_e5ff;
+const ACTIVE_BONE_COLOR: OverlayColor = OverlayColor(0xff00_e5ff);
 
 /// A previewable KFA rig: the editable source [`Rig`] plus the live
 /// [`KfaSprite`]s built from it.
