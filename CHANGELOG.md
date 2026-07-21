@@ -7,6 +7,13 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-21
+
+Track roxlap 0.30 and make the editor installable with Nix. No new editor
+features - a dependency + packaging release. The editor renders and behaves
+exactly as 0.11.0; the new emissive / dynamic-light hooks roxlap 0.30 adds are
+left at their defaults.
+
 ### Changed
 
 - **Updated to roxlap 0.30** (from 0.17). Tracks the colour-newtype family
