@@ -58,7 +58,7 @@
 
           demiurg = rustPlatform.buildRustPackage {
             pname = "demiurg";
-            version = "0.12.0";
+            version = "0.12.1";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
 

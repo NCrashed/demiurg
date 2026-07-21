@@ -7,6 +7,21 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-07-21
+
+### Fixed
+
+- **GPU backend crashed on startup when the egui font atlas arrived late.**
+  `roxlap-gpu` skips egui work while no surface frame is pending, so the first
+  scene upload could discard the font-atlas allocation even though egui
+  considered it delivered; a later partial atlas update then panicked in
+  `egui-wgpu` because the texture no longer existed. The editor now retains one
+  up-to-date full image per egui texture and replays it before each partial
+  update, so the UI renders on the GPU backend (`ROXLAP_GPU=1`) regardless of
+  how long surface startup takes. Memory stays bounded to a single atlas copy
+  (partials are folded into the retained full instead of kept as history). The
+  CPU backend was unaffected.
+
 ## [0.12.0] - 2026-07-21
 
 Track roxlap 0.30 and make the editor installable with Nix. No new editor
