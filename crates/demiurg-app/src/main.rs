@@ -6888,7 +6888,11 @@ mod tests {
         let mut replay = EguiTextureReplay::default();
         let mut initial = delta(full());
         replay.prepare(&mut initial);
-        assert_eq!(initial.set.len(), 1, "the original full upload is unchanged");
+        assert_eq!(
+            initial.set.len(),
+            1,
+            "the original full upload is unchanged"
+        );
 
         let mut first = delta(partial());
         replay.prepare(&mut first);
