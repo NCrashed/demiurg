@@ -73,6 +73,11 @@
             # Tests want a display / GPU; the CI job runs them separately.
             doCheck = false;
 
+            # The pinned nightly rustc overflows its default stack in borrowck
+            # while compiling wayland-protocols under opt-level=3, crashing with
+            # SIGSEGV. Give the compiler a bigger stack (its own ICE hint).
+            RUST_MIN_STACK = "16777216";
+
             # The render libs are dlopen'd at runtime, so an rpath can't
             # reach them — wrap the binary with an explicit library search
             # path. macOS links Metal/Cocoa directly and needs no wrapper.
