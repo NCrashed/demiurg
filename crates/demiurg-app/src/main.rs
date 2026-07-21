@@ -36,7 +36,7 @@ mod ui;
 use reference::Reference;
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::Arc;
@@ -1510,6 +1510,7 @@ fn main() {
         // Animate toggle revives it.
         kfa: None,
         next_frame: Instant::now(),
+        egui_texture_replay: EguiTextureReplay::default(),
         clip_regen_due: None,
         material_dirty: true,
         material_id_ceiling: 0,
@@ -1641,6 +1642,77 @@ struct Keys {
     zoom_out: bool,
 }
 
+/// Retains egui texture uploads so a partial update can recreate its texture.
+///
+/// `roxlap-gpu` skips all egui work when no surface frame is pending. Its first
+/// scene upload can take that path, discarding the font atlas allocation even
+/// though egui considers it delivered. A later partial atlas update then makes
+/// `egui-wgpu` panic because the texture does not exist. Before each partial
+/// update, replaying that texture's full allocation guarantees it is present
+/// regardless of how long surface startup took.
+///
+/// Only a single, up-to-date full image is retained per texture: incoming
+/// partials are folded into it so the replay stays pixel-accurate. This keeps
+/// memory bounded to one atlas copy and the per-frame replay to one upload,
+/// even though the long-lived font atlas is never freed.
+#[derive(Default)]
+struct EguiTextureReplay {
+    full: HashMap<egui::TextureId, egui::epaint::ImageDelta>,
+}
+
+impl EguiTextureReplay {
+    fn prepare(&mut self, delta: &mut egui::TexturesDelta) {
+        let updates = std::mem::take(&mut delta.set);
+        let mut set = Vec::with_capacity(updates.len());
+        let mut ensured = HashSet::new();
+        for (id, image) in updates {
+            if image.pos.is_none() {
+                // A full upload is the complete texture; retain it verbatim.
+                self.full.insert(id, image.clone());
+                ensured.insert(id);
+            } else {
+                // Before the first partial of this frame, replay the retained
+                // full so the texture is guaranteed to exist on the backend.
+                if ensured.insert(id) {
+                    if let Some(full) = self.full.get(&id) {
+                        set.push((id, full.clone()));
+                    }
+                }
+                // Fold the patch into the retained full so a later replay
+                // reproduces every glyph, not just the original allocation.
+                if let Some(full) = self.full.get_mut(&id) {
+                    Self::merge_partial(full, &image);
+                }
+            }
+            set.push((id, image));
+        }
+        delta.set = set;
+        for id in &delta.free {
+            self.full.remove(id);
+        }
+    }
+
+    /// Composites a partial patch into the retained full image in place.
+    fn merge_partial(full: &mut egui::epaint::ImageDelta, patch: &egui::epaint::ImageDelta) {
+        let Some([px, py]) = patch.pos else { return };
+        let egui::epaint::ImageData::Color(patch_img) = &patch.image;
+        let egui::epaint::ImageData::Color(full_arc) = &mut full.image;
+        let full_img = Arc::make_mut(full_arc);
+        let [fw, fh] = full_img.size;
+        let [pw, ph] = patch_img.size;
+        for row in 0..ph {
+            let fy = py + row;
+            if fy >= fh {
+                break;
+            }
+            let cols = pw.min(fw.saturating_sub(px));
+            let dst = fy * fw + px;
+            let src = row * pw;
+            full_img.pixels[dst..dst + cols].copy_from_slice(&patch_img.pixels[src..src + cols]);
+        }
+    }
+}
+
 #[allow(clippy::struct_excessive_bools)] // independent input/UI flags, not a state enum
 struct App {
     window: Option<Arc<Window>>,
@@ -1716,6 +1788,8 @@ struct App {
     kfa: Option<KfaView>,
     /// When the next frame should render (drives the ~60 fps cap).
     next_frame: Instant,
+    /// Lets partial egui updates recreate textures missed by the GPU backend.
+    egui_texture_replay: EguiTextureReplay,
     /// When a debounced auto-generate of the procedural clip is due (set on a
     /// script/param edit while Auto is on; fired and cleared in `redraw`).
     clip_regen_due: Option<Instant>,
@@ -6102,7 +6176,8 @@ impl App {
             None
         };
         let overlays = ui::Overlays { marquee, hover };
-        let (jobs, textures, ppp, actions) = self.run_ui(&window, overlays);
+        let (jobs, mut textures, ppp, actions) = self.run_ui(&window, overlays);
+        self.egui_texture_replay.prepare(&mut textures);
         self.apply_actions(&actions);
         if actions.quit_confirm {
             self.do_exit(event_loop);
@@ -6797,6 +6872,142 @@ impl ApplicationHandler for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn egui_texture_replay_replays_full_before_partial_updates() {
+        let id = egui::TextureId::Managed(0);
+        let image = || egui::ColorImage::filled([1, 1], egui::Color32::WHITE);
+        let full = || egui::epaint::ImageDelta::full(image(), egui::TextureOptions::LINEAR);
+        let partial =
+            || egui::epaint::ImageDelta::partial([0, 0], image(), egui::TextureOptions::LINEAR);
+        let delta = |image| egui::TexturesDelta {
+            set: vec![(id, image)],
+            free: Vec::new(),
+        };
+
+        let mut replay = EguiTextureReplay::default();
+        let mut initial = delta(full());
+        replay.prepare(&mut initial);
+        assert_eq!(initial.set.len(), 1, "the original full upload is unchanged");
+
+        let mut first = delta(partial());
+        replay.prepare(&mut first);
+        assert_eq!(first.set.len(), 2, "the retained full is replayed first");
+        assert_eq!(first.set[0].1.pos, None, "full upload comes first");
+        assert_eq!(first.set[1].1.pos, Some([0, 0]));
+
+        let mut freed = egui::TexturesDelta {
+            set: Vec::new(),
+            free: vec![id],
+        };
+        replay.prepare(&mut freed);
+        let mut reused_without_full = delta(partial());
+        replay.prepare(&mut reused_without_full);
+        assert_eq!(
+            reused_without_full.set.len(),
+            1,
+            "free drops the retained full so nothing is replayed"
+        );
+    }
+
+    #[test]
+    fn egui_texture_replay_stays_bounded_across_many_partials() {
+        // Regression: the replay must retain a single merged full per texture,
+        // never a growing per-partial history. The long-lived font atlas is
+        // never freed, so an unbounded history would leak memory and turn each
+        // redraw into an O(n) re-upload storm.
+        let id = egui::TextureId::Managed(0);
+        let full = egui::epaint::ImageDelta::full(
+            egui::ColorImage::filled([4, 1], egui::Color32::WHITE),
+            egui::TextureOptions::LINEAR,
+        );
+        let mut replay = EguiTextureReplay::default();
+        let mut initial = egui::TexturesDelta {
+            set: vec![(id, full)],
+            free: Vec::new(),
+        };
+        replay.prepare(&mut initial);
+
+        for _ in 0..1000 {
+            let mut frame = egui::TexturesDelta {
+                set: vec![(
+                    id,
+                    egui::epaint::ImageDelta::partial(
+                        [0, 0],
+                        egui::ColorImage::filled([1, 1], egui::Color32::RED),
+                        egui::TextureOptions::LINEAR,
+                    ),
+                )],
+                free: Vec::new(),
+            };
+            replay.prepare(&mut frame);
+            // Exactly the replayed full plus the one incoming partial, forever.
+            assert_eq!(frame.set.len(), 2, "replay must not grow with partials");
+        }
+    }
+
+    #[test]
+    fn egui_texture_replay_merges_partial_pixels_into_full() {
+        // A replayed full must reproduce every glyph a partial painted, not just
+        // the original allocation, or a dropped texture would come back stale.
+        let id = egui::TextureId::Managed(0);
+        let opts = egui::TextureOptions::LINEAR;
+        let mut replay = EguiTextureReplay::default();
+
+        let mut initial = egui::TexturesDelta {
+            set: vec![(
+                id,
+                egui::epaint::ImageDelta::full(
+                    egui::ColorImage::filled([4, 1], egui::Color32::WHITE),
+                    opts,
+                ),
+            )],
+            free: Vec::new(),
+        };
+        replay.prepare(&mut initial);
+
+        // Paint a 2x1 red patch starting at x=1 -> [W, R, R, W].
+        let mut patched = egui::TexturesDelta {
+            set: vec![(
+                id,
+                egui::epaint::ImageDelta::partial(
+                    [1, 0],
+                    egui::ColorImage::filled([2, 1], egui::Color32::RED),
+                    opts,
+                ),
+            )],
+            free: Vec::new(),
+        };
+        replay.prepare(&mut patched);
+
+        // The next partial replays the retained full first; inspect its pixels.
+        let mut probe = egui::TexturesDelta {
+            set: vec![(
+                id,
+                egui::epaint::ImageDelta::partial(
+                    [0, 0],
+                    egui::ColorImage::filled([1, 1], egui::Color32::WHITE),
+                    opts,
+                ),
+            )],
+            free: Vec::new(),
+        };
+        replay.prepare(&mut probe);
+
+        let replayed_full = &probe.set[0].1;
+        assert_eq!(replayed_full.pos, None, "the full allocation is replayed");
+        let egui::epaint::ImageData::Color(img) = &replayed_full.image;
+        assert_eq!(
+            img.pixels,
+            vec![
+                egui::Color32::WHITE,
+                egui::Color32::RED,
+                egui::Color32::RED,
+                egui::Color32::WHITE,
+            ],
+            "the partial patch is folded into the retained full"
+        );
+    }
 
     #[test]
     fn rotate_cells_90_swaps_extents_and_reverses() {
