@@ -8,7 +8,6 @@ authors.workspace = true
 rust-version.workspace = true
 readme.workspace = true
 description = "demiurg native viewer/editor binary: winit window + roxlap render facade."
-publish = false
 
 [[bin]]
 name = "demiurg"
