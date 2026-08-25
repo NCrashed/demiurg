@@ -1,0 +1,61 @@
+{
+  "_comment": "Reference manifest: the shape a Blender exporter emits. A torso root with an arm that waves through a 1-second loop. Build and view it with: demiurg-convert two-bone-wave.json -o wave.demiurg && demiurg wave.demiurg --shot pose.png --clip wave --time 250. Three conventions it demonstrates: (1) +Z points DOWN (voxlap, not Blender) -- the head sits at low z and the arm hangs toward high z, so an exporter has to flip the height axis; (2) a bone's mesh pivot IS its joint, and a child's 'joint' is measured from the PARENT's pivot, not from the parent grid's corner; (3) the clip's four keys are hand-picked extremes, whereas a real exporter samples the F-curves per frame, because the engine interpolates linearly between keys.",
+
+  "format": "demiurg-rig",
+  "version": 1,
+  "name": "waver",
+  "root": [0.0, 0.0, 0.0],
+
+  "bones": [
+    {
+      "name": "torso",
+      "mesh": {
+        "dims": [5, 5, 10],
+        "pivot": [2.5, 2.5, 2.0],
+        "voxels": [
+          [1, 1, 0, "ddbb88"], [2, 1, 0, "ddbb88"], [3, 1, 0, "ddbb88"], [1, 2, 0, "ddbb88"], [2, 2, 0, "ddbb88"], [3, 2, 0, "ddbb88"], [1, 3, 0, "ddbb88"], [2, 3, 0, "ddbb88"], [3, 3, 0, "ddbb88"],
+          [1, 1, 1, "ddbb88"], [2, 1, 1, "ddbb88"], [3, 1, 1, "ddbb88"], [1, 2, 1, "ddbb88"], [2, 2, 1, "ddbb88"], [3, 2, 1, "ddbb88"], [1, 3, 1, "ddbb88"], [2, 3, 1, "ddbb88"], [3, 3, 1, "ddbb88"],
+          [1, 1, 2, "5577bb"], [2, 1, 2, "5577bb"], [3, 1, 2, "5577bb"], [1, 2, 2, "5577bb"], [2, 2, 2, "5577bb"], [3, 2, 2, "5577bb"], [1, 3, 2, "5577bb"], [2, 3, 2, "5577bb"], [3, 3, 2, "5577bb"],
+          [1, 1, 3, "5577bb"], [2, 1, 3, "5577bb"], [3, 1, 3, "5577bb"], [1, 2, 3, "5577bb"], [2, 2, 3, "5577bb"], [3, 2, 3, "5577bb"], [1, 3, 3, "5577bb"], [2, 3, 3, "5577bb"], [3, 3, 3, "5577bb"],
+          [1, 1, 4, "6688cc"], [2, 1, 4, "6688cc"], [3, 1, 4, "6688cc"], [1, 2, 4, "6688cc"], [2, 2, 4, "6688cc"], [3, 2, 4, "6688cc"], [1, 3, 4, "6688cc"], [2, 3, 4, "6688cc"], [3, 3, 4, "6688cc"],
+          [1, 1, 5, "6688cc"], [2, 1, 5, "6688cc"], [3, 1, 5, "6688cc"], [1, 2, 5, "6688cc"], [2, 2, 5, "6688cc"], [3, 2, 5, "6688cc"], [1, 3, 5, "6688cc"], [2, 3, 5, "6688cc"], [3, 3, 5, "6688cc"],
+          [1, 1, 6, "6688cc"], [2, 1, 6, "6688cc"], [3, 1, 6, "6688cc"], [1, 2, 6, "6688cc"], [2, 2, 6, "6688cc"], [3, 2, 6, "6688cc"], [1, 3, 6, "6688cc"], [2, 3, 6, "6688cc"], [3, 3, 6, "6688cc"],
+          [1, 1, 7, "6688cc"], [2, 1, 7, "6688cc"], [3, 1, 7, "6688cc"], [1, 2, 7, "6688cc"], [2, 2, 7, "6688cc"], [3, 2, 7, "6688cc"], [1, 3, 7, "6688cc"], [2, 3, 7, "6688cc"], [3, 3, 7, "6688cc"],
+          [1, 1, 8, "6688cc"], [2, 1, 8, "6688cc"], [3, 1, 8, "6688cc"], [1, 2, 8, "6688cc"], [2, 2, 8, "6688cc"], [3, 2, 8, "6688cc"], [1, 3, 8, "6688cc"], [2, 3, 8, "6688cc"], [3, 3, 8, "6688cc"],
+          [1, 1, 9, "6688cc"], [2, 1, 9, "6688cc"], [3, 1, 9, "6688cc"], [1, 2, 9, "6688cc"], [2, 2, 9, "6688cc"], [3, 2, 9, "6688cc"], [1, 3, 9, "6688cc"], [2, 3, 9, "6688cc"], [3, 3, 9, "6688cc"]
+        ]
+      }
+    },
+    {
+      "name": "arm",
+      "parent": "torso",
+      "joint": [1.5, 0.0, 1.0],
+      "mesh": {
+        "dims": [2, 2, 6],
+        "pivot": [1.0, 1.0, 0.0],
+        "voxels": [
+          [0, 0, 0, "cc8844"], [1, 0, 0, "cc8844"], [0, 1, 0, "cc8844"], [1, 1, 0, "cc8844"],
+          [0, 0, 1, "cc8844"], [1, 0, 1, "cc8844"], [0, 1, 1, "cc8844"], [1, 1, 1, "cc8844"],
+          [0, 0, 2, "cc8844"], [1, 0, 2, "cc8844"], [0, 1, 2, "cc8844"], [1, 1, 2, "cc8844"],
+          [0, 0, 3, "cc8844"], [1, 0, 3, "cc8844"], [0, 1, 3, "cc8844"], [1, 1, 3, "cc8844"],
+          [0, 0, 4, "cc8844"], [1, 0, 4, "cc8844"], [0, 1, 4, "cc8844"], [1, 1, 4, "cc8844"],
+          [0, 0, 5, "ddbb88"], [1, 0, 5, "ddbb88"], [0, 1, 5, "ddbb88"], [1, 1, 5, "ddbb88"]
+        ]
+      }
+    }
+  ],
+
+  "clips": [
+    {
+      "name": "wave",
+      "loop": true,
+      "length_ms": 1000,
+      "keys": [
+        { "t": 0,   "pose": { "arm": { "r": [0.0, 0.0, 0.0, 1.0] } } },
+        { "t": 250, "pose": { "arm": { "r": [0.3827, 0.0, 0.0, 0.9239] } } },
+        { "t": 500, "pose": { "arm": { "r": [0.0, 0.0, 0.0, 1.0] } } },
+        { "t": 750, "pose": { "arm": { "r": [-0.3827, 0.0, 0.0, 0.9239] } } }
+      ]
+    }
+  ]
+}

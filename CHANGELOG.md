@@ -7,6 +7,60 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- **A Blender addon** (`blender/`) that voxelizes an armature's per-bone meshes
+  and exports a `.demiurg` project. It writes only the JSON manifest and shells
+  out to `demiurg-convert`, so nothing about the wire formats is duplicated in
+  Python. Meshes are voxelized in armature space by nearest-surface queries
+  (surface plus, optionally, the interior), colours come from the Principled
+  BSDF converted linear → sRGB, and the height axis is flipped from Blender's
+  Z-up to voxlap's Z-down. Rest pose and geometry only: animation and skinned
+  meshes are not exported yet, and an armature-deformed mesh is reported rather
+  than silently mis-assigned to one bone. Tested headlessly against Blender —
+  scene build, export, extension install, and the operator itself.
+
+- **`demiurg-convert`: a JSON manifest to `.demiurg` / `.rkc`.** The bridge a
+  DCC exporter (the Blender addon) shells out to, so the wire formats stay
+  written in one language: the exporter emits JSON — per-bone voxel meshes
+  (inline or a `.vox` beside the manifest), the skeleton, and baked animation
+  clips — and this binary assembles the rig. Clip keys carry full TRS
+  (translation, quaternion, scale) per bone, which the `.rkc` clip format has
+  stored since roxlap 0.30, so a Blender action maps onto it directly once it
+  is baked to one whole-skeleton pose per key. Validation is the point of the
+  tool: duplicate bone names, parent cycles, out-of-bounds voxels, misspelled
+  fields, and poses on a root bone (which the solver silently ignores, because
+  a root takes the sprite's own basis) are all rejected by name instead of
+  exporting a subtly broken rig.
+
+- **`--shot` renders a posed rig**, picked with `--clip <name|index>` and
+  `--time <ms>`. It used to draw only the active bone's mesh, which for a
+  rigged document meant one lonely body part — useless for checking an
+  animation. The headless path now solves every limb at the playhead and draws
+  them all (`KfaView::render_cpu`), frames the camera on the rig, and logs
+  which clip and time it rendered. An unknown `--clip` lists the real ones
+  instead of quietly falling back to the rest pose. This is how a DCC
+  exporter's output gets compared against its source, frame by frame. The limb
+  path draws one mesh per bone: extra attachment layers, clip layers, and gizmo
+  lines belong to the windowed compose pass and are not in the shot.
+
+### Fixed
+
+- **A manifest's `joint` hung every limb off the wrong side of its parent.**
+  The solver places a child at `parent + (p[0] - p[1])`, so writing the joint
+  into the hinge anchor as-is mirrored it through the parent's pivot — an
+  exported arm ended up detached below the body instead of at the shoulder.
+  The converter negates it, keeping `joint` meaning what the schema says (where
+  the child's pivot lands, measured from the parent's), and a test now asserts
+  the *solved* offset rather than the field, since the sign reads perfectly
+  either way in the struct.
+
+- **A rig or clip `.demiurg` given on the command line failed to open.** The
+  startup path decoded projects as bare models only, so `demiurg hero.demiurg`
+  exited with "this `.demiurg` holds a rig, not a bare model" for exactly the
+  files File ▸ Open handled fine. The CLI now routes all three document kinds
+  the way the menu does, and also accepts a `.rvc` clip.
+
 ## [0.12.1] - 2026-07-21
 
 ### Fixed

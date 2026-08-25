@@ -113,8 +113,39 @@ pose it across keyframes, and export to roxlap's `.rkc` format.
 demiurg-core    document model, edit commands, undo/redo, format conversion (no UI)
 demiurg-i18n    UI message catalogue + translations (no_std, no deps)
 demiurg-view    viewport: roxlap SceneRenderer bridge, orbit camera, picking
+demiurg-convert `demiurg-convert` binary: JSON manifest -> .demiurg / .rkc
 demiurg-app     native binary (winit + egui over the roxlap framebuffer)
 ```
+
+## Importing from a DCC tool
+
+[`blender/`](./blender) is a Blender addon that voxelizes an armature's
+per-bone meshes and exports a `.demiurg` project — see its
+[README](./blender/README.md) for install and what the scene has to look like.
+
+It writes no binary formats itself. `demiurg-convert` builds a `.demiurg`
+project (or a `.rkc` character) from a JSON manifest, so an exporter never has
+to re-implement the wire formats — it writes JSON and shells out, the way
+Voxelity Pro calls `vengi-voxconvert`:
+
+```sh
+demiurg-convert hero.json -o hero.demiurg   # or -o hero.rkc
+demiurg hero.demiurg                        # open what it built
+```
+
+Check the result frame by frame without opening a window — this renders the
+whole posed skeleton, so an exported animation can be compared against its
+source in the DCC tool:
+
+```sh
+demiurg hero.demiurg --shot pose.png --clip walk --time 250
+```
+
+The manifest carries per-bone voxel meshes (inline, or a `.vox` beside it), the
+skeleton, and baked animation clips — one full-skeleton pose per keyframe, since
+that is what the clip format stores. See
+[`crates/demiurg-convert/examples/two-bone-wave.json`](./crates/demiurg-convert/examples/two-bone-wave.json)
+for a complete one and the crate docs for the schema.
 
 ## Formats
 

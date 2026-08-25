@@ -1,0 +1,38 @@
+[package]
+name = "demiurg-convert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "JSON-manifest to .demiurg/.rkc converter — the bridge a Blender (or other DCC) exporter shells out to."
+
+[[bin]]
+name = "demiurg-convert"
+path = "src/main.rs"
+
+[dependencies]
+# Inherited with default features (so the version pin stays in one place on
+# release). The Rhai generator rides along unused — this binary only writes
+# documents, never runs a procedural script — but the workspace builds it for
+# demiurg-app anyway, so it costs nothing here.
+demiurg-core.workspace = true
+# The hinge / bone-transform types a rig is assembled from.
+roxlap-formats.workspace = true
+serde.workspace = true
+# The exchange manifest is JSON: a Python exporter writes it with the stdlib,
+# no extra dependency on the Blender side.
+serde_json = "1"
+
+[dev-dependencies]
+# The limb solver, so a test can assert where a bone actually ENDS UP rather
+# than what went into its hinge — the anchor's sign is the kind of thing that
+# reads fine in the struct and hangs the arm off the wrong side on screen.
+roxlap-core.workspace = true
+
+[lints]
+workspace = true

@@ -30,10 +30,11 @@ cd "$(dirname "$0")/.."
 # in-workspace dependencies — a new crate goes AFTER everything it
 # depends on. `demiurg-app` ships the `demiurg` binary.
 ORDER=(
-    demiurg-core # (no demiurg dependencies)
-    demiurg-i18n # (no demiurg dependencies)
-    demiurg-view # core
-    demiurg-app  # core, i18n, view  (the `demiurg` editor binary)
+    demiurg-core    # (no demiurg dependencies)
+    demiurg-i18n    # (no demiurg dependencies)
+    demiurg-view    # core
+    demiurg-convert # core             (the `demiurg-convert` DCC bridge)
+    demiurg-app     # core, i18n, view (the `demiurg` editor binary)
 )
 
 version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)".*/\1/')

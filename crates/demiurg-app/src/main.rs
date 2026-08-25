@@ -1339,7 +1339,7 @@ fn main() {
     // that value mistaken for the file path.
     const VALUE_FLAGS: &[&str] = &[
         "--shot", "--cx", "--cy", "--cz", "--yaw", "--pitch", "--dist", "--width", "--height",
-        "--anginc",
+        "--anginc", "--clip", "--time",
     ];
     let arg = {
         let mut found = None;
@@ -1368,7 +1368,7 @@ fn main() {
         .as_deref()
         .filter(|p| p.to_ascii_lowercase().ends_with(".rkc"))
         .map(str::to_string);
-    let startup_rig: Option<Rig> = if let Some(p) = &rkc_arg {
+    let mut startup_rig: Option<Rig> = if let Some(p) = &rkc_arg {
         match std::fs::read(p).map(|b| Rig::from_rkc_bytes(&b)) {
             Ok(Ok(rig)) if !rig.bones.is_empty() => Some(rig),
             Ok(Ok(_)) => {
@@ -1390,6 +1390,9 @@ fn main() {
         None
     };
 
+    // A clip argument can only be installed once the `App` exists (entering a
+    // clip touches the view and camera), so it waits here.
+    let mut startup_clip: Option<ClipDoc> = None;
     let (model, project_path, doc_name, recovered) = if let Some(rig) = &startup_rig {
         // Rig mode starts editing the first bone's mesh.
         let name = rkc_arg.as_deref().and_then(|p| stem_of(Path::new(p)));
@@ -1397,8 +1400,27 @@ fn main() {
     } else if rkc_arg.is_some() {
         (new_model(), None, None, false) // .rkc given but failed to load
     } else if let Some(p) = &arg {
-        let proj = p.ends_with(".demiurg").then(|| PathBuf::from(p));
-        (load_any(p), proj, stem_of(Path::new(p)), false)
+        let proj = p
+            .to_ascii_lowercase()
+            .ends_with(".demiurg")
+            .then(|| PathBuf::from(p));
+        // A `.demiurg` holds a model, a rig, or a clip — open whichever it is,
+        // the way File ▸ Open does (`App::open_path`). Anything else is a
+        // model import.
+        let model = match load_any(p) {
+            project::Loaded::Model(m) => m,
+            project::Loaded::Rig(rig) => {
+                let m = rig.bones[0].model.clone();
+                startup_rig = Some(rig);
+                m
+            }
+            project::Loaded::Clip(clip) => {
+                let m = clip.frames[0].model.clone();
+                startup_clip = Some(clip);
+                m
+            }
+        };
+        (model, proj, stem_of(Path::new(p)), false)
     } else if let Some(m) = recover_autosave(&autosave) {
         eprintln!(
             "demiurg: recovered unsaved work from {}",
@@ -1414,12 +1436,34 @@ fn main() {
     let mut camera = view.framing_camera();
 
     // Headless screenshot mode: `--shot <out.png>` renders the loaded
-    // model on the CPU from the given camera and exits (no window). The
+    // document on the CPU from the given camera and exits (no window). The
     // camera overrides mirror the in-app `P`-key dump exactly, so a bad
     // angle found in the GUI can be reproduced here verbatim:
     //   --cx/--cy/--cz (look-at), --yaw/--pitch (radians), --dist,
     //   --width/--height (default 900x700), --no-flip (disable the X flip).
+    // A rigged document renders the whole posed skeleton, picked by
+    // `--clip <name|index>` and `--time <ms>` — that's what makes a DCC
+    // exporter's animation checkable frame by frame against its source.
     if let Some(path) = flag_str("--shot") {
+        let mut rig_shot = startup_rig.as_ref().map(|rig| {
+            let clip = shot_clip(rig);
+            #[allow(clippy::cast_possible_truncation)]
+            let t = flag_f64("--time").map_or(0i32, |v| v as i32);
+            // Say what was rendered: a shot of the wrong clip (or of the rest
+            // pose, when `--clip` was forgotten) otherwise looks like a bad export.
+            let what = clip.map_or_else(
+                || "rest pose".to_string(),
+                |i| format!("clip {:?} at {t} ms", rig.clips[i].name),
+            );
+            eprintln!("demiurg: shot rig: {what}, {} bones", rig.bones.len());
+            let mut kfa = KfaView::from_rig(rig.clone(), clip);
+            kfa.set_time(t);
+            kfa
+        });
+        // Frame on the rig, not on the active bone's mesh alone.
+        if let Some(kfa) = &rig_shot {
+            camera = kfa.framing_camera();
+        }
         if let Some(v) = flag_f64("--cx") {
             camera.center.x = v;
         }
@@ -1456,7 +1500,10 @@ fn main() {
             w,
             h
         );
-        let fb = view.render_cpu(&camera, w, h, VOXEL_SIDE_SHADES, SKY_COLOR, flip, anginc);
+        let fb = match &mut rig_shot {
+            Some(kfa) => kfa.render_cpu(&camera, w, h, SKY_COLOR, flip, anginc),
+            None => view.render_cpu(&camera, w, h, VOXEL_SIDE_SHADES, SKY_COLOR, flip, anginc),
+        };
         save_png(&path, &fb, w, h);
         return;
     }
@@ -1516,33 +1563,80 @@ fn main() {
         material_id_ceiling: 0,
         clip_player: None,
     };
+    // Entering a clip re-frames the camera and rebuilds the view, so it can
+    // only run once the `App` owns them — same call File ▸ Open makes.
+    if let Some(clip) = startup_clip {
+        app.enter_clip(clip);
+    }
 
     let event_loop = EventLoop::new().expect("winit: create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).expect("winit: run_app");
 }
 
-/// Load a `.kv6`, `.vox`, or `.demiurg` by extension, or exit with a
-/// message.
-fn load_any(path: &str) -> VoxelModel {
+/// The clip a `--shot` renders: `--clip <name|index>`, or `None` (the rest
+/// pose) when the flag is absent. An index is tried first, so a clip named
+/// `"0"` needs its index. An unknown clip exits with the list of real ones —
+/// quietly falling back to the rest pose would read as a broken animation
+/// export, which is exactly what this flag exists to rule out.
+fn shot_clip(rig: &Rig) -> Option<usize> {
+    let want = flag_str("--clip")?;
+    if let Ok(i) = want.parse::<usize>()
+        && i < rig.clips.len()
+    {
+        return Some(i);
+    }
+    if let Some(i) = rig.clips.iter().position(|c| c.name == want) {
+        return Some(i);
+    }
+    let names: Vec<&str> = rig.clips.iter().map(|c| c.name.as_str()).collect();
+    if names.is_empty() {
+        eprintln!("demiurg: --clip {want:?}: this rig has no clips");
+    } else {
+        eprintln!(
+            "demiurg: --clip {want:?}: no such clip (have: {})",
+            names.join(", ")
+        );
+    }
+    exit(2);
+}
+
+/// Load a `.demiurg`, `.rvc`, `.kv6`, or `.vox` by extension, or exit with a
+/// message. A project decodes to whichever document it holds — the caller
+/// routes a rig / clip into the matching editor mode, as File ▸ Open does.
+fn load_any(path: &str) -> project::Loaded {
     let bytes = std::fs::read(path).unwrap_or_else(|e| {
         eprintln!("demiurg: cannot read {path}: {e}");
         exit(2);
     });
-    let is_vox = Path::new(path)
+    let ext = Path::new(path)
         .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("vox"));
-    let model = if path.ends_with(".demiurg") {
-        project::from_bytes_model(&bytes).map_err(|e| e.to_string())
-    } else if is_vox {
-        VoxelModel::from_vox_bytes(&bytes).map_err(|e| e.to_string())
-    } else {
-        VoxelModel::from_kv6_bytes(&bytes).map_err(|e| e.to_string())
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let doc = match ext.as_str() {
+        "demiurg" => project::from_bytes(&bytes).map_err(|e| e.to_string()),
+        "rvc" => ClipDoc::from_rvc_bytes(&bytes)
+            .map(project::Loaded::Clip)
+            .map_err(|e| e.to_string()),
+        "vox" => VoxelModel::from_vox_bytes(&bytes)
+            .map(project::Loaded::Model)
+            .map_err(|e| e.to_string()),
+        _ => VoxelModel::from_kv6_bytes(&bytes)
+            .map(project::Loaded::Model)
+            .map_err(|e| e.to_string()),
     };
-    model.unwrap_or_else(|e| {
+    match doc.unwrap_or_else(|e| {
         eprintln!("demiurg: {path}: {e}");
         exit(2);
-    })
+    }) {
+        // An empty rig would panic the `bones[0]` the caller starts editing.
+        project::Loaded::Rig(rig) if rig.bones.is_empty() => {
+            eprintln!("demiurg: {path}: character has no bones");
+            exit(2);
+        }
+        doc => doc,
+    }
 }
 
 /// A blank canvas with a single seed voxel at the centre, so the place

@@ -1,0 +1,18 @@
+schema_version = "1.0.0"
+
+id = "demiurg_export"
+version = "0.1.0"
+name = "demiurg rig export"
+tagline = "Voxelize an armature and export a demiurg project"
+maintainer = "Anton Gushcha <ncrashed@gmail.com>"
+type = "add-on"
+website = "https://github.com/NCrashed/demiurg"
+tags = ["Import-Export"]
+
+license = ["SPDX:MIT"]
+blender_version_min = "4.2.0"
+
+# The addon shells out to the `demiurg-convert` binary, which writes the
+# project file — see the addon preferences for where it lives.
+[permissions]
+files = "Run demiurg-convert to write the exported project"

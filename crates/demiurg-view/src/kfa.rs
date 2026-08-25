@@ -205,6 +205,77 @@ impl KfaView {
         }
         lines
     }
+
+    /// Headless CPU render of the **posed rig** to a packed `0x00RRGGBB`
+    /// framebuffer (row-major, `width x height`) — the rig counterpart of
+    /// [`ModelView::render_cpu`](crate::ModelView::render_cpu), for offscreen
+    /// screenshots with no window.
+    ///
+    /// Re-poses at the current playhead first (see [`Self::set_time`]), then
+    /// draws every solved limb, so the result is the skeleton as posed — not
+    /// one bone's mesh. `flip_x` mirrors the result to match the viewport's
+    /// "Flip X" correction.
+    ///
+    /// A window-bound `SceneRenderer` isn't available here, so this draws the
+    /// limb sprites directly. That means the limb path only: one mesh per bone
+    /// (its primary), and no gizmo lines, terrain grid, or extra attachment
+    /// layers — those are composed by the host's render pass.
+    #[must_use]
+    pub fn render_cpu(
+        &mut self,
+        camera: &OrbitCamera,
+        width: u32,
+        height: u32,
+        sky_color: u32,
+        flip_x: bool,
+        anginc: f32,
+    ) -> Vec<u32> {
+        use roxlap_core::OpticastSettings;
+        use roxlap_core::camera_math;
+        use roxlap_core::dda_sprite::draw_sprite_dda;
+
+        // Resolve the pose at the playhead without moving it, and solve every
+        // limb's world transform from it.
+        self.advance(0);
+
+        let mut settings = OpticastSettings::for_oracle_framebuffer(width, height);
+        settings.anginc = anginc.max(0.05);
+        // The sprite path takes the derived per-frame camera, built from the
+        // same pinhole the terrain raycaster uses, so both agree on depth.
+        let cam = camera_math::derive(
+            &camera.to_roxlap(),
+            width,
+            height,
+            settings.hx,
+            settings.hy,
+            settings.hz,
+        );
+
+        let pixels = (width as usize) * (height as usize);
+        let mut fb = vec![sky_color; pixels];
+        let mut zb = vec![f32::INFINITY; pixels];
+        for k in &self.kfas {
+            for limb in &k.limbs {
+                let _ = draw_sprite_dda(
+                    &mut fb,
+                    &mut zb,
+                    width as usize,
+                    width,
+                    height,
+                    &cam,
+                    &settings,
+                    limb,
+                );
+            }
+        }
+
+        if flip_x {
+            for row in fb.chunks_mut(width as usize) {
+                row.reverse();
+            }
+        }
+        fb
+    }
 }
 
 /// Resolve clip `clip`'s pose at time `t` with `easing` applied to the active
@@ -491,5 +562,56 @@ mod tests {
             .collect();
         assert_eq!(angles[0], 0, "root untouched");
         assert!((i32::from(angles[1]) - 16000).abs() <= 1, "arm at frame 1");
+    }
+
+    /// Count pixels whose dominant channel is red / green. The demo rig's
+    /// bones are a green body and a red arm, so this says which limbs drew —
+    /// robust to the per-face shading exact colours aren't.
+    fn limb_pixels(fb: &[u32]) -> (usize, usize) {
+        let mut red = 0;
+        let mut green = 0;
+        for px in fb {
+            let (r, g, b) = ((px >> 16) & 0xff, (px >> 8) & 0xff, px & 0xff);
+            if r > g && r > b {
+                red += 1;
+            } else if g > r && g > b {
+                green += 1;
+            }
+        }
+        (red, green)
+    }
+
+    #[test]
+    fn the_headless_render_draws_every_limb_posed() {
+        // The bug this guards: `--shot` used to render the active bone's mesh
+        // alone, so an exported rig looked like one lonely body part.
+        let mut view = KfaView::from_rig(demo_rig(), Some(0));
+        let cam = view.framing_camera();
+        let sky = 0x0020_3040;
+        let fb = view.render_cpu(&cam, 200, 200, sky, false, 1.0);
+
+        assert_eq!(fb.len(), 200 * 200);
+        let (red, green) = limb_pixels(&fb);
+        assert!(green > 0, "the body limb drew");
+        assert!(red > 0, "the arm limb drew too, not just bone 0");
+    }
+
+    #[test]
+    fn the_headless_render_follows_the_playhead() {
+        let mut view = KfaView::from_rig(demo_rig(), Some(0));
+        let cam = view.framing_camera();
+        let sky = 0x0020_3040;
+        let shot = |view: &mut KfaView, t: i32| {
+            view.set_time(t);
+            view.render_cpu(&cam, 160, 160, sky, false, 1.0)
+        };
+        // The demo clip swings the arm between frame 0 and frame 1, so the two
+        // framebuffers must differ — that is the whole point of `--time`.
+        let a = shot(&mut view, 0);
+        let b = shot(&mut view, 500);
+        assert_ne!(a, b, "the pose at t=500 must not match the pose at t=0");
+        // ...and seeking back reproduces the first frame exactly (the render
+        // re-poses from the playhead rather than accumulating).
+        assert_eq!(a, shot(&mut view, 0));
     }
 }

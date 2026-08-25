@@ -3,6 +3,7 @@ members = [
     "crates/demiurg-core",
     "crates/demiurg-i18n",
     "crates/demiurg-view",
+    "crates/demiurg-convert",
     "crates/demiurg-app",
 ]
 resolver = "3"
