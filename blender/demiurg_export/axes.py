@@ -6,10 +6,9 @@ a scale by `voxels_per_unit` plus a flip of the height axis — the same flip
 `demiurg-core` applies when it imports a `.vox`
 (`crates/demiurg-core/src/vox.rs`).
 
-Flipping one axis reverses chirality, which matters the moment rotations are
-exported: a rotation carried across the flip comes back negated about the
-flipped axis. Nothing here exports rotations yet (rest pose only); when clips
-arrive, a quaternion `(x, y, z, w)` converts as `(-x, -y, z, w)`.
+Flipping one axis reverses chirality, so a rotation carried across it comes
+back negated: mirroring turns a rotation by `θ` about `a` into one by `-θ`
+about the mirrored `a`. [`quat_to_voxels`] is where that lands.
 
 Pure — no `bpy`, no `mathutils`. Points are any indexable of three floats
 (`mathutils.Vector` included).
@@ -69,6 +68,21 @@ def voxel_center(origin, i, j, k):
     """Voxel-space centre of grid cell `(i, j, k)` — cells are unit cubes, so
     the centre is half a voxel past the corner."""
     return (origin[0] + i + 0.5, origin[1] + j + 0.5, origin[2] + k + 0.5)
+
+
+def quat_to_voxels(q):
+    """A Blender quaternion, `(w, x, y, z)`, as the manifest's `[x, y, z, w]`.
+
+    Two changes at once, both easy to miss: Blender puts the scalar **first**
+    and the manifest puts it **last**, and the height flip mirrors the
+    rotation. A mirror maps a rotation by `θ` about `a` to one by `-θ` about
+    the mirrored axis; writing `q = (sin(θ/2)·a, cos(θ/2))` and mirroring z,
+    that is `(-x, -y, z, w)`. Get either half wrong and the animation plays
+    backwards, or mirrored, or both — which looks like a rigging mistake
+    rather than an axis one.
+    """
+    w, x, y, z = q
+    return [-x, -y, z, w]
 
 
 def from_voxels(p, voxels_per_unit):

@@ -108,6 +108,81 @@ fn a_joint_puts_the_child_where_the_manifest_says() {
     }
 }
 
+/// Solve `rig`'s clip 0 at `t` ms and return each bone's world position.
+fn solved_positions(rig: &demiurg_core::Rig, clip: Option<usize>, t: i32) -> Vec<[f32; 3]> {
+    let mut sprite = rig.to_character().to_kfa_sprite(clip);
+    sprite.kfatim = t;
+    sprite.animsprite(0);
+    roxlap_core::kfa_draw::solve_kfa_limbs(&mut sprite);
+    sprite.limbs.iter().map(|l| l.p).collect()
+}
+
+#[test]
+fn a_rotation_spins_the_bone_about_its_own_joint() {
+    // The solver puts a bone at `t + r · anchor`, so a raw rotation swings its
+    // head around the PARENT's pivot — a quarter turn would fling this bone
+    // from (0, 0, 10) to (0, -10, 0), detaching the limb. The converter
+    // cancels that arc, so the head stays put and only the mesh turns, which
+    // is what every DCC means by rotating a bone.
+    let json = r#"{
+      "format": "demiurg-rig", "version": 1,
+      "bones": [
+        { "name": "root", "mesh": { "dims": [1, 1, 1], "pivot": [0.0, 0.0, 0.0],
+                                    "voxels": [[0, 0, 0, "ffffff"]] } },
+        { "name": "child", "parent": "root", "joint": [0.0, 0.0, 10.0],
+          "mesh": { "dims": [1, 1, 1], "pivot": [0.0, 0.0, 0.0],
+                    "voxels": [[0, 0, 0, "ffffff"]] } }
+      ],
+      "clips": [ { "name": "turn", "length_ms": 1000, "keys": [
+        { "t": 0, "pose": { "child": { "r": [0.70710678, 0.0, 0.0, 0.70710678] } } } ] } ]
+    }"#;
+    let rig = load_rig(json);
+    let posed = solved_positions(&rig, Some(0), 0);
+    let offset = [
+        posed[1][0] - posed[0][0],
+        posed[1][1] - posed[0][1],
+        posed[1][2] - posed[0][2],
+    ];
+    for (got, want) in offset.iter().zip([0.0_f32, 0.0, 10.0]) {
+        assert!(
+            (got - want).abs() < 1e-3,
+            "a rotated bone stays at its joint; got {offset:?}"
+        );
+    }
+    // The mesh really did turn: the basis is not the rest one.
+    let rest = solved_positions(&rig, None, 0);
+    assert!(
+        (rest[1][2] - 10.0).abs() < 1e-3,
+        "rest pose sits at the joint too"
+    );
+}
+
+#[test]
+fn a_translation_key_moves_the_bone_from_its_joint() {
+    // With the arc cancelled, `t` has to stay a plain offset from the joint.
+    let json = r#"{
+      "format": "demiurg-rig", "version": 1,
+      "bones": [
+        { "name": "root", "mesh": { "dims": [1, 1, 1], "pivot": [0.0, 0.0, 0.0],
+                                    "voxels": [[0, 0, 0, "ffffff"]] } },
+        { "name": "child", "parent": "root", "joint": [0.0, 0.0, 10.0],
+          "mesh": { "dims": [1, 1, 1], "pivot": [0.0, 0.0, 0.0],
+                    "voxels": [[0, 0, 0, "ffffff"]] } }
+      ],
+      "clips": [ { "name": "slide", "length_ms": 1000, "keys": [
+        { "t": 0, "pose": { "child": { "t": [3.0, 0.0, 0.0] } } } ] } ]
+    }"#;
+    let posed = solved_positions(&load_rig(json), Some(0), 0);
+    let offset = [
+        posed[1][0] - posed[0][0],
+        posed[1][1] - posed[0][1],
+        posed[1][2] - posed[0][2],
+    ];
+    for (got, want) in offset.iter().zip([3.0_f32, 0.0, 10.0]) {
+        assert!((got - want).abs() < 1e-3, "joint + t; got {offset:?}");
+    }
+}
+
 #[test]
 fn a_child_bone_comes_out_animatable() {
     let rig = load_rig(&two_bone_rig());
@@ -137,6 +212,10 @@ fn clip_keys_land_at_their_times_with_the_pose_intact() {
     let half_sqrt2 = std::f32::consts::FRAC_1_SQRT_2;
     assert!((arm.r.z - half_sqrt2).abs() < 1e-6);
     assert!((arm.r.w - half_sqrt2).abs() < 1e-6);
+    // `t` is not a pass-through — the stored value carries the arc-cancelling
+    // term (see `a_rotation_spins_the_bone_about_its_own_joint`). This key
+    // turns about +Z, which leaves the joint's z alone, so the z component is
+    // still the manifest's own.
     assert!((arm.t[2] - 1.0).abs() < 1e-6);
     // An omitted bone is posed to rest — whole-skeleton keys, not deltas.
     assert_eq!(keys[1].xforms[0], demiurg_core::KeyXform::IDENTITY);

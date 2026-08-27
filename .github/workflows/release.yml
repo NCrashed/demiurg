@@ -1,17 +1,21 @@
 name: Release
 
-# Tagging `vX.Y.Z` cuts a release: build the Windows binary and publish a
-# GitHub release whose notes are the matching CHANGELOG.md section.
+# Tagging `vX.Y.Z` cuts a release: the editor binary, the Blender addon built
+# for every platform an artist might be on, and notes from CHANGELOG.md.
+#
+# `workflow_dispatch` builds the same addon zip without cutting a release —
+# what to use when an artist needs a build off the current master.
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:
 
 permissions:
-  contents: write # create the release and upload the binary
+  contents: write # create the release and upload its files
 
 jobs:
-  windows:
-    name: Windows binary + release
+  editor:
+    name: Editor binary (Windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,16 +32,153 @@ jobs:
         shell: bash
         run: cargo build --release -p demiurg-app
 
-      - name: Package binary
-        id: package
+      - name: Name the asset
         shell: bash
         run: |
-          asset="demiurg-${GITHUB_REF_NAME}-windows-x64.exe"
-          cp target/release/demiurg.exe "$asset"
-          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          # A dispatch run has no tag; name it after the commit instead.
+          name="${GITHUB_REF_NAME}"
+          case "$GITHUB_REF" in refs/tags/*) ;; *) name="${GITHUB_SHA::7}" ;; esac
+          cp target/release/demiurg.exe "demiurg-${name}-windows-x64.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: editor-windows
+          path: demiurg-*-windows-x64.exe
+          if-no-files-found: error
+
+  converter:
+    # The binary the Blender addon shells out to, one per platform an artist
+    # might install on. Built natively rather than cross-compiled, so each is
+    # linked by its own platform's toolchain.
+    name: Converter (${{ matrix.tag }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # An older image on purpose: the binary links against the runner's
+          # glibc, and building on the newest Ubuntu would refuse to start on
+          # an artist's older distro.
+          - { os: ubuntu-22.04, tag: linux-x86_64, target: x86_64-unknown-linux-gnu }
+          # `crt-static` folds in the MSVC runtime, so the .exe needs no
+          # redistributable installed — an artist should not have to chase a
+          # "vcruntime140.dll is missing" dialog.
+          - { os: windows-latest, tag: windows-x86_64, target: x86_64-pc-windows-msvc,
+              rustflags: "-C target-feature=+crt-static" }
+          - { os: macos-latest, tag: macos-arm64, target: aarch64-apple-darwin }
+          # Intel Macs, cross-compiled from the arm64 runner (the macOS SDK
+          # carries both slices), so this needs no Intel runner of its own.
+          - { os: macos-latest, tag: macos-x86_64, target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        shell: bash
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.tag }}
+
+      - name: Build
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build --release -p demiurg-convert --target ${{ matrix.target }}
+
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir -p out
+          src="target/${{ matrix.target }}/release/demiurg-convert"
+          # `[ -f x ] && y` as the last command would fail the step under
+          # `set -e` on every non-Windows runner.
+          if [ -f "$src.exe" ]; then
+            src="$src.exe"
+          fi
+          cp "$src" out/
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: converter-${{ matrix.tag }}
+          path: out/*
+          if-no-files-found: error
+
+  addon:
+    name: Blender addon zip
+    needs: converter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: converter-*
+          path: converters
+
+      # Every converter goes into one zip, under the folder name the addon
+      # computes at runtime (`bundle.platform_tag`), so a single file installs
+      # on any of them. `--no-host-build` because the binaries are already
+      # built — this job only assembles.
+      - name: Package
+        run: |
+          args=()
+          for dir in converters/converter-*; do
+            tag="${dir#converters/converter-}"
+            binary=$(find "$dir" -type f | head -1)
+            [ -n "$binary" ] || { echo "no binary in $dir" >&2; exit 1; }
+            args+=(--with-bin "$tag=$binary")
+          done
+          echo "bundling: ${args[*]}"
+          scripts/package-blender-addon.sh --no-host-build "${args[@]}"
+
+      # A structural check rather than installing Blender to run its validator:
+      # what actually breaks a release zip is a missing manifest, a missing
+      # binary for someone's platform, or a Python file that won't import.
+      - name: Check the zip
+        run: |
+          zip=$(ls dist/*.zip)
+          unzip -o -q "$zip" -d check
+          test -f check/demiurg_export/blender_manifest.toml
+          test -f check/demiurg_export/__init__.py
+          python3 -m compileall -q check/demiurg_export
+          for tag in linux-x86_64 windows-x86_64 macos-arm64 macos-x86_64; do
+            found=$(find "check/demiurg_export/bin/$tag" -type f 2>/dev/null | head -1)
+            [ -n "$found" ] || { echo "no converter for $tag in $zip" >&2; exit 1; }
+            echo "  $tag: $(basename "$found")"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blender-addon
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    # Only a tag cuts a release; a dispatch run stops at the artifacts above.
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [editor, addon]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Named explicitly rather than by pattern: the converter artifacts are
+      # build inputs, not release assets, and must not end up attached.
+      - uses: actions/download-artifact@v4
+        with:
+          name: editor-windows
+          path: release
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: blender-addon
+          path: release
 
       - name: Extract release notes from CHANGELOG
-        shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
           awk -v ver="$version" '
@@ -54,5 +195,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body_path: release-notes.md
-          files: ${{ steps.package.outputs.asset }}
+          files: release/*
           fail_on_unmatched_files: true

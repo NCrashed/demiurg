@@ -7,5 +7,9 @@
 [toolchain]
 channel = "nightly-2026-04-15"
 components = ["rustc", "cargo", "rust-src", "rustfmt", "clippy", "rust-analyzer"]
-targets = ["wasm32-unknown-unknown"]
+# `x86_64-pc-windows-gnu` builds the `demiurg-convert` binary that ships inside
+# the Blender addon for artists on Windows (scripts/package-blender-addon.sh
+# --cross windows). It needs the mingw-w64 linker, which the devShell provides;
+# nothing else in the workspace targets Windows.
+targets = ["wasm32-unknown-unknown", "x86_64-pc-windows-gnu"]
 profile = "minimal"

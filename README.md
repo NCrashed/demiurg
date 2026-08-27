@@ -119,8 +119,9 @@ demiurg-app     native binary (winit + egui over the roxlap framebuffer)
 
 ## Importing from a DCC tool
 
-[`blender/`](./blender) is a Blender addon that voxelizes an armature's
-per-bone meshes and exports a `.demiurg` project — see its
+[`blender/`](./blender) is a Blender addon that voxelizes an armature — meshes
+parented to bones, or one skinned mesh cut into rigid per-bone chunks — and
+exports a `.demiurg` project with its actions baked into clips. See its
 [README](./blender/README.md) for install and what the scene has to look like.
 
 It writes no binary formats itself. `demiurg-convert` builds a `.demiurg`

@@ -157,11 +157,14 @@ pub struct KeySpec {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct XformSpec {
-    /// Translation in voxel units, added to the bone's joint anchor.
+    /// Translation from the bone's joint, in voxel units, in the parent's
+    /// frame. The bone's head ends up at `joint + t` whatever `r` is.
     #[serde(default)]
     pub t: [f32; 3],
     /// Rotation quaternion as `[x, y, z, w]` — scalar **last**, matching
-    /// neither of Blender's orderings, so the exporter must reorder.
+    /// neither of Blender's orderings, so the exporter must reorder. It spins
+    /// the bone about its own joint (the converter cancels the arc the engine
+    /// would otherwise swing the head through).
     #[serde(default = "default_quat")]
     pub r: [f32; 4],
     /// Non-uniform scale along the bone's local axes.

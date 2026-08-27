@@ -37,14 +37,18 @@ def bvh_nearest(verts, tris):
     return tree.find_nearest
 
 
-def voxelize(nearest, origin, dims, voxels_per_unit, tri_colors, solid=True):
+def voxelize(nearest, origin, dims, voxels_per_unit, tri_values, solid=True, default=None):
     """Fill a `dims` grid at `origin` (voxel space) by asking `nearest` about
     each voxel centre.
 
-    `tri_colors` maps a triangle index to its `"rrggbb"`. Returns
-    `{(i, j, k): "rrggbb"}` for the filled voxels only — the manifest carries a
-    sparse list, and a bone's grid is mostly empty.
+    `tri_values` maps a triangle index to whatever the caller wants recorded
+    for a voxel the triangle claims — a `"rrggbb"` for a plain mesh, or a
+    `(colour, bone)` pair when a skinned mesh is being cut into per-bone
+    chunks. Returns `{(i, j, k): value}` for the filled voxels only; the
+    manifest carries a sparse list and a bone's grid is mostly empty.
     """
+    if default is None:
+        default = DEFAULT_COLOR
     # The query works in Blender units, where a voxel is `1 / voxels_per_unit`
     # across.
     reach = _REACH / voxels_per_unit
@@ -58,7 +62,7 @@ def voxelize(nearest, origin, dims, voxels_per_unit, tri_colors, solid=True):
                     continue
                 if distance > reach and not (solid and _is_behind(center, location, normal)):
                     continue
-                out[(i, j, k)] = tri_colors.get(index, "cccccc")
+                out[(i, j, k)] = tri_values.get(index, default)
     return out
 
 

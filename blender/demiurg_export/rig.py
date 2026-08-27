@@ -59,7 +59,39 @@ def joint_offset(child_head_vox, parent_head_vox):
     return tuple(child_head_vox[i] - parent_head_vox[i] for i in range(3))
 
 
-def rig_manifest(name, bones, comment=None):
+def xform_entry(translation=None, rotation=None, scale=None, places=5):
+    """A bone's transform at a keyframe, with anything at its default left
+    out — a bone that only turns writes `{"r": [...]}`. Rounded, because five
+    decimals of a voxel is far past what the renderer can show and full f64
+    noise would make every re-export a diff."""
+    entry = {}
+    if translation is not None and any(abs(c) > 1e-6 for c in translation):
+        entry["t"] = [round(float(c), places) for c in translation]
+    if rotation is not None and abs(abs(float(rotation[3])) - 1.0) > 1e-6:
+        entry["r"] = [round(float(c), places) for c in rotation]
+    if scale is not None and any(abs(float(c) - 1.0) > 1e-6 for c in scale):
+        entry["s"] = [round(float(c), places) for c in scale]
+    return entry
+
+
+def key_entry(time_ms, pose):
+    """One keyframe. `pose` maps bone name to [`xform_entry`]; bones left out
+    are at rest, which is what the format stores anyway (whole-skeleton poses,
+    not per-bone deltas)."""
+    return {"t": int(time_ms), "pose": pose}
+
+
+def clip_entry(name, keys, length_ms, loops=True):
+    """One animation clip."""
+    return {
+        "name": name,
+        "loop": bool(loops),
+        "length_ms": int(length_ms),
+        "keys": keys,
+    }
+
+
+def rig_manifest(name, bones, clips=None, comment=None):
     """The whole document: a `demiurg-rig` manifest around `bones`."""
     doc = {
         "format": FORMAT_RIG,
@@ -68,6 +100,8 @@ def rig_manifest(name, bones, comment=None):
         "root": [0.0, 0.0, 0.0],
         "bones": bones,
     }
+    if clips:
+        doc["clips"] = clips
     if comment:
         doc["_comment"] = comment
     return doc

@@ -14,7 +14,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from demiurg_export import axes, rig, voxelize  # noqa: E402
+from demiurg_export import axes, bundle, rig, skin, voxelize  # noqa: E402
 
 
 class TestAxes(unittest.TestCase):
@@ -52,6 +52,26 @@ class TestAxes(unittest.TestCase):
 
     def test_bounds_of_empty(self):
         self.assertIsNone(axes.bounds_of([]))
+
+    def test_quaternion_reorders_and_mirrors(self):
+        # Blender is (w, x, y, z); the manifest is [x, y, z, w].
+        self.assertEqual(axes.quat_to_voxels((1.0, 0.0, 0.0, 0.0)), [0.0, 0.0, 0.0, 1.0])
+        # The height flip mirrors the rotation: the components about the two
+        # unflipped axes change sign, the one about z does not.
+        self.assertEqual(axes.quat_to_voxels((0.5, 0.1, 0.2, 0.3)), [-0.1, -0.2, 0.3, 0.5])
+
+    def test_a_turn_about_the_height_axis_survives_the_flip(self):
+        # Mirroring negates a rotation's angle, so a turn about z has to come
+        # back as the same turn — otherwise every yaw plays backwards. Rotating
+        # +x by 90 degrees about +z gives +y in Blender; in demiurg, where z
+        # points the other way, the same visual turn takes +x to -y.
+        from math import cos, sin, radians
+
+        half = radians(90) / 2
+        x, y, z, w = axes.quat_to_voxels((cos(half), 0.0, 0.0, sin(half)))
+        self.assertAlmostEqual(z, sin(half))
+        self.assertAlmostEqual(w, cos(half))
+        self.assertEqual((x, y), (0.0, -0.0))
 
 
 def plane_at_z(z_blender):
@@ -162,11 +182,163 @@ class TestRig(unittest.TestCase):
         parents = {"a": "b", "b": "a"}
         self.assertEqual(sorted(rig.sorted_bones(["a", "b"], parents.get)), ["a", "b"])
 
+    def test_a_key_only_carries_what_moved(self):
+        # A bone that only turns writes `{"r": ...}`. Emitting all three every
+        # time would triple a baked clip's JSON for nothing — the converter
+        # fills the rest with the identity.
+        self.assertEqual(rig.xform_entry((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)), {})
+        self.assertEqual(
+            rig.xform_entry((0.0, 0.0, 0.0), (0.5, 0.0, 0.0, 0.866_025), (1.0, 1.0, 1.0)),
+            {"r": [0.5, 0.0, 0.0, 0.86603]},
+        )
+        self.assertEqual(
+            rig.xform_entry((1.234_567_8, 0.0, 0.0), None, None), {"t": [1.23457, 0.0, 0.0]}
+        )
+        self.assertEqual(rig.xform_entry(None, None, (2.0, 1.0, 1.0)), {"s": [2.0, 1.0, 1.0]})
+
+    def test_a_negated_quaternion_is_still_the_identity(self):
+        # `-q` and `q` are the same rotation, so a rest bone keyed as either
+        # must drop out of the pose.
+        self.assertEqual(rig.xform_entry(None, (0.0, 0.0, 0.0, -1.0), None), {})
+
+    def test_a_clip_carries_its_length_and_loop(self):
+        keys = [rig.key_entry(0, {}), rig.key_entry(500, {"arm": {"r": [0.0, 0.0, 0.0, 1.0]}})]
+        clip = rig.clip_entry("wave", keys, 1000, loops=True)
+        self.assertEqual(clip["name"], "wave")
+        self.assertEqual(clip["length_ms"], 1000)
+        self.assertIs(clip["loop"], True)
+        self.assertEqual(len(clip["keys"]), 2)
+
     def test_a_root_bone_carries_no_parent_key(self):
         entry = rig.bone_entry("torso", None, (0.0, 0.0, 0.0))
         self.assertNotIn("parent", entry)
         self.assertNotIn("mesh", entry)
         self.assertIn("parent", rig.bone_entry("arm", "torso", (1.0, 0.0, 0.0)))
+
+
+class Group:
+    def __init__(self, group, weight):
+        self.group = group
+        self.weight = weight
+
+
+class Vertex:
+    def __init__(self, *groups):
+        self.groups = [Group(g, w) for g, w in groups]
+
+
+class Triangle:
+    def __init__(self, *vertices):
+        self.vertices = vertices
+
+
+class FakeMesh:
+    def __init__(self, vertices, triangles):
+        self.vertices = vertices
+        self.loop_triangles = triangles
+
+
+class FakeObject:
+    def __init__(self, group_names):
+        self.vertex_groups = [type("G", (), {"name": n})() for n in group_names]
+
+
+class TestSkin(unittest.TestCase):
+    def test_the_heaviest_bone_wins(self):
+        self.assertEqual(skin.dominant_bone({"arm": 0.7, "torso": 0.3}), "arm")
+        self.assertIsNone(skin.dominant_bone({}))
+        self.assertIsNone(skin.dominant_bone({"arm": 0.0}))
+
+    def test_a_tie_resolves_the_same_way_every_time(self):
+        # Otherwise re-exporting an unchanged scene could hand a boundary voxel
+        # to a different bone and produce a different file.
+        self.assertEqual(skin.dominant_bone({"b": 0.5, "a": 0.5}), "a")
+        self.assertEqual(skin.dominant_bone({"a": 0.5, "b": 0.5}), "a")
+
+    def test_only_groups_that_name_a_bone_count(self):
+        # Vertex groups are also used for masks, modifiers, and shape keys; one
+        # named "outline" must not become a bone.
+        vertex = Vertex((0, 0.6), (1, 0.4), (2, 0.9))
+        weights = skin.vertex_weights(vertex, {0: "arm", 1: "torso"})
+        self.assertEqual(weights, {"arm": 0.6, "torso": 0.4})
+
+    def test_a_triangle_goes_to_the_bone_holding_most_of_it(self):
+        # Two corners lean torso, one leans arm — summing beats voting, because
+        # a triangle straddling a joint belongs where its area is.
+        mesh = FakeMesh(
+            [
+                Vertex((0, 0.9), (1, 0.1)),
+                Vertex((0, 0.8), (1, 0.2)),
+                Vertex((0, 0.1), (1, 0.9)),
+            ],
+            [Triangle(0, 1, 2)],
+        )
+        obj = FakeObject(["torso", "arm"])
+        self.assertEqual(skin.triangle_bones(mesh, obj, {"torso", "arm"}), {0: "torso"})
+
+    def test_unweighted_triangles_are_left_for_the_caller(self):
+        mesh = FakeMesh([Vertex(), Vertex(), Vertex()], [Triangle(0, 1, 2)])
+        self.assertEqual(skin.triangle_bones(mesh, FakeObject(["torso"]), {"torso"}), {})
+
+    def test_indices_can_be_offset_for_a_merged_soup(self):
+        mesh = FakeMesh([Vertex((0, 1.0))] * 3, [Triangle(0, 1, 2)])
+        obj = FakeObject(["torso"])
+        self.assertEqual(skin.triangle_bones(mesh, obj, {"torso"}, base=7), {7: "torso"})
+
+    def test_a_mesh_with_no_bone_groups_claims_nothing(self):
+        mesh = FakeMesh([Vertex((0, 1.0))] * 3, [Triangle(0, 1, 2)])
+        self.assertEqual(skin.triangle_bones(mesh, FakeObject(["mask"]), {"torso"}), {})
+
+    def test_orphan_voxels_go_to_the_closest_bone(self):
+        heads = {"torso": (0.0, 0.0, 0.0), "arm": (10.0, 0.0, 0.0)}
+        self.assertEqual(skin.nearest_bone((1.0, 0.0, 0.0), heads), "torso")
+        self.assertEqual(skin.nearest_bone((9.0, 1.0, 0.0), heads), "arm")
+        self.assertIsNone(skin.nearest_bone((0.0, 0.0, 0.0), {}))
+
+
+class TestBundle(unittest.TestCase):
+    """Which bundled binary this machine picks.
+
+    Worth testing every branch from one machine: whoever builds a release zip
+    is rarely on the same OS as whoever installs it, so a wrong folder name
+    would only ever surface as "demiurg-convert not found" on someone else's
+    computer.
+    """
+
+    def test_platform_folder_names(self):
+        self.assertEqual(bundle.platform_tag("linux", "x86_64"), "linux-x86_64")
+        self.assertEqual(bundle.platform_tag("win32", "AMD64"), "windows-x86_64")
+        self.assertEqual(bundle.platform_tag("darwin", "arm64"), "macos-arm64")
+        self.assertEqual(bundle.platform_tag("darwin", "x86_64"), "macos-x86_64")
+        # Linux reports aarch64 where macOS says arm64; both are one folder.
+        self.assertEqual(bundle.platform_tag("linux", "aarch64"), "linux-arm64")
+        # An unknown platform still yields a usable name rather than blowing up
+        # — it just won't match a folder, and the addon falls back to PATH.
+        self.assertEqual(bundle.platform_tag("freebsd14", "riscv64"), "linux-riscv64")
+
+    def test_the_binary_is_exe_only_on_windows(self):
+        self.assertEqual(bundle.converter_name("win32"), "demiurg-convert.exe")
+        self.assertEqual(bundle.converter_name("linux"), "demiurg-convert")
+        self.assertEqual(bundle.converter_name("darwin"), "demiurg-convert")
+
+    def test_no_bundle_is_not_an_error(self):
+        # A repo checkout has no `bin/`; the addon must fall through to the
+        # preferences path or PATH rather than fail.
+        self.assertIsNone(bundle.bundled_converter(root="/nonexistent"))
+
+    def test_a_bundled_binary_is_found_and_made_executable(self):
+        import stat
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as root:
+            binary = os.path.join(root, "bin", bundle.platform_tag(), bundle.converter_name())
+            os.makedirs(os.path.dirname(binary))
+            with open(binary, "w", encoding="utf-8") as f:
+                f.write("#!/bin/sh\n")
+            os.chmod(binary, 0o644)  # as some unzip routes leave it
+            found = bundle.bundled_converter(root=root)
+            self.assertEqual(found, binary)
+            self.assertTrue(os.stat(found).st_mode & stat.S_IXUSR, "restored the executable bit")
 
 
 if __name__ == "__main__":

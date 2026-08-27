@@ -1435,6 +1435,42 @@ fn main() {
     let mut view = ModelView::new(&model, DEFAULT_RENDER_MODE);
     let mut camera = view.framing_camera();
 
+    // Pose dump: `--dump-pose` prints where the solver actually puts each bone
+    // at `--clip` / `--time`, one line per bone, and exits. A screenshot shows
+    // that an exported animation looks wrong; this says by how much and which
+    // bone — the numbers are directly comparable with what the DCC tool
+    // reports for the same frame.
+    if has_flag("--dump-pose") {
+        let Some(rig) = &startup_rig else {
+            eprintln!("demiurg: --dump-pose needs a rigged document (.rkc or a rig .demiurg)");
+            exit(2);
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let t = flag_f64("--time").map_or(0i32, |v| v as i32);
+        let clip = shot_clip(rig);
+        let mut kfa = KfaView::from_rig(rig.clone(), clip);
+        kfa.set_time(t);
+        kfa.advance(0); // resolve the pose at the playhead and solve the limbs
+        println!("# bone\tx\ty\tz\tbasis (s, h, f)");
+        for (i, bone) in rig.bones.iter().enumerate() {
+            let Some((p, basis)) = kfa.limb_pose(i) else {
+                continue;
+            };
+            let axis = |v: [f32; 3]| format!("{:.4},{:.4},{:.4}", v[0], v[1], v[2]);
+            println!(
+                "{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}",
+                bone.name,
+                p[0],
+                p[1],
+                p[2],
+                axis(basis[0]),
+                axis(basis[1]),
+                axis(basis[2])
+            );
+        }
+        return;
+    }
+
     // Headless screenshot mode: `--shot <out.png>` renders the loaded
     // document on the CPU from the given camera and exits (no window). The
     // camera overrides mirror the in-app `P`-key dump exactly, so a bad

@@ -31,3 +31,11 @@ jobs:
 
       - name: Test
         run: nix develop --command cargo test --workspace
+
+      # The Blender addon's logic that doesn't need Blender — coordinate
+      # conversion, grid layout, weight segmentation, and which bundled binary
+      # a platform picks. No bpy, no third-party packages, about a second.
+      # (The Blender-side tests live in blender/tests/headless_*.py and need a
+      # Blender install; run those locally.)
+      - name: Blender addon tests
+        run: python3 blender/tests/test_pure.py

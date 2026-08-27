@@ -13,6 +13,10 @@
 //!   rotation is a free quaternion, not a hinge angle.
 //! * The hinge range is opened to the full `i16` span, because the editor
 //!   treats `vmin == vmax` as a locked (unposeable) bone.
+//! * Two sign / frame conventions are translated so the manifest can mean what
+//!   an exporter expects: the hinge anchor is the **negation** of `joint`, and
+//!   a keyframe's `t` absorbs the arc the solver would otherwise swing the
+//!   bone's head through when `r` turns. Both are documented at their code.
 //! * **Root bones cannot be animated.** `solve_kfa_limbs` gives a bone with
 //!   `parent < 0` the sprite's own basis and ignores its keyframe entirely, so
 //!   a non-identity root pose would silently do nothing — the converter
@@ -286,15 +290,29 @@ fn add_clip(
                     clip: spec.name.clone(),
                     bone: bone.clone(),
                 })?;
+            let r = Quat {
+                x: x.r[0],
+                y: x.r[1],
+                z: x.r[2],
+                w: x.r[3],
+            }
+            .normalize();
+            // The solver puts the bone at `t + r · anchor`, so a rotation
+            // drags the bone's head around its PARENT's pivot on an arc of
+            // radius `joint` — a shoulder rotation would walk the arm off the
+            // body. Every DCC (and every animator) means "spin about my own
+            // joint", so cancel the arc: with `t += joint - r · joint` the
+            // head stays at `joint + t` whatever `r` does, and `r` is left as
+            // a pure rotation about it.
+            let joint = neg(pt_arr(rig.bones[i].hinge.p[1]));
+            let swung = r.rotate(joint);
             let xform = BoneXform {
-                t: x.t,
-                r: Quat {
-                    x: x.r[0],
-                    y: x.r[1],
-                    z: x.r[2],
-                    w: x.r[3],
-                }
-                .normalize(),
+                t: [
+                    x.t[0] + joint[0] - swung[0],
+                    x.t[1] + joint[1] - swung[1],
+                    x.t[2] + joint[2] - swung[2],
+                ],
+                r,
                 s: x.s,
             };
             if rig.bones[i].hinge.parent < 0 && !is_identity(&xform) {
@@ -451,6 +469,11 @@ fn is_identity(x: &BoneXform) -> bool {
 /// Componentwise negation.
 fn neg(v: [f32; 3]) -> [f32; 3] {
     [-v[0], -v[1], -v[2]]
+}
+
+/// The engine's point type → `[f32; 3]`.
+fn pt_arr(p: Point3) -> [f32; 3] {
+    [p.x, p.y, p.z]
 }
 
 /// `[f32; 3]` → the engine's point type.

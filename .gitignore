@@ -6,8 +6,13 @@ Cargo.lock.bak
 # the user's own asset dirs, not the repo; ignore any stray exports.
 *.demiurg.bak
 
-# wasm dist output (trunk).
+# Build output: the wasm bundle (trunk) and the packaged Blender addon.
 /dist
+
+# Python bytecode from the Blender addon (Blender writes it next to the
+# sources on import, and the tests do too).
+__pycache__/
+*.pyc
 
 # `nix build` result symlink.
 /result

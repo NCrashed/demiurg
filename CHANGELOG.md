@@ -10,15 +10,50 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 ### Added
 
 - **A Blender addon** (`blender/`) that voxelizes an armature's per-bone meshes
-  and exports a `.demiurg` project. It writes only the JSON manifest and shells
-  out to `demiurg-convert`, so nothing about the wire formats is duplicated in
-  Python. Meshes are voxelized in armature space by nearest-surface queries
-  (surface plus, optionally, the interior), colours come from the Principled
-  BSDF converted linear → sRGB, and the height axis is flipped from Blender's
-  Z-up to voxlap's Z-down. Rest pose and geometry only: animation and skinned
-  meshes are not exported yet, and an armature-deformed mesh is reported rather
-  than silently mis-assigned to one bone. Tested headlessly against Blender —
-  scene build, export, extension install, and the operator itself.
+  and exports a `.demiurg` project, animation included. It writes only the JSON
+  manifest and shells out to `demiurg-convert`, so nothing about the wire
+  formats is duplicated in Python. Meshes are voxelized in armature space by
+  nearest-surface queries (surface plus, optionally, the interior), colours come
+  from the Principled BSDF converted linear → sRGB, and the height axis is
+  flipped from Blender's Z-up to voxlap's Z-down. Actions are baked one key per
+  frame by stepping the scene and reading each bone's evaluated matrix — the
+  clip format stores whole-skeleton poses interpolated linearly, so curves have
+  to be sampled, and sampling also means constraints, drivers, and whatever an
+  action stores internally all arrive evaluated. A mesh bound with an armature
+  modifier is cut into rigid per-bone chunks — the engine draws a bone as one
+  sprite, so a voxel cannot be shared, and each goes to the bone weighing most
+  on the triangle nearest to it (unweighted geometry to the closest bone,
+  reported rather than dropped). The cut is rigid by nature: a joint that bends
+  far shows a seam, which the README says plainly. Verified against Blender
+  numerically — every bone on every frame of a baked clip lands within 0.0001
+  voxels of where Blender puts it, and a smoothly weighted column comes apart
+  at the joint with every voxel kept.
+
+- **The release workflow builds the Blender addon for every platform.** Four
+  jobs compile `demiurg-convert` natively — Linux, Windows, and both Mac
+  architectures — and a packaging job folds them into one zip that installs
+  anywhere. Tagging attaches it to the GitHub release alongside the editor
+  binary; `workflow_dispatch` builds the same zip off any branch as a run
+  artifact, for when an artist needs current master rather than a release. The
+  zip is checked before upload: manifest present, Python compiles, and a
+  converter for each of the four platforms. CI also runs the addon's
+  Blender-free tests on every push.
+
+- **`scripts/package-blender-addon.sh`** builds a single zip an artist installs
+  and uses — the `demiurg-convert` binary rides inside the addon under
+  `bin/<platform>/`, so there is no second download and no path to set. The
+  addon prefers an explicit path from its preferences (a developer's own
+  build), then the bundled binary, then `PATH`, and says which one it will run.
+  `--cross windows` cross-compiles a Windows converter from Linux (mingw-w64
+  linker, everything static, so the `.exe` imports only system DLLs and needs
+  no redistributable); other platforms fold in with `--with-bin`, and one zip
+  can carry several. The `x86_64-pc-windows-gnu` target is pinned in
+  `rust-toolchain.toml` for it.
+
+- **`--dump-pose`** prints where the solver puts each bone (position + basis)
+  at a given `--clip` / `--time`, one line per bone. A screenshot says an
+  exported animation looks wrong; this says which bone is off and by how much,
+  which is what makes `blender/tests/compare_poses.py` possible.
 
 - **`demiurg-convert`: a JSON manifest to `.demiurg` / `.rkc`.** The bridge a
   DCC exporter (the Blender addon) shells out to, so the wire formats stay
@@ -45,6 +80,14 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
   lines belong to the windowed compose pass and are not in the shot.
 
 ### Fixed
+
+- **A keyframe rotation swung a bone's head around its parent's pivot** instead
+  of turning the bone in place: the solver puts a bone at `t + r · anchor`, so
+  rotating a shoulder walked the whole arm along an arc of radius `joint` and
+  off the body. The converter now cancels that arc, so `r` means what every DCC
+  tool (and every animator) means by rotating a bone — spin about its own
+  joint — and `t` stays a plain offset from it. Asserted through the real
+  solver, since the difference is invisible in the stored values.
 
 - **A manifest's `joint` hung every limb off the wrong side of its parent.**
   The solver places a child at `parent + (p[0] - p[1])`, so writing the joint
