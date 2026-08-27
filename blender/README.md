@@ -32,12 +32,15 @@ bundled one, then to `PATH`.
 
 ## Giving it to an artist
 
-**From CI**, for a zip covering every platform. Tagging `vX.Y.Z` attaches it to
-the GitHub release; the *Release* workflow's **Run workflow** button builds the
-same zip off any branch and leaves it as a run artifact, which is what to use
-when someone needs a build of current master. Each converter is compiled on its
-own runner — Linux, Windows, and both Mac architectures — so nothing is
+**From CI**, for a zip covering every platform. Each converter is compiled on
+its own runner — Linux, Windows, and both Mac architectures — so nothing is
 cross-compiled and nothing is missing.
+
+| Where | What you get |
+| --- | --- |
+| Tag `vX.Y.Z` | Attached to the GitHub release, its version stamped from the tag |
+| *Blender addon* workflow ▸ **Run workflow** | The same zip off any branch, as a run artifact |
+| Any push or PR touching the addon | Built and checked, so a broken package fails the PR rather than the release |
 
 **Locally**, when you want it now and know who it's for:
 

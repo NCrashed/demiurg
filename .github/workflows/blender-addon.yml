@@ -1,0 +1,165 @@
+name: Blender addon
+
+# Builds the addon zip: `demiurg-convert` compiled natively for every platform
+# an artist might install on, folded into one file.
+#
+# Runs on its own whenever something that goes into the zip changes, so a
+# broken package surfaces in the pull request that broke it rather than at
+# release time. `workflow_call` lets the release pipeline reuse this exact
+# definition instead of keeping a second copy in step with it, and
+# `workflow_dispatch` builds a zip off any branch — what to use when an artist
+# needs current master rather than a release.
+# The two path lists are duplicated on purpose: GitHub's workflow parser does
+# not reliably support YAML anchors, and a workflow that fails to parse is a
+# worse trade than seven repeated lines.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "blender/**"
+      - "crates/demiurg-convert/**"
+      - "crates/demiurg-core/**"
+      - "scripts/package-blender-addon.sh"
+      - ".github/workflows/blender-addon.yml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+  pull_request:
+    paths:
+      - "blender/**"
+      - "crates/demiurg-convert/**"
+      - "crates/demiurg-core/**"
+      - "scripts/package-blender-addon.sh"
+      - ".github/workflows/blender-addon.yml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: >-
+          Version to stamp into the extension manifest and the zip name.
+          Defaults to whatever blender_manifest.toml already says.
+        type: string
+        required: false
+
+concurrency:
+  group: blender-addon-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  converter:
+    # The binary the addon shells out to, built natively per platform rather
+    # than cross-compiled, so each is linked by its own platform's toolchain.
+    name: Converter (${{ matrix.tag }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # An older image on purpose: the binary links against the runner's
+          # glibc, and building on the newest Ubuntu would refuse to start on
+          # an artist's older distro.
+          - { os: ubuntu-22.04, tag: linux-x86_64, target: x86_64-unknown-linux-gnu }
+          # `crt-static` folds in the MSVC runtime, so the .exe needs no
+          # redistributable installed — an artist should not have to chase a
+          # "vcruntime140.dll is missing" dialog.
+          - { os: windows-latest, tag: windows-x86_64, target: x86_64-pc-windows-msvc,
+              rustflags: "-C target-feature=+crt-static" }
+          - { os: macos-latest, tag: macos-arm64, target: aarch64-apple-darwin }
+          # Intel Macs, cross-compiled from the arm64 runner (the macOS SDK
+          # carries both slices), so this needs no Intel runner of its own.
+          - { os: macos-latest, tag: macos-x86_64, target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup honours rust-toolchain.toml and installs the pinned nightly on
+      # first use; the pin lists only the targets the workspace itself builds,
+      # so a matrix target is added here.
+      - name: Show toolchain
+        shell: bash
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.tag }}
+
+      - name: Build
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build --release -p demiurg-convert --target ${{ matrix.target }}
+
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir -p out
+          src="target/${{ matrix.target }}/release/demiurg-convert"
+          # `[ -f x ] && y` as a step's last command would fail it under
+          # `set -e` on every non-Windows runner.
+          if [ -f "$src.exe" ]; then
+            src="$src.exe"
+          fi
+          cp "$src" out/
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: converter-${{ matrix.tag }}
+          path: out/*
+          if-no-files-found: error
+
+  package:
+    name: Addon zip
+    needs: converter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: converter-*
+          path: converters
+
+      # Every converter goes into one zip, under the folder name the addon
+      # computes at runtime (`bundle.platform_tag`), so a single file installs
+      # on any of them. `--no-host-build` because the binaries already exist —
+      # this job only assembles.
+      - name: Package
+        run: |
+          args=()
+          if [ -n "${{ inputs.version }}" ]; then
+            args+=(--version "${{ inputs.version }}")
+          fi
+          for dir in converters/converter-*; do
+            tag="${dir#converters/converter-}"
+            binary=$(find "$dir" -type f | head -1)
+            [ -n "$binary" ] || { echo "no binary in $dir" >&2; exit 1; }
+            args+=(--with-bin "$tag=$binary")
+          done
+          echo "packaging with: ${args[*]}"
+          scripts/package-blender-addon.sh --no-host-build "${args[@]}"
+
+      # A structural check rather than installing Blender to run its validator:
+      # what actually breaks a release zip is a missing manifest, a missing
+      # binary for someone's platform, or a Python file that won't import.
+      - name: Check the zip
+        run: |
+          zip=$(ls dist/*.zip)
+          unzip -o -q "$zip" -d check
+          test -f check/demiurg_export/blender_manifest.toml
+          test -f check/demiurg_export/__init__.py
+          python3 -m compileall -q check/demiurg_export
+          for tag in linux-x86_64 windows-x86_64 macos-arm64 macos-x86_64; do
+            found=$(find "check/demiurg_export/bin/$tag" -type f 2>/dev/null | head -1)
+            [ -n "$found" ] || { echo "no converter for $tag in $zip" >&2; exit 1; }
+            echo "  $tag: $(basename "$found")"
+          done
+          grep -m1 '^version' check/demiurg_export/blender_manifest.toml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blender-addon
+          path: dist/*.zip
+          if-no-files-found: error

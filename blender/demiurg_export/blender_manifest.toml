@@ -1,7 +1,11 @@
 schema_version = "1.0.0"
 
 id = "demiurg_export"
-version = "0.1.0"
+# Tracks the workspace: the addon ships with demiurg and shares its changelog
+# and its tags. A release build stamps its tag here
+# (scripts/package-blender-addon.sh --version), so this value is what a local
+# build carries.
+version = "0.12.1"
 name = "demiurg rig export"
 tagline = "Voxelize an armature and export a demiurg project"
 maintainer = "Anton Gushcha <ncrashed@gmail.com>"

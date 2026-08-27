@@ -22,8 +22,15 @@ ADDON="blender/demiurg_export"
 extra_bins=()
 cross_windows=0
 host_build=1
+version_override=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --version)
+            [[ $# -ge 2 ]] || { echo "--version needs X.Y.Z" >&2; exit 1; }
+            # A leading `v` so a git tag can be passed through unedited.
+            version_override="${2#v}"
+            shift 2
+            ;;
         --no-host-build)
             # CI builds each platform on its own runner and assembles here;
             # there is nothing to compile at packaging time.
@@ -51,9 +58,18 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# The addon carries its own version, independent of the Rust workspace's.
+# The version in the manifest is what a local build carries; a release passes
+# its tag instead, so the installed extension reports the release it came from
+# rather than a number that drifts on its own.
 version=$(grep -m1 '^version = ' "$ADDON/blender_manifest.toml" | sed -E 's/version = "(.*)".*/\1/')
 [[ -n "$version" ]] || { echo "cannot read version from $ADDON/blender_manifest.toml" >&2; exit 1; }
+if [[ -n "$version_override" ]]; then
+    # Blender parses this strictly; a tag that isn't `X.Y.Z` would install as a
+    # broken extension, so refuse it here where the message is readable.
+    [[ "$version_override" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] \
+        || { echo "--version $version_override is not X.Y.Z" >&2; exit 1; }
+    version="$version_override"
+fi
 
 # Host platform, in the same spelling `platform_tag()` builds at runtime.
 case "$(uname -s)" in
@@ -79,6 +95,16 @@ tar -C "$ADDON" --exclude='__pycache__' --exclude='*.pyc' --exclude='bin' -cf - 
 
 # Ride the docs along, so an artist who unzips it has the instructions in hand.
 cp blender/README.md "$STAGE/demiurg_export/README.md"
+
+# Stamp the version into the staged manifest only — the file in git keeps the
+# development version, so a release build never leaves the tree dirty.
+if [[ -n "$version_override" ]]; then
+    # `^version` and not `version`, so `schema_version` above it is untouched.
+    sed -i -E "0,/^version = \".*\"/s//version = \"$version\"/" \
+        "$STAGE/demiurg_export/blender_manifest.toml"
+    grep -q "^version = \"$version\"$" "$STAGE/demiurg_export/blender_manifest.toml" \
+        || { echo "failed to stamp version $version into the manifest" >&2; exit 1; }
+fi
 
 bundled_tags=()
 if [[ "$host_build" == 1 ]]; then

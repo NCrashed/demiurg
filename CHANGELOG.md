@@ -29,15 +29,21 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
   voxels of where Blender puts it, and a smoothly weighted column comes apart
   at the joint with every voxel kept.
 
-- **The release workflow builds the Blender addon for every platform.** Four
-  jobs compile `demiurg-convert` natively — Linux, Windows, and both Mac
+- **A workflow that builds the Blender addon for every platform.** Four jobs
+  compile `demiurg-convert` natively — Linux, Windows, and both Mac
   architectures — and a packaging job folds them into one zip that installs
-  anywhere. Tagging attaches it to the GitHub release alongside the editor
-  binary; `workflow_dispatch` builds the same zip off any branch as a run
-  artifact, for when an artist needs current master rather than a release. The
-  zip is checked before upload: manifest present, Python compiles, and a
-  converter for each of the four platforms. CI also runs the addon's
-  Blender-free tests on every push.
+  anywhere. It runs on any push or pull request that touches what goes into the
+  zip, so a broken package fails there rather than at release time; on demand
+  for a build off current master; and from the release pipeline, which reuses
+  it through `workflow_call` instead of keeping a second copy in step. The zip
+  is checked before upload: manifest present, Python compiles, and a converter
+  for each of the four platforms. CI also runs the addon's Blender-free tests
+  on every push.
+
+  A release stamps its tag into the extension's manifest and the zip's name
+  (`--version`), so an installed addon reports the release it came from instead
+  of a version drifting on its own. The manifest in git carries the workspace
+  version for local builds, and a release build leaves the tree clean.
 
 - **`scripts/package-blender-addon.sh`** builds a single zip an artist installs
   and uses — the `demiurg-convert` binary rides inside the addon under
