@@ -7,6 +7,15 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-28
+
+A bridge from Blender: model and animate a character there, export it, open it
+here. The addon voxelizes an armature — meshes parented to bones, or one
+skinned mesh cut into rigid per-bone chunks — bakes its actions into clips, and
+hands the result to a new `demiurg-convert` binary that writes the file. The
+editor gained the tools that made it checkable: `--shot` renders a posed rig,
+and `--dump-pose` says where each bone actually ended up.
+
 ### Added
 
 - **A Blender addon** (`blender/`) that voxelizes an armature's per-bone meshes
