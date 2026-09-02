@@ -7,6 +7,12 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-02
+
+The other half of shading: a rig's transparency is now editable in demiurg
+itself, not only in Blender. 0.15.0 gave rigs somewhere to keep per-colour
+materials; this opens the panel that edits them.
+
 ### Added
 
 - **A rig's transparency is editable in demiurg.** The materials panel was
