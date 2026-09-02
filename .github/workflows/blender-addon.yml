@@ -161,10 +161,20 @@ jobs:
           # The Linux one has to be static, or it won't start on NixOS and
           # will refuse any distro whose glibc is older than the runner's.
           # A dropped `--target` would silently undo that.
+          #
+          # Tested by the absence of an ELF interpreter, which is the exact
+          # thing NixOS refuses — and stable wording, unlike the positive case:
+          # `file` calls a static PIE "static-pie linked", not "statically
+          # linked", which an earlier version of this check missed.
           linux=$(find check/demiurg_export/bin/linux-x86_64 -type f | head -1)
-          file "$linux"
-          file "$linux" | grep -q "statically linked" \
-            || { echo "the linux converter is dynamically linked" >&2; exit 1; }
+          described=$(file "$linux")
+          echo "$described"
+          case "$described" in
+            *interpreter*|*"dynamically linked"*)
+              echo "the linux converter needs a dynamic loader; it will not start on NixOS" >&2
+              exit 1
+              ;;
+          esac
           grep -m1 '^version' check/demiurg_export/blender_manifest.toml
 
       - uses: actions/upload-artifact@v4
