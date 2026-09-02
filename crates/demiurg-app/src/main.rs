@@ -5091,10 +5091,15 @@ impl App {
             .frames
             .get(self.editor.active_frame)
             .map_or_else(|| VoxelModel::new(1, 1, 1), |f| f.model.clone());
-        // Mirror the clip-level materials onto the working frame so the
-        // preview composites the clip's translucency (frames are pure
-        // geometry; the clip owns the one material table).
-        clip.apply_materials_to(&mut model);
+        // Mirror the owning table's materials onto the working frame so the
+        // preview composites them (frames are pure geometry). Inside a rig
+        // that owner is the *rig*: its table is the one the posed character
+        // renders with, so editing anything else here would show a
+        // translucency the assembled rig never has.
+        match &self.editor.rig {
+            Some(rig) => rig.apply_materials_to(&mut model),
+            None => clip.apply_materials_to(&mut model),
+        }
         self.editor.document.replace_model(model);
         self.refresh_clip_view(); // shows onion-skin ghosts when enabled
         self.editor.refresh_palette();
@@ -5122,8 +5127,16 @@ impl App {
         // geometry, so the one material table stays authoritative.
         let mut model = self.editor.document.model().clone();
         let materials = std::mem::take(&mut model.materials);
-        if let Some(clip) = self.editor.clip.as_mut() {
+        // Back to whichever table the load mirrored from — the rig's inside a
+        // rig, the clip's for a standalone `.rvc`.
+        if self.editor.rig.is_some() {
+            if let Some(rig) = self.editor.rig.as_mut() {
+                rig.materials = materials;
+            }
+        } else if let Some(clip) = self.editor.clip.as_mut() {
             clip.materials = materials;
+        }
+        if let Some(clip) = self.editor.clip.as_mut() {
             if let Some(f) = clip.frames.get_mut(frame) {
                 f.model = model;
             }
@@ -5901,6 +5914,12 @@ impl App {
             .and_then(|b| b.attachment_model(att))
             .cloned()
             .unwrap_or_else(|| VoxelModel::new(1, 1, 1));
+        // Mirror the rig's materials onto the working mesh so the sculpt
+        // preview composites what the posed rig will, and so the materials
+        // panel has something to read. Bone meshes stay pure geometry — the
+        // rig owns the one table, and `commit_active_bone` lifts it back.
+        let mut model = model;
+        rig.apply_materials_to(&mut model);
         self.editor.document.replace_model(model);
         self.view
             .set_model(self.editor.document.model(), self.editor.render_mode);
@@ -5946,14 +5965,21 @@ impl App {
             }
             return;
         }
-        if let Some(m) = self
-            .editor
-            .rig
-            .as_mut()
-            .and_then(|r| r.bones.get_mut(bone))
-            .and_then(|b| b.attachment_model_mut(att))
-        {
-            *m = self.editor.document.model().clone();
+        // The working mesh carries the rig's materials (mirrored in on load).
+        // Lift them back to the rig level and store the bone as pure geometry,
+        // so the one table stays authoritative — the same shape the clip
+        // editor uses for its frames.
+        let mut model = self.editor.document.model().clone();
+        let materials = std::mem::take(&mut model.materials);
+        if let Some(rig) = self.editor.rig.as_mut() {
+            rig.materials = materials;
+            if let Some(m) = rig
+                .bones
+                .get_mut(bone)
+                .and_then(|b| b.attachment_model_mut(att))
+            {
+                *m = model;
+            }
         }
     }
 

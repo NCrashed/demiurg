@@ -250,8 +250,7 @@ combined with rotation is approximate; uniform scale is exact.
 
 ## Not exported yet
 
-Extra attachment layers. Transparency is exported but not *editable* on a rig
-inside demiurg yet — change it in Blender and re-export.
+Extra attachment layers.
 
 ## Testing
 

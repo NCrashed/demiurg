@@ -7,6 +7,22 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- **A rig's transparency is editable in demiurg.** The materials panel was
+  hidden whenever a rig was open, because the `.rkc` export had nowhere to keep
+  the table — which the `DMAT` chunk fixed, leaving the gate behind. It now
+  shows for a rig, and the working mesh mirrors the rig's table on load and
+  lifts it back on commit, the same shape the clip editor has always used. The
+  posed preview keeps its own copy of the rig, so a slider move now flags it
+  for a rebuild and the character in the viewport changes as you drag rather
+  than at the next bone switch.
+
+  Inside a rig the table being edited is always the **rig's**, including while
+  a clip attachment is open: the rig-level map is what the assembled character
+  renders with, so editing a clip's own table there would show a translucency
+  the posed rig never has.
+
 ## [0.15.0] - 2026-09-02
 
 Shading. A character authored see-through in Blender arrived solid, because a

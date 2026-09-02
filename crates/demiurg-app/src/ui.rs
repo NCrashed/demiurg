@@ -2095,10 +2095,10 @@ fn voxel_tools_panel(
     // Per-colour render materials (blend mode + opacity) — roxlap's
     // transparency stage. Each used colour gets a blend mode and, when
     // translucent, an opacity slider; the live preview composites it
-    // (CPU backend). For a clip these edit the clip-level table mirrored onto
-    // the working frame (commit lifts it back). Not offered while editing a
-    // rig: the `.rkc` export carries no materials.
-    if editor.rig.is_none() && !editor.model_palette.is_empty() {
+    // (CPU backend). The widgets always read and write the working model,
+    // which is a mirror of whichever table owns the document: a clip's, a
+    // rig's, or the model's own. Commit lifts it back to that owner.
+    if !editor.model_palette.is_empty() {
         ui.separator();
         ui.label(t(Msg::Materials));
         let mode_msg = |m: BlendMode| match m {
@@ -2154,6 +2154,15 @@ fn voxel_tools_panel(
         if let Some((c, mat)) = change {
             if editor.document.set_material(c, mat) {
                 editor.dirty = true;
+                // In a rig the posed preview holds its own copy of the rig, so
+                // it would keep rendering the old table until something else
+                // rebuilt it. Lift the edit now and flag the rebuild, so the
+                // character in the viewport changes with the slider.
+                let materials = editor.document.model().materials.clone();
+                if let Some(rig) = editor.rig.as_mut() {
+                    rig.materials = materials;
+                    editor.rig_dirty = true;
+                }
             }
         }
     }

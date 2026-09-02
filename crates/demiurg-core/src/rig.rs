@@ -328,6 +328,14 @@ pub struct Keyframe {
 }
 
 impl Rig {
+    /// Copy the rig's per-colour materials onto `model` — the mirror the
+    /// editor applies to the working mesh so the sculpt preview composites
+    /// what the posed rig will. Bone meshes stay pure geometry; the rig owns
+    /// the one table (`commit` lifts it back).
+    pub fn apply_materials_to(&self, model: &mut VoxelModel) {
+        model.materials = self.materials.clone();
+    }
+
     /// The renderer material palette for this rig: `(id, material)` defs to
     /// install via `define_material`, plus the `0xRRGGBB`→id colour map each
     /// sprite classifies its voxels by. Both empty for an all-opaque rig.
@@ -1344,6 +1352,42 @@ fn free_hinge(parent: i32, axis: Point3, joint: Point3) -> Hinge {
 
 #[cfg(test)]
 mod tests {
+    /// The editor edits a rig's transparency through the working mesh: the
+    /// table is mirrored down on load and lifted back on commit. Both halves
+    /// have to agree, or a slider move either shows nothing or vanishes on the
+    /// next bone switch.
+    #[test]
+    fn materials_mirror_onto_the_working_mesh_and_lift_back() {
+        use roxlap_formats::material::Material;
+
+        let mut rig = Rig::single_bone("torso", Some(default_bone_model()));
+        rig.materials.insert(0x80c0_c0c0, Material::alpha_blend(96));
+
+        // Load: the working mesh sees the rig's table.
+        let mut working = rig.bones[0].model.clone();
+        rig.apply_materials_to(&mut working);
+        assert_eq!(working.material(0x80c0_c0c0), Material::alpha_blend(96));
+
+        // The artist drags the slider — the UI edits the working mesh.
+        working.set_material(0x80c0_c0c0, Material::alpha_blend(32));
+        working.set_material(0x8000_ff00, Material::additive(200));
+
+        // Commit: lift back, leaving the bone as pure geometry.
+        let materials = std::mem::take(&mut working.materials);
+        rig.materials = materials;
+        rig.bones[0].model = working;
+        assert!(
+            rig.bones[0].model.materials.is_empty(),
+            "the bone keeps geometry only; the rig owns the table"
+        );
+        assert_eq!(rig.materials[&0x80c0_c0c0], Material::alpha_blend(32));
+        assert_eq!(rig.materials[&0x8000_ff00], Material::additive(200));
+
+        // And it survives being written out and read back.
+        let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("round-trips");
+        assert_eq!(back.materials, rig.materials);
+    }
+
     use super::*;
     use roxlap_formats::kfa::Point3;
 
