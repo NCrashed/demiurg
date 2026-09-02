@@ -262,12 +262,18 @@ combined with rotation is approximate; uniform scale is exact.
   | Principled input | Exported as |
   | --- | --- |
   | **Alpha** below 1 | `blend` — front-to-back compositing, for glass and slime |
-  | **Transmission** with Alpha at 1 | `blend` at `1 - transmission` — the other way people author glass |
+  | **Transmission** above 0 | `blend`, multiplied into the alpha above |
   | **Emission Strength** above 0 on a solid material | `add` — order-independent glow |
 
-  Only one wins: the engine has one channel per colour, and blending two
-  physical effects it cannot represent would be a guess. Roughness, metallic,
-  and specular have no equivalent and are ignored.
+  Alpha and transmission **stack**, because they say different things: alpha is
+  how much of the surface is there, transmission how much light passes through
+  what is there, so what reaches the eye is `alpha × (1 - transmission)`. A
+  slime at alpha 0.86 and transmission 0.5 exports at 110/255, not 220.
+
+  Emission only applies when neither of the other two did — the engine has one
+  blend mode per colour, so a material that is both translucent and glowing has
+  to be one or the other. Roughness, metallic, and specular have no equivalent
+  and are ignored.
 
   **Materials are keyed by colour, not by material.** Two Blender materials
   sharing a base colour cannot composite differently — the renderer indexes by

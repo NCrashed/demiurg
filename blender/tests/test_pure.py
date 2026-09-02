@@ -222,13 +222,22 @@ class TestMaterialEffect(unittest.TestCase):
         )
         self.assertEqual(effect, (64, "blend"))
 
-    def test_alpha_wins_over_transmission(self):
-        # Both set is ambiguous; the format has one channel, and Alpha is the
-        # more direct statement.
+    def test_alpha_and_transmission_stack(self):
+        # They are not two ways of saying the same thing: alpha is how much of
+        # the surface is there, transmission how much light passes through what
+        # is there. Taking only alpha is how a slime authored at 0.86 alpha and
+        # 0.5 transmission — plainly see-through in Blender — exported at
+        # 220/255 and rendered solid.
         effect = voxelize.material_effect(
             self.principled(Alpha=0.5, Transmission_Weight=0.9)
         )
-        self.assertEqual(effect, (128, "blend"))
+        self.assertEqual(effect, (13, "blend"))
+
+    def test_the_slime_that_exported_solid(self):
+        effect = voxelize.material_effect(
+            self.principled(Alpha=0.8636, Transmission_Weight=0.5)
+        )
+        self.assertEqual(effect, (110, "blend"))
 
     def test_emission_on_a_solid_material_glows(self):
         effect = voxelize.material_effect(

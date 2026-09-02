@@ -144,27 +144,35 @@ def material_effect(material):
 
     * **Alpha** below 1 is the direct statement — a slime at 0.86 is
       `blend` at 220.
-    * **Transmission** with a full alpha is the other way people author glass;
-      taken as `1 - transmission` so it means the same thing.
+    * **Transmission** is the other way people author glass, and it stacks with
+      alpha rather than competing with it: alpha is how much of the surface is
+      there, transmission is how much light passes through what is there, so
+      what reaches the eye is `alpha × (1 - transmission)`. Taking only the
+      first of the two is how a slime authored at alpha 0.86 *and*
+      transmission 0.5 — visibly see-through in Blender — exports at 220/255
+      and renders solid.
     * **Emission strength** above zero on an otherwise solid material is a
       glow, which the engine draws `add`itively.
 
-    Only one of the three wins, in that order: guessing at a blend of two
-    physical effects the format cannot represent would be worse than picking
-    the one the artist most likely meant.
+    Emission is the odd one out and only applies when nothing above did: the
+    format picks one blend mode per colour, and a material that is both
+    translucent and glowing has to be one or the other.
     """
     node = _principled(material)
     if node is None:
         return None
+    opacity = 1.0
     alpha = _socket(node, "Alpha")
-    if alpha is not None and alpha < 1.0:
-        return _quantize(alpha), "blend"
+    if alpha is not None:
+        opacity *= alpha
     # "Transmission Weight" in 4.x, "Transmission" before it.
     transmission = _socket(node, "Transmission Weight")
     if transmission is None:
         transmission = _socket(node, "Transmission")
     if transmission:
-        return _quantize(1.0 - transmission), "blend"
+        opacity *= 1.0 - transmission
+    if opacity < 1.0:
+        return _quantize(opacity), "blend"
     strength = _socket(node, "Emission Strength")
     if strength:
         return _quantize(min(1.0, strength)), "add"

@@ -7,6 +7,17 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A translucent Blender material could export as a solid one.** Alpha and
+  Transmission were treated as two ways of saying the same thing, with alpha
+  winning when both were set. They are not: alpha is how much of the surface is
+  there, transmission how much light passes through what is there. A slime
+  authored at alpha 0.86 *and* transmission 0.5 — plainly see-through in
+  Blender — therefore exported at 220/255, which composites to a solid colour.
+  The two now multiply, as they do in the shader, so that slime lands at
+  110/255 and reads translucent.
+
 ## [0.18.0] - 2026-09-02
 
 The export works out what a mesh needs instead of asking the artist to know.
