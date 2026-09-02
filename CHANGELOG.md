@@ -7,6 +7,15 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-02
+
+The export works out what a mesh needs instead of asking the artist to know.
+A slime that squashes gets baked frame by frame without anyone ticking a box
+for it, and a mesh some other voxelizer already gridded is told which
+resolution to export at rather than quietly coming out ragged — the two
+settings it was possible to get wrong at once, and the two that made a correct
+scene export as garbage.
+
 ### Added
 
 - **The Blender export finds deforming meshes by itself.** A squashing mesh has
