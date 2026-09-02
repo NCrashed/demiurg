@@ -50,7 +50,20 @@ impl KfaView {
         for b in &mut skel.bones {
             b.extras.clear();
         }
-        let kfas = vec![skel.to_character().to_kfa_sprite(clip)];
+        let mut kfas = vec![skel.to_character().to_kfa_sprite(clip)];
+        // Hand every limb the rig's colour→material map. The renderers
+        // classify a sprite's voxels by its own map, so setting it here is all
+        // it takes for a translucent bone to composite down both paths — the
+        // host's KFA pass and the headless shot — instead of one of them
+        // quietly drawing it solid.
+        let map = material_map_of(&rig);
+        if !map.is_empty() {
+            for k in &mut kfas {
+                for limb in &mut k.limbs {
+                    limb.material_map.clone_from(&map);
+                }
+            }
+        }
         Self { rig, kfas, clip }
     }
 
@@ -64,6 +77,21 @@ impl KfaView {
         let rig = Rig::from_rkc_bytes(bytes)?;
         let clip = (!rig.clips.is_empty()).then_some(0);
         Ok(Self::from_rig(rig, clip))
+    }
+
+    /// The rig's `(id, material)` palette to install via
+    /// `SceneRenderer::define_material`. Empty for an all-opaque rig.
+    #[must_use]
+    pub fn material_defs(&self) -> demiurg_core::MaterialDefs {
+        self.rig.material_palette().0
+    }
+
+    /// The rig's `0xRRGGBB`→material-id map, for
+    /// `SceneRenderer::add_sprite_model_with_materials`. Empty for an
+    /// all-opaque rig.
+    #[must_use]
+    pub fn material_map(&self) -> demiurg_core::MaterialColorMap {
+        self.rig.material_palette().1
     }
 
     /// The sprites to hand to `SceneRenderer::set_kfa_sprites` /
@@ -233,7 +261,9 @@ impl KfaView {
     ) -> Vec<u32> {
         use roxlap_core::OpticastSettings;
         use roxlap_core::camera_math;
-        use roxlap_core::dda_sprite::draw_sprite_dda;
+        use roxlap_core::dda_sprite::{SpriteShade, draw_sprite_dda_shaded};
+        use roxlap_formats::Rgb;
+        use roxlap_formats::material::MaterialTable;
 
         // Resolve the pose at the playhead without moving it, and solve every
         // limb's world transform from it.
@@ -255,8 +285,29 @@ impl KfaView {
         let pixels = (width as usize) * (height as usize);
         let mut fb = vec![sky_color; pixels];
         let mut zb = vec![f32::INFINITY; pixels];
+
+        // The rig's translucent colours, as the renderer wants them: a palette
+        // of ids and a colour→id map each sprite classifies its voxels by. An
+        // all-opaque rig produces neither and takes the plain path.
+        let (defs, color_map) = self.rig.material_palette();
+        let mut table = MaterialTable::new();
+        for &(id, mat) in &defs {
+            table.set(id, mat);
+        }
+        let material_map: Vec<(Rgb, u8)> = color_map.iter().map(|&(c, id)| (Rgb(c), id)).collect();
+
         let draw = |fb: &mut Vec<u32>, zb: &mut Vec<f32>, sprite: &Sprite| {
-            let _ = draw_sprite_dda(
+            let shade = (!defs.is_empty()).then(|| SpriteShade {
+                materials: &table,
+                material: 0,
+                alpha_mul: 255,
+                tint: 0x00FF_FFFF,
+                lights: roxlap_core::CpuLights::default(),
+                // A `--shot` renders unlit and casts no shadows, like the
+                // model path it sits beside.
+                shadow: None,
+            });
+            let _ = draw_sprite_dda_shaded(
                 fb,
                 zb,
                 width as usize,
@@ -265,6 +316,7 @@ impl KfaView {
                 &cam,
                 &settings,
                 sprite,
+                shade,
             );
         };
         let time = self.time();
@@ -288,6 +340,7 @@ impl KfaView {
                 sprite.s = limb.s;
                 sprite.h = limb.h;
                 sprite.f = limb.f;
+                sprite.material_map.clone_from(&material_map);
                 draw(&mut fb, &mut zb, &sprite);
             }
         }
@@ -299,6 +352,16 @@ impl KfaView {
         }
         fb
     }
+}
+
+/// The rig's colour→material map in the renderer's packing, or empty when
+/// nothing is translucent.
+fn material_map_of(rig: &Rig) -> Vec<(roxlap_formats::Rgb, u8)> {
+    rig.material_palette()
+        .1
+        .iter()
+        .map(|&(c, id)| (roxlap_formats::Rgb(c), id))
+        .collect()
 }
 
 /// Resolve clip `clip`'s pose at time `t` with `easing` applied to the active
@@ -419,6 +482,7 @@ pub fn demo_rig() -> Rig {
             },
         }],
         clip_easing: Vec::new(),
+        materials: std::collections::BTreeMap::new(),
     }
 }
 
@@ -536,6 +600,7 @@ mod tests {
                 },
             }],
             clip_easing: Vec::new(),
+            materials: std::collections::BTreeMap::new(),
         };
         // Round-trips through .rkc with empty meshes (zero-voxel kv6).
         let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("empty meshes round-trip");
@@ -679,6 +744,49 @@ mod tests {
             large > small * 2,
             "the flipbook must advance with the playhead: {small} then {large} pixels"
         );
+    }
+
+    #[test]
+    fn a_translucent_rig_composites_in_the_headless_render() {
+        use roxlap_formats::material::Material;
+
+        // A slab the camera looks through, so what is behind it changes the
+        // pixels. The rig path had no materials at all until the `DMAT` chunk,
+        // and a file that carries transparency nothing renders is worse than
+        // one that doesn't carry it.
+        let mut rig = Rig::single_bone("slab", Some(box_model(8, 8, 2, 0x80ff_0000)));
+        let sky = 0x0020_3040;
+        let render = |rig: &Rig| {
+            let mut view = KfaView::from_rig(rig.clone(), None);
+            let cam = view.framing_camera();
+            view.render_cpu(&cam, 140, 140, sky, false, 1.0)
+        };
+
+        let opaque = render(&rig);
+        rig.materials.insert(0x80ff_0000, Material::alpha_blend(48));
+        let glass = render(&rig);
+        assert_ne!(opaque, glass, "the rig's materials must reach the render");
+
+        // And it is the material doing it, not the map merely being present:
+        // back to opaque and the pixels come back.
+        rig.materials
+            .insert(0x80ff_0000, Material::alpha_blend(255));
+        assert_ne!(render(&rig), glass, "a different alpha renders differently");
+    }
+
+    #[test]
+    fn materials_reach_every_limb_sprite() {
+        use roxlap_formats::material::Material;
+
+        // The renderers classify a sprite's voxels by the sprite's own map, so
+        // a limb without one draws solid however good the palette is.
+        let mut rig = Rig::single_bone("slab", Some(box_model(4, 4, 4, 0x80ff_0000)));
+        rig.materials.insert(0x80ff_0000, Material::alpha_blend(64));
+        let view = KfaView::from_rig(rig, None);
+        assert!(!view.material_defs().is_empty(), "the palette is built");
+        for limb in &view.kfas[0].limbs {
+            assert!(!limb.material_map.is_empty(), "every limb carries the map");
+        }
     }
 
     #[test]

@@ -91,6 +91,44 @@ def _bone_meshes(armature):
     return by_bone, by_clip_bone, skinned, clip_skinned
 
 
+def _materials_of(objects):
+    """Every translucent or glowing colour the objects use, and any warnings.
+
+    Keyed by *colour*, because that is what the renderer indexes — two Blender
+    materials sharing a base colour cannot composite differently, and silently
+    keeping whichever came first would be a puzzle to debug.
+    """
+    by_color = {}
+    sources = {}
+    clashes = []
+    for obj in objects:
+        for slot in obj.material_slots:
+            material = slot.material
+            if material is None:
+                continue
+            effect = voxelize.material_effect(material)
+            if effect is None:
+                continue
+            color = voxelize.material_hex(material)
+            alpha, mode = effect
+            if color in by_color and by_color[color] != (alpha, mode):
+                clashes.append(f"{sources[color]!r} and {material.name!r} (colour {color})")
+                continue
+            by_color[color] = (alpha, mode)
+            sources[color] = material.name
+    warnings = []
+    if clashes:
+        warnings.append(
+            "materials share a colour but composite differently, so only the first "
+            "counts: " + "; ".join(sorted(set(clashes)))
+        )
+    entries = [
+        rig.material_entry(color, alpha, mode)
+        for color, (alpha, mode) in sorted(by_color.items())
+    ]
+    return entries, warnings
+
+
 def _weighted_vertex_count(context, objects, bone_names):
     """How many *evaluated* vertices carry a weight for one of `bone_names`.
 
@@ -415,7 +453,12 @@ def build_manifest(context, armature, voxels_per_unit, solid,
                 raise ValueError("the selected meshes have no faces to voxelize")
             bone = rig.bone_entry(deforming[0].name, None, (0.0, 0.0, 0.0))
             bone["clip"] = entry
-            return rig.rig_manifest(deforming[0].name, [bone], None, stamp), warnings
+            materials, material_warnings = _materials_of(deforming)
+            warnings.extend(material_warnings)
+            return (
+                rig.rig_manifest(deforming[0].name, [bone], None, stamp, materials),
+                warnings,
+            )
         # No skeleton, so the model's own origin is the pivot: keep the
         # scene's world origin as the reference frame.
         identity = meshes[0].matrix_world.copy()
@@ -424,7 +467,9 @@ def build_manifest(context, armature, voxels_per_unit, solid,
         entry = _mesh_entry(field.get(None, {}), (0.0, 0.0, 0.0))
         if entry is None:
             raise ValueError("the selected meshes have no faces to voxelize")
-        return rig.model_manifest(meshes[0].name, entry, stamp), warnings
+        materials, material_warnings = _materials_of(meshes)
+        warnings.extend(material_warnings)
+        return rig.model_manifest(meshes[0].name, entry, stamp, materials), warnings
 
     by_bone, by_clip_bone, skinned, clip_skinned = _bone_meshes(armature)
     if not by_bone and not by_clip_bone and not skinned and not clip_skinned:
@@ -568,7 +613,15 @@ def build_manifest(context, armature, voxels_per_unit, solid,
             warnings.append(f"bone {name!r} has no geometry")
         entries.append(rig.bone_entry(name, parent, joint, mesh))
 
-    return rig.rig_manifest(armature.name, entries, clips, stamp), warnings
+    # Every mesh that reached the export, whichever path it took.
+    contributing = list(skinned) + list(clip_skinned)
+    for objects in by_bone.values():
+        contributing.extend(objects)
+    for objects in by_clip_bone.values():
+        contributing.extend(objects)
+    materials, material_warnings = _materials_of(contributing)
+    warnings.extend(material_warnings)
+    return rig.rig_manifest(armature.name, entries, clips, stamp, materials), warnings
 
 
 def export_document(context, filepath, voxels_per_unit=10.0, solid=True,

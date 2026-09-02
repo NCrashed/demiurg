@@ -155,6 +155,78 @@ class TestColor(unittest.TestCase):
         self.assertEqual(voxelize.material_hex(None), voxelize.DEFAULT_COLOR)
 
 
+class TestMaterialEffect(unittest.TestCase):
+    """How a Blender material becomes a demiurg blend mode."""
+
+    @staticmethod
+    def principled(**values):
+        class Socket:
+            def __init__(self, value, linked=False):
+                self.default_value = value
+                self.is_linked = linked
+
+        class Node:
+            def __init__(self, inputs):
+                self.type = "BSDF_PRINCIPLED"
+                self.inputs = inputs
+
+        class Material:
+            def __init__(self, node):
+                self.node_tree = type("T", (), {"nodes": [node]})()
+                self.diffuse_color = (0.5, 0.5, 0.5, 1.0)
+
+        inputs = {k.replace("_", " "): Socket(v) for k, v in values.items()}
+        return Material(Node(inputs))
+
+    def test_alpha_below_one_is_a_blend(self):
+        # The slime case: Alpha 0.864 in the picker.
+        self.assertEqual(
+            voxelize.material_effect(self.principled(Alpha=0.864)), (220, "blend")
+        )
+
+    def test_a_solid_material_has_no_effect(self):
+        self.assertIsNone(voxelize.material_effect(self.principled(Alpha=1.0)))
+        self.assertIsNone(voxelize.material_effect(None))
+
+    def test_transmission_is_the_other_way_to_author_glass(self):
+        # Alpha untouched, transmission turned up: same intent, so it maps to
+        # the same mode with the opacity inverted.
+        effect = voxelize.material_effect(
+            self.principled(Alpha=1.0, Transmission_Weight=0.75)
+        )
+        self.assertEqual(effect, (64, "blend"))
+
+    def test_alpha_wins_over_transmission(self):
+        # Both set is ambiguous; the format has one channel, and Alpha is the
+        # more direct statement.
+        effect = voxelize.material_effect(
+            self.principled(Alpha=0.5, Transmission_Weight=0.9)
+        )
+        self.assertEqual(effect, (128, "blend"))
+
+    def test_emission_on_a_solid_material_glows(self):
+        effect = voxelize.material_effect(
+            self.principled(Alpha=1.0, Emission_Strength=0.6)
+        )
+        self.assertEqual(effect, (153, "add"))
+
+    def test_a_linked_socket_is_not_read(self):
+        # A driven or textured input's `default_value` is a stale leftover, not
+        # what renders.
+        class Socket:
+            default_value = 0.2
+            is_linked = True
+
+        class Node:
+            type = "BSDF_PRINCIPLED"
+            inputs = {"Alpha": Socket()}
+
+        class Material:
+            node_tree = type("T", (), {"nodes": [Node()]})()
+
+        self.assertIsNone(voxelize.material_effect(Material()))
+
+
 class TestRig(unittest.TestCase):
     def test_joint_is_the_offset_between_heads(self):
         self.assertEqual(rig.joint_offset((3.5, 0.0, -9.0), (0.0, 0.0, 0.0)), (3.5, 0.0, -9.0))

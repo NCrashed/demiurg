@@ -32,9 +32,12 @@ use demiurg_core::clip::{ClipDoc, ClipFrame, LoopMode};
 use demiurg_core::rig::{LayerPlayback as ClipPlayback, Rig, RigBone};
 use demiurg_core::vox;
 use roxlap_formats::kfa::{Hinge, Point3};
+use roxlap_formats::material::{BlendMode, Material};
 use roxlap_formats::xform::{BoneXform, Quat};
 
-use crate::manifest::{BoneSpec, ClipSpec, Manifest, MeshSpec, VERSION, VoxelClipSpec};
+use crate::manifest::{
+    BoneSpec, ClipSpec, Manifest, MaterialSpec, MeshSpec, VERSION, VoxelClipSpec,
+};
 
 /// How far a keyframe may sit from the identity before it counts as an actual
 /// pose. Baked exports carry float noise, so an exact comparison would flag a
@@ -74,6 +77,16 @@ pub enum ConvertError {
     MeshAndClip(String),
     /// A voxel clip with no frames.
     EmptyClip(String),
+    /// A material's `mode` is not one of the three the format has.
+    BadBlendMode {
+        /// The colour the material applies to.
+        color: String,
+        /// The offending value.
+        value: String,
+    },
+    /// Two materials claim the same colour. The renderer indexes by colour, so
+    /// there is no way to honour both.
+    DuplicateMaterial(String),
     /// A voxel clip's `loop` is not one of the three the format has.
     BadLoopMode {
         /// The bone the clip belongs to.
@@ -163,6 +176,14 @@ impl fmt::Display for ConvertError {
             Self::MeshAndClip(n) => write!(
                 f,
                 "bone {n:?} has both a \"mesh\" and a \"clip\"; a bone draws one or the other"
+            ),
+            Self::BadBlendMode { color, value } => write!(
+                f,
+                "material {color:?}: mode {value:?} is not \"blend\", \"add\", or \"volume\""
+            ),
+            Self::DuplicateMaterial(c) => write!(
+                f,
+                "two materials claim colour {c:?}; the renderer keys them by colour, so only one can win"
             ),
             Self::EmptyClip(n) => write!(f, "bone {n:?}: a \"clip\" needs at least one frame"),
             Self::BadLoopMode { bone, value } => write!(
@@ -288,10 +309,12 @@ pub fn build_rig(m: &Manifest, base_dir: &Path) -> Result<Rig, ConvertError> {
         bones,
         clips: Vec::new(),
         clip_easing: Vec::new(),
+        materials: BTreeMap::new(),
     };
     for spec in &m.clips {
         add_clip(&mut rig, spec, &index)?;
     }
+    rig.materials = build_materials(&m.materials)?;
     Ok(rig)
 }
 
@@ -374,6 +397,52 @@ fn add_clip(
     }
     rig.set_clip_loops(ci, spec.loops);
     Ok(())
+}
+
+/// Per-colour materials, keyed by the packed colour word.
+///
+/// Opaque entries are dropped: the map holds only what actually needs
+/// compositing, which is the invariant the rest of the codebase assumes.
+fn build_materials(specs: &[MaterialSpec]) -> Result<BTreeMap<u32, Material>, ConvertError> {
+    let mut out = BTreeMap::new();
+    for spec in specs {
+        let color = parse_color(&spec.color).ok_or_else(|| ConvertError::BadColor {
+            at: "materials".to_string(),
+            value: spec.color.clone(),
+        })?;
+        let mode = match spec.mode.as_str() {
+            "blend" => BlendMode::AlphaBlend,
+            "add" => BlendMode::Additive,
+            "volume" => BlendMode::Volumetric,
+            other => {
+                return Err(ConvertError::BadBlendMode {
+                    color: spec.color.clone(),
+                    value: other.to_string(),
+                });
+            }
+        };
+        let material = Material {
+            alpha: spec.alpha,
+            mode,
+            ..Material::OPAQUE
+        };
+        // Drop what would draw solid anyway. `Material::is_opaque` only looks
+        // at the mode, so a fully opaque alpha-blend would slip through and
+        // put a no-op entry in a file that every later stage reads as "this
+        // colour needs compositing". Additive is exempt: at full alpha it is
+        // the brightest glow, not a solid voxel.
+        let invisible_effect = match mode {
+            BlendMode::AlphaBlend | BlendMode::Volumetric => spec.alpha == u8::MAX,
+            _ => false,
+        };
+        if material.is_opaque() || invisible_effect {
+            continue;
+        }
+        if out.insert(color, material).is_some() {
+            return Err(ConvertError::DuplicateMaterial(spec.color.clone()));
+        }
+    }
+    Ok(out)
 }
 
 /// Build a bone's per-frame flipbook.

@@ -95,6 +95,63 @@ def to_hex(rgb):
 DEFAULT_COLOR = "cccccc"
 
 
+def _principled(material):
+    """The material's Principled BSDF node, or `None`."""
+    node_tree = getattr(material, "node_tree", None)
+    for node in getattr(node_tree, "nodes", ()) if node_tree is not None else ():
+        if getattr(node, "type", "") == "BSDF_PRINCIPLED":
+            return node
+    return None
+
+
+def _socket(node, name):
+    """A node input's value, or `None` when it is absent or driven by a graph
+    (a linked socket's `default_value` is a stale leftover, not what renders)."""
+    socket = node.inputs.get(name) if node is not None else None
+    if socket is None or getattr(socket, "is_linked", False):
+        return None
+    return socket.default_value
+
+
+def material_effect(material):
+    """How a material composites: `(alpha, mode)` or `None` for solid.
+
+    Read off the Principled BSDF, since that is where an artist sets it:
+
+    * **Alpha** below 1 is the direct statement — a slime at 0.86 is
+      `blend` at 220.
+    * **Transmission** with a full alpha is the other way people author glass;
+      taken as `1 - transmission` so it means the same thing.
+    * **Emission strength** above zero on an otherwise solid material is a
+      glow, which the engine draws `add`itively.
+
+    Only one of the three wins, in that order: guessing at a blend of two
+    physical effects the format cannot represent would be worse than picking
+    the one the artist most likely meant.
+    """
+    node = _principled(material)
+    if node is None:
+        return None
+    alpha = _socket(node, "Alpha")
+    if alpha is not None and alpha < 1.0:
+        return _quantize(alpha), "blend"
+    # "Transmission Weight" in 4.x, "Transmission" before it.
+    transmission = _socket(node, "Transmission Weight")
+    if transmission is None:
+        transmission = _socket(node, "Transmission")
+    if transmission:
+        return _quantize(1.0 - transmission), "blend"
+    strength = _socket(node, "Emission Strength")
+    if strength:
+        return _quantize(min(1.0, strength)), "add"
+    return None
+
+
+def _quantize(value):
+    """A 0..1 factor as the manifest's 0..255."""
+    return int(round(min(max(value, 0.0), 1.0) * 255.0))
+
+
 def material_hex(material):
     """A material's flat colour as `"rrggbb"`.
 

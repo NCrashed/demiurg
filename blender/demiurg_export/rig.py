@@ -128,7 +128,12 @@ def clip_entry(name, keys, length_ms, loops=True):
     }
 
 
-def rig_manifest(name, bones, clips=None, comment=None):
+def material_entry(color, alpha, mode):
+    """One per-colour render material."""
+    return {"color": color, "alpha": int(alpha), "mode": mode}
+
+
+def rig_manifest(name, bones, clips=None, comment=None, materials=None):
     """The whole document: a `demiurg-rig` manifest around `bones`."""
     doc = {
         "format": FORMAT_RIG,
@@ -139,15 +144,19 @@ def rig_manifest(name, bones, clips=None, comment=None):
     }
     if clips:
         doc["clips"] = clips
+    if materials:
+        doc["materials"] = materials
     if comment:
         doc["_comment"] = comment
     return doc
 
 
-def model_manifest(name, mesh, comment=None):
+def model_manifest(name, mesh, comment=None, materials=None):
     """A bare model — what a lone mesh with no armature exports as. Worth
     having over the `.vox` route because `.vox` carries no pivot."""
     doc = {"format": FORMAT_MODEL, "version": VERSION, "name": name, "mesh": mesh}
+    if materials:
+        doc["materials"] = materials
     if comment:
         doc["_comment"] = comment
     return doc

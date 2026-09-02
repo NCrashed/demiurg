@@ -358,6 +358,86 @@ fn a_looping_clip_stays_inside_its_own_window() {
     );
 }
 
+/// A rig whose slime colour is translucent and whose core glows.
+fn translucent_rig() -> &'static str {
+    r#"{
+      "format": "demiurg-rig", "version": 1,
+      "bones": [
+        { "name": "blob", "mesh": { "dims": [2, 2, 2], "pivot": [1.0, 1.0, 0.0],
+            "voxels": [[0, 0, 0, "cc10c8"], [1, 1, 1, "ffaa00"]] } }
+      ],
+      "materials": [
+        { "color": "cc10c8", "alpha": 220, "mode": "blend" },
+        { "color": "ffaa00", "alpha": 180, "mode": "add" }
+      ]
+    }"#
+}
+
+#[test]
+fn materials_survive_the_demiurg_round_trip() {
+    use roxlap_formats::material::BlendMode;
+
+    let rig = load_rig(translucent_rig());
+    assert_eq!(rig.materials.len(), 2);
+    let glass = rig.materials[&0x80cc_10c8];
+    assert_eq!(glass.alpha, 220);
+    assert_eq!(glass.mode, BlendMode::AlphaBlend);
+    let glow = rig.materials[&0x80ff_aa00];
+    assert_eq!(glow.alpha, 180);
+    assert_eq!(glow.mode, BlendMode::Additive);
+}
+
+#[test]
+fn materials_ride_the_rkc_extra_chunk() {
+    // The container has no material channel of its own, so this is the whole
+    // reason a translucent character survives being written as `.rkc`.
+    let out = convert(translucent_rig().as_bytes(), Path::new("."), Output::Rkc).expect("converts");
+    let rig = demiurg_core::Rig::from_rkc_bytes(&out.bytes).expect("parses as .rkc");
+    assert_eq!(rig.materials.len(), 2);
+    assert_eq!(rig.materials[&0x80cc_10c8].alpha, 220);
+
+    // And the palette the renderer wants comes out of it.
+    let (defs, colors) = rig.material_palette();
+    assert_eq!(defs.len(), 2, "two distinct materials get two ids");
+    assert_eq!(colors.len(), 2);
+}
+
+#[test]
+fn an_opaque_material_is_not_stored() {
+    // The map holds only what needs compositing — every other part of the
+    // codebase reads "present" as "translucent".
+    let json = r#"{
+      "format": "demiurg-rig", "version": 1,
+      "bones": [ { "name": "a", "mesh": { "dims": [1, 1, 1],
+                   "voxels": [[0, 0, 0, "ffffff"]] } } ],
+      "materials": [ { "color": "ffffff", "alpha": 255, "mode": "blend" } ]
+    }"#;
+    assert!(load_rig(json).materials.is_empty());
+}
+
+#[test]
+fn material_mistakes_are_rejected_by_name() {
+    rejects(
+        r#"{ "format": "demiurg-rig", "version": 1,
+             "bones": [ { "name": "a" } ],
+             "materials": [ { "color": "ff0000", "alpha": 128, "mode": "frosted" } ] }"#,
+        "frosted",
+    );
+    rejects(
+        r#"{ "format": "demiurg-rig", "version": 1,
+             "bones": [ { "name": "a" } ],
+             "materials": [ { "color": "ff0000", "alpha": 128 },
+                            { "color": "ff0000", "alpha": 64 } ] }"#,
+        "only one can win",
+    );
+    rejects(
+        r#"{ "format": "demiurg-rig", "version": 1,
+             "bones": [ { "name": "a" } ],
+             "materials": [ { "color": "nothex", "alpha": 128 } ] }"#,
+        "hex colour",
+    );
+}
+
 #[test]
 fn clip_mistakes_are_rejected_by_name() {
     rejects(

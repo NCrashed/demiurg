@@ -34,16 +34,18 @@ def clear_scene():
             block.remove(item)
 
 
-def colored(name, rgba):
+def colored(name, rgba, alpha=1.0):
     """A material coloured the way an artist would: on the Principled BSDF,
     which is what the exporter reads (the viewport `diffuse_color` is only a
-    fallback for materials with no node tree)."""
+    fallback for materials with no node tree). `alpha` below 1 makes it
+    translucent, which has to reach the file as a blend material."""
     material = bpy.data.materials.new(name)
     material.diffuse_color = rgba
     material.use_nodes = True
     for node in material.node_tree.nodes:
         if node.type == "BSDF_PRINCIPLED":
             node.inputs["Base Color"].default_value = rgba
+            node.inputs["Alpha"].default_value = alpha
     return material
 
 
@@ -85,7 +87,11 @@ def build_scene():
         return obj
 
     body = box("body", (0.0, 0.0, 0.5), (0.4, 0.3, 1.0), colored("blue", (0.1, 0.25, 0.7, 1.0)))
-    limb = box("limb", (0.35, 0.0, 0.6), (0.15, 0.15, 0.6), colored("orange", (0.8, 0.35, 0.05, 1.0)))
+    # Translucent on purpose: the arm's material has to arrive as a blend.
+    limb = box(
+        "limb", (0.35, 0.0, 0.6), (0.15, 0.15, 0.6),
+        colored("orange", (0.8, 0.35, 0.05, 1.0), alpha=0.5),
+    )
     fist = box("fist", (0.35, 0.0, 0.2), (0.2, 0.2, 0.2), colored("pale", (0.85, 0.7, 0.5, 1.0)))
 
     for obj, bone in ((body, "torso"), (limb, "arm"), (fist, "hand")):
@@ -180,6 +186,15 @@ def main():
     )
     for w in warnings:
         print(f"WARNING: {w}")
+    with open(os.path.splitext(out)[0] + ".json", encoding="utf-8") as f:
+        manifest = json.load(f)
+    materials = manifest.get("materials", [])
+    print(f"MATERIALS: {materials}")
+    assert len(materials) == 1, f"expected the translucent arm's material, got {materials}"
+    entry = materials[0]
+    assert entry["mode"] == "blend", entry
+    assert abs(entry["alpha"] - 128) <= 1, f"alpha 0.5 should land near 128, got {entry}"
+
     if expected:
         dump_expected_poses(armature, armature.animation_data.action, 10.0, expected)
         print(f"EXPECTED: wrote {expected}")

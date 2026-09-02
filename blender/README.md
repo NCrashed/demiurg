@@ -230,12 +230,28 @@ combined with rotation is approximate; uniform scale is exact.
   viewport display colour for a material with no nodes. Textures are not
   sampled — a textured mesh exports flat. Colours are converted linear → sRGB,
   so what you see in the picker is what lands in the file.
+- **Transparency and glow come from the same node**, read in this order:
+
+  | Principled input | Exported as |
+  | --- | --- |
+  | **Alpha** below 1 | `blend` — front-to-back compositing, for glass and slime |
+  | **Transmission** with Alpha at 1 | `blend` at `1 - transmission` — the other way people author glass |
+  | **Emission Strength** above 0 on a solid material | `add` — order-independent glow |
+
+  Only one wins: the engine has one channel per colour, and blending two
+  physical effects it cannot represent would be a guess. Roughness, metallic,
+  and specular have no equivalent and are ignored.
+
+  **Materials are keyed by colour, not by material.** Two Blender materials
+  sharing a base colour cannot composite differently — the renderer indexes by
+  colour. The export warns and keeps the first.
 - **Modifiers are applied.** The evaluated mesh is exported, so a mirror or
   subsurf you forgot to apply still counts.
 
 ## Not exported yet
 
-Extra attachment layers and transparency materials.
+Extra attachment layers. Transparency is exported but not *editable* on a rig
+inside demiurg yet — change it in Blender and re-export.
 
 ## Testing
 

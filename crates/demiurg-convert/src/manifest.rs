@@ -58,6 +58,28 @@ pub struct Manifest {
     /// The model. Bare-model manifests only.
     #[serde(default)]
     pub mesh: Option<MeshSpec>,
+    /// Per-colour render materials — how a colour is composited rather than
+    /// drawn solid. Keyed by colour, not by source material, because that is
+    /// what the renderer indexes: an exporter whose two materials share a base
+    /// colour has to reconcile them itself.
+    #[serde(default)]
+    pub materials: Vec<MaterialSpec>,
+}
+
+/// One translucent (or glowing) colour.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaterialSpec {
+    /// The colour this applies to, `"rrggbb"` — the same spelling a voxel uses.
+    pub color: String,
+    /// Opacity, `0` (invisible) to `255` (solid). For `add` it is the
+    /// strength of the glow.
+    pub alpha: u8,
+    /// `"blend"` — front-to-back compositing, for glass and slime;
+    /// `"add"` — order-independent glow, for spells and fire;
+    /// `"volume"` — thickness-aware absorption, for smoke and fog.
+    #[serde(default = "default_blend_mode")]
+    pub mode: String,
 }
 
 /// One bone: its mesh, where it hangs off its parent, and the axis its rest
@@ -271,4 +293,9 @@ fn default_loop_mode() -> String {
 /// Real-time playback.
 fn default_speed() -> f32 {
     1.0
+}
+
+/// The common case: a translucent colour composited front to back.
+fn default_blend_mode() -> String {
+    "blend".to_string()
 }

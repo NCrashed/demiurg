@@ -7,6 +7,29 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- **Transparency and glow survive the trip.** A rig had nowhere to put
+  per-colour materials — the editor's transparency was for plain models only,
+  and the `.rkc` container has no material channel — so a slime authored
+  see-through in Blender arrived solid. Rigs now carry a colour → material map
+  that rides in a `DMAT` extra-chunk, the way layer names and easing already
+  do, which means it round-trips through both `.rkc` and `.demiurg` and
+  survives a re-save by an older build.
+
+  The addon reads it off the Principled BSDF: **Alpha** below 1 becomes
+  `blend`, **Transmission** with a full alpha becomes `blend` at `1 -
+  transmission`, and **Emission Strength** on an otherwise solid material
+  becomes `add`. One wins — the engine has a single channel per colour, and
+  blending effects it cannot represent would be a guess. Materials key by
+  *colour*, since that is what the renderer indexes, so two Blender materials
+  sharing a base colour are reported rather than silently reconciled.
+
+  Both renderers show it: the limb sprites carry the colour map, the compose
+  pass registers attachments with it, and the headless `--shot` composites —
+  a file that carried transparency nothing rendered would be worse than one
+  that did not carry it at all.
+
 ### Fixed
 
 - **A deforming mesh bound by an armature modifier can now be baked as a

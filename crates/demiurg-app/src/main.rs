@@ -6504,6 +6504,16 @@ impl App {
                     renderer.define_material(id, mat);
                     self.material_id_ceiling = self.material_id_ceiling.max(id);
                 }
+                // A rig carries its own per-colour materials (the `DMAT`
+                // chunk), which the edited-model palette above knows nothing
+                // about — without this a translucent character draws solid in
+                // the viewport while `--shot` composites it correctly.
+                if let Some(kfa) = self.kfa.as_ref() {
+                    for (id, mat) in kfa.material_defs() {
+                        renderer.define_material(id, mat);
+                        self.material_id_ceiling = self.material_id_ceiling.max(id);
+                    }
+                }
                 self.material_dirty = false;
             }
             match self.editor.render_mode {
@@ -6549,8 +6559,16 @@ impl App {
                     let Some((bp, [bs, bh, bf])) = kfa.limb_pose(bi) else {
                         continue;
                     };
+                    let materials = rgb_material_map(&kfa.material_map());
                     let posed = |renderer: &mut SceneRenderer, kv6, s, h, f, pos| {
-                        let model = renderer.add_sprite_model(&kv6);
+                        // With materials, register the model classified by
+                        // colour so a translucent attachment composites; the
+                        // plain call would draw it solid.
+                        let model = if materials.is_empty() {
+                            renderer.add_sprite_model(&kv6)
+                        } else {
+                            renderer.add_sprite_model_with_materials(&kv6, &materials)
+                        };
                         renderer.add_sprite_instance_posed(
                             model,
                             DynSpriteTransform {

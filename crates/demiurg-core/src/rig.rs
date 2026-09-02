@@ -6,10 +6,13 @@
 //! The editor edits a [`Rig`] (one [`VoxelModel`] per bone, with the
 //! existing tools); rendering and saving go through [`Rig::to_character`].
 
+use std::collections::BTreeMap;
+
 use roxlap_formats::character::{
     self, Attachment, Bone as CharBone, Character, Clip, ClipData, ClipPlayback, MeshRef,
 };
 use roxlap_formats::kfa::{Hinge, Point3, Seq};
+use roxlap_formats::material::{BlendMode, Material};
 use roxlap_formats::xform::BoneXform;
 
 use crate::VoxelModel;
@@ -37,6 +40,19 @@ pub struct Rig {
     /// Editor metadata — the engine clip format has no easing — persisted in a
     /// `DEAS` extra-chunk that round-trips through `.rkc` and `.demiurg`.
     pub clip_easing: Vec<Easing>,
+    /// Per-colour render materials (blend mode + opacity), keyed by the
+    /// `0x80RRGGBB` colour word and shared by every bone. Only non-opaque
+    /// entries are stored, so an all-opaque rig keeps an empty map.
+    ///
+    /// Rig-level rather than per-bone because that is how the renderer
+    /// consumes it: `define_material` installs one palette of ids `1..=255`
+    /// that every sprite indexes into. It is also how an artist thinks — "this
+    /// colour is glass", not "this colour is glass on the left arm".
+    ///
+    /// The `.rkc` container has no material channel, so this rides in a `DMAT`
+    /// extra-chunk (like [`Self::clip_easing`]'s `DEAS`), which round-trips
+    /// through `.rkc` and `.demiurg` and survives a re-save by an older build.
+    pub materials: BTreeMap<u32, Material>,
 }
 
 /// How a clip's keyframe segments are interpolated. The engine plays linear;
@@ -312,6 +328,14 @@ pub struct Keyframe {
 }
 
 impl Rig {
+    /// The renderer material palette for this rig: `(id, material)` defs to
+    /// install via `define_material`, plus the `0xRRGGBB`→id colour map each
+    /// sprite classifies its voxels by. Both empty for an all-opaque rig.
+    #[must_use]
+    pub fn material_palette(&self) -> (crate::MaterialDefs, crate::MaterialColorMap) {
+        crate::material_palette(&self.materials)
+    }
+
     /// Compile to an engine [`Character`]: each bone's mesh becomes a `KV6`,
     /// carried as a single static attachment (`MeshRef::Static(i)` at the
     /// identity offset — the editor models one static mesh per bone; the
@@ -382,6 +406,19 @@ impl Rig {
         if !extra_names.is_empty() {
             if let Ok(payload) = postcard::to_allocvec(&extra_names) {
                 extra_chunks.push((DLAY_TAG, payload));
+            }
+        }
+        // Per-colour materials ride in a `DMAT` extra-chunk — the container has
+        // no material channel — as the same `(colour, alpha, mode)` triples the
+        // `.demiurg` project stores. Only written when something is translucent.
+        if !self.materials.is_empty() {
+            let table: Vec<(u32, u8, u8)> = self
+                .materials
+                .iter()
+                .map(|(&color, m)| (color, m.alpha, m.mode.as_u8()))
+                .collect();
+            if let Ok(payload) = postcard::to_allocvec(&table) {
+                extra_chunks.push((DMAT_TAG, payload));
             }
         }
         // Per-clip easing rides along in a `DEAS` extra-chunk (only when any clip
@@ -486,12 +523,35 @@ impl Rig {
             .and_then(|(_, payload)| postcard::from_bytes::<Vec<u8>>(payload).ok())
             .map(|tags| tags.into_iter().map(Easing::from_u8).collect())
             .unwrap_or_default();
+        // Per-colour materials from the `DMAT` extra-chunk; absent for a
+        // foreign `.rkc`, which then renders all-opaque. An unknown blend-mode
+        // tag from a newer build is skipped rather than guessed at.
+        let mut materials = BTreeMap::new();
+        for (color, alpha, mode_tag) in c
+            .extra_chunks
+            .iter()
+            .find(|(tag, _)| *tag == DMAT_TAG)
+            .and_then(|(_, payload)| postcard::from_bytes::<Vec<(u32, u8, u8)>>(payload).ok())
+            .unwrap_or_default()
+        {
+            if let Some(mode) = BlendMode::from_u8(mode_tag) {
+                materials.insert(
+                    color,
+                    Material {
+                        alpha,
+                        mode,
+                        ..Material::OPAQUE
+                    },
+                );
+            }
+        }
         Ok(Self {
             name: c.name.clone(),
             root: c.root,
             bones,
             clips: c.clips.clone(),
             clip_easing,
+            materials,
         })
     }
 
@@ -528,6 +588,7 @@ impl Rig {
             )],
             clips: Vec::new(),
             clip_easing: Vec::new(),
+            materials: BTreeMap::new(),
         }
     }
 
@@ -1206,6 +1267,10 @@ const DEFAULT_TAIL_MS: i32 = 500;
 const DLAY_TAG: [u8; 4] = *b"DLAY";
 /// Extra-chunk tag carrying per-clip [`Easing`] tags (`Vec<u8>`), editor-only.
 const DEAS_TAG: [u8; 4] = *b"DEAS";
+/// Extra-chunk tag carrying per-colour render materials — a postcard
+/// `Vec<(colour, alpha, blend_mode)>`. The `.rkc` container has no material
+/// channel of its own.
+const DMAT_TAG: [u8; 4] = *b"DMAT";
 
 /// The origin point, reused for default hinge endpoints.
 const ZERO: Point3 = Point3 {
@@ -1315,6 +1380,7 @@ mod tests {
             bones: vec![bone("body", -1, 0x80ff_0000), bone("arm", 0, 0x8000_ff00)],
             clips: Vec::new(),
             clip_easing: Vec::new(),
+            materials: BTreeMap::new(),
         };
         let back = Rig::from_character(&rig.to_character()).expect("round-trips");
         assert_eq!(back.bones.len(), 2);
@@ -1335,6 +1401,7 @@ mod tests {
             bones: vec![bone("body", -1, 0x80ff_0000)],
             clips: Vec::new(),
             clip_easing: Vec::new(),
+            materials: BTreeMap::new(),
         };
         // Hang an extra mesh (distinct colour) off the bone at an offset.
         let mut extra = VoxelModel::new(2, 2, 2);
@@ -1382,6 +1449,7 @@ mod tests {
             bones: vec![bone("torch", -1, 0x80ff_0000)],
             clips: Vec::new(),
             clip_easing: Vec::new(),
+            materials: BTreeMap::new(),
         };
         // Primary becomes a clip with non-default playback (2x speed, phased).
         rig.bones[0].primary_clip = Some(clip_doc(0x8000_00ff));
@@ -1427,6 +1495,7 @@ mod tests {
             bones: vec![bone("b", -1, 0x80ff_0000)],
             clips: Vec::new(),
             clip_easing: Vec::new(),
+            materials: BTreeMap::new(),
         };
         rig.add_clip("a".to_string());
         rig.add_clip("b".to_string());
@@ -1510,6 +1579,7 @@ mod tests {
             bones: vec![bone("body", -1, 0x80ff_0000), bone("arm", 0, 0x8000_ff00)],
             clips: vec![clip(2)],
             clip_easing: Vec::new(),
+            materials: BTreeMap::new(),
         };
         let idx = rig.add_bone(0);
         assert_eq!(idx, 2);
@@ -1544,6 +1614,7 @@ mod tests {
             bones: vec![bone("body", -1, 0x80ff_0000), bone("arm", 0, 0x8000_ff00)],
             clips: vec![clip(2)],
             clip_easing: Vec::new(),
+            materials: BTreeMap::new(),
         };
         let idx = rig.duplicate_bone(1).expect("in range");
         assert_eq!(idx, 2);
@@ -1571,6 +1642,7 @@ mod tests {
             bones: vec![bone("body", -1, 0x80ff_0000), bone("arm", 0, 0x8000_ff00)],
             clips: Vec::new(),
             clip_easing: Vec::new(),
+            materials: BTreeMap::new(),
         };
         let idx = rig.duplicate_bone(0).expect("in range");
         assert_eq!(idx, 2);
@@ -1597,6 +1669,7 @@ mod tests {
             ],
             clips: vec![clip(3)],
             clip_easing: Vec::new(),
+            materials: BTreeMap::new(),
         };
         // Move the grandchild (2) to the front (0): order becomes grand, root,
         // child — old indices [0,1,2] map to new [1,2,0].
@@ -1635,6 +1708,7 @@ mod tests {
             bones: vec![bone("body", -1, 0x80ff_0000)],
             clips: vec![clip(1)],
             clip_easing: Vec::new(),
+            materials: BTreeMap::new(),
         };
         let mut part = VoxelModel::new(2, 2, 2);
         part.set(0, 0, 0, 0x8000_ff00);
@@ -1678,6 +1752,7 @@ mod tests {
             ],
             clips: vec![clip(4)],
             clip_easing: Vec::new(),
+            materials: BTreeMap::new(),
         };
         assert!(rig.delete_bone(1));
         assert_eq!(rig.bones.len(), 3);
@@ -1704,6 +1779,7 @@ mod tests {
             bones: vec![bone("root", -1, 1), bone("arm", 0, 2)],
             clips: Vec::new(),
             clip_easing: Vec::new(),
+            materials: BTreeMap::new(),
         };
         assert!(!rig.delete_bone(0), "root must not be deletable");
         assert_eq!(rig.bones.len(), 2);
@@ -1720,6 +1796,7 @@ mod tests {
             bones: vec![bone("root", -1, 1)],
             clips: vec![clip(1)],
             clip_easing: Vec::new(),
+            materials: BTreeMap::new(),
         };
         rig.add_bone(0);
         // frmval columns must match bones.len() or to/from character breaks.
@@ -1738,6 +1815,7 @@ mod tests {
             bones: vec![bone("only", -1, 0x80ab_cdef)],
             clips: Vec::new(),
             clip_easing: Vec::new(),
+            materials: BTreeMap::new(),
         };
         let back = Rig::from_rkc_bytes(&rig.to_rkc_bytes()).expect("parses");
         assert_eq!(back.bones.len(), 1);
@@ -1807,6 +1885,7 @@ mod tests {
             bones,
             clips: vec![anim_clip(nbones)],
             clip_easing: Vec::new(),
+            materials: BTreeMap::new(),
         }
     }
 
