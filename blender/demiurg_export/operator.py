@@ -13,6 +13,7 @@ import tempfile
 
 import bpy
 from bpy.props import BoolProperty, FloatProperty, IntProperty, StringProperty
+from mathutils import Matrix, Quaternion, Vector
 from bpy_extras.io_utils import ExportHelper
 
 from . import anim, axes, bundle, rig, skin, voxelize
@@ -55,20 +56,35 @@ def _pick_armature(context):
     return None
 
 
+def is_voxel_clip(obj):
+    """Whether `obj` is marked to be baked frame by frame.
+
+    Through `getattr` because the flag is registered by the addon, while
+    `build_manifest` is also driven straight from scripts — a missing property
+    just means "not flagged", not a crash.
+    """
+    return bool(getattr(obj, "demiurg_voxel_clip", False))
+
+
 def _bone_meshes(armature):
     """Mesh children of `armature`, split by how they are attached: the ones
     parented to a bone (grouped by bone), and the ones an armature modifier
     deforms (which have to be cut up by weight — see [`skin`])."""
     by_bone = {}
+    by_clip_bone = {}
     skinned = []
     for obj in armature.children:
         if obj.type != "MESH":
             continue
         if obj.parent_type == "BONE" and obj.parent_bone:
-            by_bone.setdefault(obj.parent_bone, []).append(obj)
+            # Flagged meshes take the flipbook path; the rest stay rigid.
+            # `getattr` because the flag is registered by the addon, and
+            # `build_manifest` is also driven straight from scripts.
+            target = by_clip_bone if is_voxel_clip(obj) else by_bone
+            target.setdefault(obj.parent_bone, []).append(obj)
         elif any(m.type == "ARMATURE" for m in obj.modifiers):
             skinned.append(obj)
-    return by_bone, skinned
+    return by_bone, by_clip_bone, skinned
 
 
 class _RestPose:
@@ -182,6 +198,138 @@ def _voxel_field(context, objects, to_space, voxels_per_unit, solid, bone_names=
     return out
 
 
+def _clip_sample_frames(context, clip_fps):
+    """Scene frames to sample a deforming mesh at, and the ms each one holds.
+
+    Independent of the scene's frame rate on purpose: this is the knob that
+    decides what a deforming bone costs, since every sample is a whole voxel
+    grid. Sampling every rendered frame of a 24 fps action would quadruple the
+    file for motion the eye reads the same.
+    """
+    scene = context.scene
+    fps = scene.render.fps / scene.render.fps_base
+    start, end = scene.frame_start, scene.frame_end
+    span_s = max(0.0, (end - start) / fps)
+    count = max(1, int(round(span_s * clip_fps)))
+    step = (end - start) / count if count else 0.0
+    frames = [start + i * step for i in range(count)]
+    return frames, max(1, int(round(1000.0 / clip_fps)))
+
+
+def _bone_frame_transform(armature, bone_name):
+    """`(inverse delta rotation, posed head)` of a bone at the current frame.
+
+    A clip's frames are stored in the bone's own frame, so whatever the
+    skeleton does to the bone has to come *out* of the geometry — otherwise
+    playback applies it a second time and a carried slime swings twice as far.
+    """
+    pose_bone = armature.pose.bones.get(bone_name)
+    if pose_bone is None:
+        return Quaternion(), Vector((0.0, 0.0, 0.0))
+    delta = pose_bone.matrix @ pose_bone.bone.matrix_local.inverted()
+    return delta.to_quaternion().inverted(), pose_bone.matrix.translation.copy()
+
+
+def _clip_segments(context, windows, clip_fps):
+    """What to sample, as `[(action, frames, window_ms)]`.
+
+    With no windows — a blob with no skeleton — that is the scene's range,
+    once. With them, it is each action over its own frame range, and the
+    flipbook is the concatenation: this is what lets one bone deform
+    differently per action, since the rig playhead is what picks the frame and
+    each action owns its own stretch of the timeline.
+    """
+    if not windows:
+        frames, frame_ms = _clip_sample_frames(context, clip_fps)
+        return [(None, frames, len(frames) * frame_ms)]
+    scene = context.scene
+    fps = scene.render.fps / scene.render.fps_base
+    segments = []
+    for window in windows:
+        start, end = window["frame_start"], window["frame_end"]
+        span_s = max(0.0, (end - start) / fps)
+        count = max(1, int(round(span_s * clip_fps)))
+        step = (end - start) / count if count else 0.0
+        segments.append(
+            (window["action"], [start + i * step for i in range(count)], window["length_ms"])
+        )
+    return segments
+
+
+def _bake_voxel_clip(context, objects, armature, bone_name, voxels_per_unit, solid,
+                     clip_fps, windows=None):
+    """Voxelize `objects` once per sampled frame into one shared grid.
+
+    Returns a manifest `clip`, or `None` if the mesh has no faces. The grid
+    covers the union of every frame's bounds, because the format shares
+    `dims`/`pivot` across frames — a per-frame fit would make the blob jump
+    around its own pivot.
+    """
+    scene = context.scene
+    saved = scene.frame_current
+    segments = _clip_segments(context, windows, clip_fps)
+    to_space = armature.matrix_world.inverted() if armature else Matrix()
+
+    # Pass one: gather each sample's geometry, in the bone's own frame.
+    samples = []
+    durations = []
+    try:
+        for action, sample_frames, window_ms in segments:
+            swap = anim.action_swap(armature, action) if action is not None else None
+            if swap is not None:
+                swap.__enter__()
+            try:
+                taken = 0
+                for value in sample_frames:
+                    scene.frame_set(int(value), subframe=float(value) - int(value))
+                    inverse_delta, head = (
+                        _bone_frame_transform(armature, bone_name)
+                        if armature
+                        else (Quaternion(), Vector((0.0, 0.0, 0.0)))
+                    )
+                    verts, tris, tri_colors, _ = _triangles(context, objects, to_space)
+                    if not tris:
+                        continue
+                    local = [inverse_delta @ (v - head) for v in verts]
+                    samples.append((local, tris, tri_colors))
+                    taken += 1
+                # Durations that sum to the window exactly, so the next
+                # action's window starts on this action's last frame ending.
+                durations.extend(rig.split_evenly(window_ms, taken))
+            finally:
+                if swap is not None:
+                    swap.__exit__(None, None, None)
+    finally:
+        scene.frame_set(saved)
+    if not samples:
+        return None
+
+    # One grid over every sample, with the bone's head — the pivot — inside it.
+    corners = [
+        axes.bounds_of([axes.to_voxels(v, voxels_per_unit) for v in local])
+        for local, _, _ in samples
+    ]
+    lo = tuple(min(c[0][i] for c in corners) for i in range(3))
+    hi = tuple(max(c[1][i] for c in corners) for i in range(3))
+    origin, dims, pivot = axes.grid_layout(lo, hi, (0.0, 0.0, 0.0))
+    if max(dims) > MAX_BONE_DIM:
+        raise ValueError(
+            f"clip grid is {dims[0]}x{dims[1]}x{dims[2]} voxels, over the {MAX_BONE_DIM} "
+            "limit; lower 'Voxels per unit'"
+        )
+
+    # Pass two: fill that grid, sample by sample.
+    frames = []
+    for local, tris, tri_colors in samples:
+        nearest = voxelize.bvh_nearest(local, tris)
+        frames.append(
+            voxelize.voxelize(nearest, origin, dims, voxels_per_unit, tri_colors, solid)
+        )
+    return rig.voxel_clip_entry(
+        dims, pivot, frames, max(1, durations[0] if durations else 1), durations=durations
+    )
+
+
 def _mesh_entry(voxels, head_vox):
     """A bone's manifest `mesh` from its voxels in armature space, or `None`
     when it has none. Raises `ValueError` if the bone's own grid is too large
@@ -206,15 +354,33 @@ def _mesh_entry(voxels, head_vox):
 
 
 def build_manifest(context, armature, voxels_per_unit, solid,
-                   export_animation=True, all_actions=False):
+                   export_animation=True, all_actions=False, clip_fps=12.0):
     """The manifest for `armature` (or, with `armature=None`, for the selected
-    meshes as a bare model). Returns `(manifest, warnings)`."""
+    meshes as a model or a lone deforming blob). Returns `(manifest, warnings)`."""
     stamp = f"written by the demiurg Blender addon from {bpy.data.filepath or 'an unsaved file'}"
     warnings = []
     if armature is None:
         meshes = [o for o in context.selected_objects if o.type == "MESH"]
         if not meshes:
             raise ValueError("select an armature to export a rig, or a mesh to export a model")
+        deforming = [o for o in meshes if is_voxel_clip(o)]
+        if deforming:
+            # A blob with no skeleton at all. A bare model holds one static
+            # mesh, so wrap the flipbook in the smallest rig that can carry
+            # it: one bone, no animation of its own.
+            if len(deforming) != len(meshes):
+                warnings.append(
+                    "exported only the meshes marked 'Voxelize per frame'; "
+                    "a document is either a flipbook or a static model"
+                )
+            entry = _bake_voxel_clip(
+                context, deforming, None, None, voxels_per_unit, solid, clip_fps
+            )
+            if entry is None:
+                raise ValueError("the selected meshes have no faces to voxelize")
+            bone = rig.bone_entry(deforming[0].name, None, (0.0, 0.0, 0.0))
+            bone["clip"] = entry
+            return rig.rig_manifest(deforming[0].name, [bone], None, stamp), warnings
         # No skeleton, so the model's own origin is the pivot: keep the
         # scene's world origin as the reference frame.
         identity = meshes[0].matrix_world.copy()
@@ -225,8 +391,16 @@ def build_manifest(context, armature, voxels_per_unit, solid,
             raise ValueError("the selected meshes have no faces to voxelize")
         return rig.model_manifest(meshes[0].name, entry, stamp), warnings
 
-    by_bone, skinned = _bone_meshes(armature)
-    if not by_bone and not skinned:
+    by_bone, by_clip_bone, skinned = _bone_meshes(armature)
+    flagged_skin = [o.name for o in skinned if is_voxel_clip(o)]
+    if flagged_skin:
+        warnings.append(
+            "marked 'Voxelize per frame' but bound by an armature modifier: "
+            + ", ".join(sorted(flagged_skin))
+            + " — parent it to a bone (Ctrl+P > Bone) to bake it as a flipbook; "
+            "cut into rigid chunks instead"
+        )
+    if not by_bone and not by_clip_bone and not skinned:
         raise ValueError(
             "no mesh is attached to this armature: parent one to a bone "
             "(Ctrl+P > Bone), or bind it with an armature modifier"
@@ -238,6 +412,32 @@ def build_manifest(context, armature, voxels_per_unit, solid,
         b.name: axes.to_voxels(b.matrix_local.translation, voxels_per_unit) for b in bones
     }
     parent_of = {b.name: (b.parent.name if b.parent else None) for b in bones}
+    joints = {
+        b.name: rig.joint_offset(
+            heads[b.name], heads[parent_of[b.name]] if parent_of[b.name] else None
+        )
+        for b in bones
+    }
+
+    # Clips first, because a deforming bone's flipbook has to follow their
+    # layout. When several actions share a rig that has one, they are laid out
+    # on separate windows of one timeline — the playhead is what picks a
+    # flipbook frame, so the actions have to be distinguishable by time.
+    clips = []
+    windows = []
+    if export_animation:
+        actions, _ = anim.armature_actions(armature, all_actions)
+        windowed = bool(by_clip_bone) and len(actions) > 1
+        clips, clip_warnings, windows = anim.build_clips(
+            context, armature, voxels_per_unit, joints, all_actions, windowed
+        )
+        warnings.extend(clip_warnings)
+        if windowed and len(windows) > 1:
+            warnings.append(
+                f"laid {len(windows)} actions on separate windows of one timeline so "
+                + ", ".join(sorted(by_clip_bone))
+                + " can deform differently in each; the host seeks to a clip's own start"
+            )
 
     # Skinned meshes are cut up in one pass over the whole character: a bone's
     # share isn't known until the split has run, so it can't be done per bone.
@@ -276,11 +476,31 @@ def build_manifest(context, armature, voxels_per_unit, solid,
         )
 
     entries = []
-    joints = {}
     for name in rig.sorted_bones([b.name for b in bones], parent_of.get):
         parent = parent_of[name]
+        joint = joints[name]
         try:
-            # A bone can have both: a chunk cut out of the skin and its own
+            # A deforming bone replaces its geometry every frame, so it has a
+            # flipbook where a rigid one has a mesh — never both, since the
+            # engine draws one primary attachment.
+            if name in by_clip_bone:
+                if name in by_bone or name in skin_voxels:
+                    warnings.append(
+                        f"bone {name!r} also has rigid geometry, which the flipbook replaces"
+                    )
+                entry = rig.bone_entry(name, parent, joint)
+                clip = _bake_voxel_clip(
+                    context, by_clip_bone[name], armature, name,
+                    voxels_per_unit, solid, clip_fps, windows,
+                )
+                if clip is None:
+                    warnings.append(f"bone {name!r}: nothing to voxelize per frame")
+                else:
+                    entry["clip"] = clip
+                entries.append(entry)
+                continue
+
+            # A bone can have both a chunk cut out of the skin and its own
             # parented mesh (an accessory, say). The parented one wins where
             # they overlap, being the more deliberate of the two.
             voxels = dict(skin_voxels.get(name, {}))
@@ -292,24 +512,13 @@ def build_manifest(context, armature, voxels_per_unit, solid,
             # A bone with no mesh is legal (the converter gives it an empty
             # model), but it is usually an oversight worth naming.
             warnings.append(f"bone {name!r} has no geometry")
-        joint = rig.joint_offset(heads[name], heads[parent] if parent else None)
-        joints[name] = joint
         entries.append(rig.bone_entry(name, parent, joint, mesh))
 
-    clips = []
-    if export_animation:
-        # The bake needs the same rest offsets the bone entries carry, so a
-        # keyframe's translation is measured from the joint rather than
-        # re-deriving (and re-rounding) it.
-        clips, clip_warnings = anim.build_clips(
-            context, armature, voxels_per_unit, joints, all_actions
-        )
-        warnings.extend(clip_warnings)
     return rig.rig_manifest(armature.name, entries, clips, stamp), warnings
 
 
 def export_document(context, filepath, voxels_per_unit=10.0, solid=True,
-                    export_animation=True, all_actions=False,
+                    export_animation=True, all_actions=False, clip_fps=12.0,
                     converter=None, keep_manifest=False):
     """Voxelize the scene and write `filepath` through `demiurg-convert`.
 
@@ -325,7 +534,7 @@ def export_document(context, filepath, voxels_per_unit=10.0, solid=True,
         )
     armature = _pick_armature(context)
     manifest, warnings = build_manifest(
-        context, armature, voxels_per_unit, solid, export_animation, all_actions
+        context, armature, voxels_per_unit, solid, export_animation, all_actions, clip_fps
     )
 
     if keep_manifest:
@@ -425,6 +634,17 @@ class DEMIURG_OT_export_rig(bpy.types.Operator, ExportHelper):
         ),
         default=False,
     )
+    clip_fps: FloatProperty(
+        name="Clip fps",
+        description=(
+            "How often to voxelize a mesh marked 'Voxelize per frame'. Every "
+            "sample is a whole voxel grid, so this is the knob that decides "
+            "what a deforming mesh costs"
+        ),
+        default=12.0,
+        min=1.0,
+        max=60.0,
+    )
     keep_manifest: BoolProperty(
         name="Keep manifest",
         description="Write the intermediate JSON next to the output, for debugging",
@@ -442,6 +662,7 @@ class DEMIURG_OT_export_rig(bpy.types.Operator, ExportHelper):
                 solid=self.solid,
                 export_animation=self.export_animation,
                 all_actions=self.all_actions,
+                clip_fps=self.clip_fps,
                 converter=converter,
                 keep_manifest=self.keep_manifest,
             )
@@ -454,14 +675,49 @@ class DEMIURG_OT_export_rig(bpy.types.Operator, ExportHelper):
         return {"FINISHED"}
 
 
+class OBJECT_PT_demiurg(bpy.types.Panel):
+    """Per-object export settings, in Object Properties."""
+
+    bl_idname = "OBJECT_PT_demiurg"
+    bl_label = "demiurg"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "object"
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None and context.object.type == "MESH"
+
+    def draw(self, context):
+        layout = self.layout
+        obj = context.object
+        layout.prop(obj, "demiurg_voxel_clip")
+        if obj.demiurg_voxel_clip:
+            column = layout.column(align=True)
+            column.label(text="Voxelized every frame, not once", icon="INFO")
+            column.label(text="Costs a full grid per sampled frame")
+
+
 def menu_func_export(self, context):
     self.layout.operator(DEMIURG_OT_export_rig.bl_idname, text="demiurg rig (.demiurg)")
 
 
-_CLASSES = (DemiurgExportPreferences, DEMIURG_OT_export_rig)
+_CLASSES = (DemiurgExportPreferences, DEMIURG_OT_export_rig, OBJECT_PT_demiurg)
 
 
 def register():
+    # A per-object flag rather than an export option: which mesh deforms is a
+    # property of the model, not of one export, and an artist should be able
+    # to set it once and forget it.
+    bpy.types.Object.demiurg_voxel_clip = BoolProperty(
+        name="Voxelize per frame",
+        description=(
+            "Bake this mesh as a per-frame voxel flipbook instead of one rigid "
+            "mesh the skeleton moves. For geometry that deforms — a slime, "
+            "cloth, a squashing blob — which bones cannot express"
+        ),
+        default=False,
+    )
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
@@ -471,3 +727,4 @@ def unregister():
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     for cls in reversed(_CLASSES):
         bpy.utils.unregister_class(cls)
+    del bpy.types.Object.demiurg_voxel_clip

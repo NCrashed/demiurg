@@ -59,6 +59,43 @@ def joint_offset(child_head_vox, parent_head_vox):
     return tuple(child_head_vox[i] - parent_head_vox[i] for i in range(3))
 
 
+def voxel_clip_entry(dims, pivot, frames, frame_ms, loops=True, durations=None):
+    """A bone's per-frame flipbook: `frames` is a list of
+    `{(i, j, k): "rrggbb"}`, all in the one shared grid.
+
+    `durations` gives each frame its own ms. Needed when the actions are laid
+    out on separate windows: the flipbook's frame boundaries have to land
+    exactly on the window boundaries, or one action's last frame bleeds into
+    the next action's geometry.
+    """
+    entries = []
+    for i, filled in enumerate(frames):
+        entry = {"voxels": voxel_list(filled)}
+        if durations is not None:
+            entry["duration_ms"] = int(durations[i])
+        entries.append(entry)
+    return {
+        "dims": [int(d) for d in dims],
+        "pivot": [round(float(p), 4) for p in pivot],
+        "frame_ms": int(frame_ms),
+        "loop": "loop" if loops else "once",
+        "frames": entries,
+    }
+
+
+def split_evenly(total_ms, count):
+    """`count` whole-ms durations summing to exactly `total_ms`.
+
+    Exactly, not approximately: these are the flipbook's frame durations, and
+    a few ms of drift per window would eventually walk one action's playhead
+    into the next one's frames.
+    """
+    if count <= 0:
+        return []
+    base, remainder = divmod(int(total_ms), count)
+    return [base + (1 if i < remainder else 0) for i in range(count)]
+
+
 def xform_entry(translation=None, rotation=None, scale=None, places=5):
     """A bone's transform at a keyframe, with anything at its default left
     out — a bone that only turns writes `{"r": [...]}`. Rounded, because five

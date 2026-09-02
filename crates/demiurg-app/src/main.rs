@@ -44,8 +44,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use demiurg_core::{
-    ClipDoc, Document, KeyXform, LayerPlayback, LoopMode, Quat, Rig, RigAttachment, RigBone,
-    VoxelModel, project,
+    ClipDoc, Document, KeyXform, LoopMode, Quat, Rig, RigAttachment, RigBone, VoxelModel, project,
 };
 use demiurg_i18n::{Lang, Msg, tr};
 use demiurg_view::{
@@ -1445,9 +1444,9 @@ fn main() {
             eprintln!("demiurg: --dump-pose needs a rigged document (.rkc or a rig .demiurg)");
             exit(2);
         };
-        #[allow(clippy::cast_possible_truncation)]
-        let t = flag_f64("--time").map_or(0i32, |v| v as i32);
         let clip = shot_clip(rig);
+        #[allow(clippy::cast_possible_truncation)]
+        let t = clip_start(rig, clip) + flag_f64("--time").map_or(0i32, |v| v as i32);
         let mut kfa = KfaView::from_rig(rig.clone(), clip);
         kfa.set_time(t);
         kfa.advance(0); // resolve the pose at the playhead and solve the limbs
@@ -1484,7 +1483,7 @@ fn main() {
         let mut rig_shot = startup_rig.as_ref().map(|rig| {
             let clip = shot_clip(rig);
             #[allow(clippy::cast_possible_truncation)]
-            let t = flag_f64("--time").map_or(0i32, |v| v as i32);
+            let t = clip_start(rig, clip) + flag_f64("--time").map_or(0i32, |v| v as i32);
             // Say what was rendered: a shot of the wrong clip (or of the rest
             // pose, when `--clip` was forgotten) otherwise looks like a bad export.
             let what = clip.map_or_else(
@@ -1610,6 +1609,19 @@ fn main() {
     event_loop.run_app(&mut app).expect("winit: run_app");
 }
 
+/// Where a clip begins on the rig's timeline.
+///
+/// Clips normally start at 0, but an exporter that needs one bone to deform
+/// differently per action lays them on separate windows of one timeline — the
+/// playhead is what picks a flipbook frame, so the actions have to be
+/// distinguishable by time. `--time` is measured from a clip's own start so
+/// that stays an implementation detail of the file rather than something to
+/// remember when taking a screenshot.
+fn clip_start(rig: &Rig, clip: Option<usize>) -> i32 {
+    clip.and_then(|i| rig.clip_keyframes(i).first().map(|k| k.tim))
+        .unwrap_or(0)
+}
+
 /// The clip a `--shot` renders: `--clip <name|index>`, or `None` (the rest
 /// pose) when the flag is absent. An index is tried first, so a clip named
 /// `"0"` needs its index. An unknown clip exits with the list of real ones —
@@ -1677,16 +1689,6 @@ fn load_any(path: &str) -> project::Loaded {
 
 /// A blank canvas with a single seed voxel at the centre, so the place
 /// tool has a face to build on.
-/// The frame index a clip attachment shows at rig playhead `time_ms`, advanced
-/// by its [`LayerPlayback`] (Q8 speed, ms phase). Lets a clip layer animate
-/// along the rig's clip while it plays.
-fn clip_frame_at(clip: &ClipDoc, playback: LayerPlayback, time_ms: i32) -> usize {
-    let t = (i64::from(time_ms) * i64::from(playback.speed_q8) / 256
-        + i64::from(playback.start_phase_ms))
-    .max(0);
-    clip.frame_at(u32::try_from(t).unwrap_or(u32::MAX))
-}
-
 fn new_model() -> VoxelModel {
     let mut m = VoxelModel::new(NEW_DIMS, NEW_DIMS, NEW_DIMS);
     let c = NEW_DIMS / 2;
@@ -6561,7 +6563,7 @@ impl App {
                     };
                     // Clip primary: at the bone pose (identity offset).
                     if let Some(clip) = &bone.primary_clip {
-                        let frame = clip_frame_at(clip, bone.primary_playback, play_t);
+                        let frame = clip.frame_at_playback(bone.primary_playback, play_t);
                         if let Some(cf) = clip.frames.get(frame) {
                             posed(renderer, cf.model.to_kv6(), bs, bh, bf, bp);
                         }
@@ -6570,7 +6572,7 @@ impl App {
                     for ex in &bone.extras {
                         let (s, h, f, pos) = compose_attachment(bs, bh, bf, bp, &ex.offset);
                         let kv6 = if let Some(clip) = &ex.clip {
-                            let frame = clip_frame_at(clip, ex.playback, play_t);
+                            let frame = clip.frame_at_playback(ex.playback, play_t);
                             clip.frames.get(frame).map(|cf| cf.model.to_kv6())
                         } else {
                             Some(ex.model.to_kv6())

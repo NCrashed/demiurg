@@ -87,6 +87,58 @@ pub struct BoneSpec {
     /// bone that carries no geometry.
     #[serde(default)]
     pub mesh: Option<MeshSpec>,
+    /// Per-frame geometry instead of a rigid mesh: the bone draws a flipbook
+    /// of voxel frames, played on the rig's clock. This is how anything that
+    /// *deforms* rather than articulates — a slime, cloth, a squashing
+    /// blob — survives the trip, since the skeleton can only move rigid
+    /// chunks. Mutually exclusive with [`Self::mesh`]; bones can be mixed
+    /// freely, so a rigid skeleton with one soft part is fine.
+    #[serde(default)]
+    pub clip: Option<VoxelClipSpec>,
+}
+
+/// A bone's per-frame voxel flipbook.
+///
+/// `dims` and `pivot` are clip-level, shared by every frame — that is the
+/// engine's rule, so an exporter has to lay one grid over the union of every
+/// frame's bounds rather than fitting each frame separately.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VoxelClipSpec {
+    /// Grid dimensions, shared by every frame.
+    pub dims: [u32; 3],
+    /// Pivot in voxel units — the point the bone rotates the clip about.
+    /// Defaults to the grid centre.
+    #[serde(default)]
+    pub pivot: Option<[f32; 3]>,
+    /// On-screen ms per frame, for frames that don't set their own.
+    #[serde(default = "default_frame_ms")]
+    pub frame_ms: u32,
+    /// `"loop"` (the default), `"once"` to hold the last frame, or
+    /// `"pingpong"`.
+    #[serde(rename = "loop", default = "default_loop_mode")]
+    pub loop_mode: String,
+    /// Playback rate; `1.0` runs the flipbook at its own frame durations.
+    #[serde(default = "default_speed")]
+    pub speed: f32,
+    /// Initial clock offset, so several copies of one clip don't play in
+    /// lockstep.
+    #[serde(default)]
+    pub phase_ms: u32,
+    /// The frames, in playback order. At least one.
+    pub frames: Vec<VoxelFrameSpec>,
+}
+
+/// One frame of a [`VoxelClipSpec`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VoxelFrameSpec {
+    /// Occupied voxels, `[x, y, z, "rrggbb"]`, in the clip's shared grid.
+    #[serde(default)]
+    pub voxels: Vec<Voxel>,
+    /// On-screen ms; absent uses the clip's [`VoxelClipSpec::frame_ms`].
+    #[serde(default)]
+    pub duration_ms: Option<u32>,
 }
 
 /// A voxel mesh, either inline or read from a `.vox` file beside the manifest.
@@ -202,4 +254,21 @@ fn default_scale() -> [f32; 3] {
 /// `#[serde(default)]` for a `bool` field that defaults to `true`.
 fn default_true() -> bool {
     true
+}
+
+/// A voxel clip's default frame duration: ~12 fps, a readable flipbook rate
+/// that doesn't multiply the file size the way sampling every render frame
+/// would.
+fn default_frame_ms() -> u32 {
+    83
+}
+
+/// Voxel clips loop unless told otherwise.
+fn default_loop_mode() -> String {
+    "loop".to_string()
+}
+
+/// Real-time playback.
+fn default_speed() -> f32 {
+    1.0
 }

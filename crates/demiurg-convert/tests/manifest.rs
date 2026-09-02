@@ -183,6 +183,208 @@ fn a_translation_key_moves_the_bone_from_its_joint() {
     }
 }
 
+/// A rigid root with a deforming child: the case a skeleton alone can't
+/// express, since a bone moves its mesh but never reshapes it.
+fn mixed_rig() -> &'static str {
+    r#"{
+      "format": "demiurg-rig", "version": 1, "name": "slime",
+      "bones": [
+        { "name": "base", "mesh": { "dims": [2, 2, 2], "pivot": [1.0, 1.0, 0.0],
+                                    "voxels": [[0, 0, 0, "334455"]] } },
+        { "name": "blob", "parent": "base", "joint": [0.0, 0.0, -2.0],
+          "clip": {
+            "dims": [4, 4, 4], "pivot": [2.0, 2.0, 0.0],
+            "frame_ms": 100, "loop": "pingpong", "speed": 1.5, "phase_ms": 40,
+            "frames": [
+              { "voxels": [[0, 0, 0, "22cc55"]] },
+              { "voxels": [[1, 1, 1, "22cc55"], [2, 2, 2, "22cc55"]], "duration_ms": 250 },
+              { "voxels": [[3, 3, 3, "22cc55"]] }
+            ]
+          } }
+      ]
+    }"#
+}
+
+#[test]
+fn a_bone_can_carry_per_frame_geometry() {
+    let out = convert(mixed_rig().as_bytes(), Path::new("."), Output::Demiurg).expect("converts");
+    let Loaded::Rig(rig) = project::from_bytes(&out.bytes).expect("loads") else {
+        panic!("expected a rig");
+    };
+    // The rigid bone is untouched by any of this.
+    assert!(rig.bones[0].primary_clip.is_none());
+    assert_eq!(rig.bones[0].model.occupied_count(), 1);
+
+    let clip = rig.bones[1]
+        .primary_clip
+        .as_ref()
+        .expect("the bone draws a clip");
+    assert_eq!(clip.dims, [4, 4, 4]);
+    assert_eq!(clip.frames.len(), 3);
+    assert_eq!(clip.default_frame_ms, 100);
+    assert_eq!(clip.loop_mode, demiurg_core::LoopMode::PingPong);
+    assert_eq!(clip.frames[1].duration_ms, Some(250));
+    // The frames really are different geometry, which is the whole point.
+    assert_eq!(clip.frames[0].model.get(0, 0, 0), 0x8022_cc55);
+    assert_eq!(clip.frames[0].model.get(3, 3, 3), 0);
+    assert_eq!(clip.frames[1].model.occupied_count(), 2);
+    assert_eq!(clip.frames[2].model.get(3, 3, 3), 0x8022_cc55);
+    // Playback: 1.5x in Q8, and the phase offset.
+    assert_eq!(rig.bones[1].primary_playback.speed_q8, 384);
+    assert_eq!(rig.bones[1].primary_playback.start_phase_ms, 40);
+
+    // A clip bone's voxels are in its frames, not its placeholder model, so
+    // the summary has to look there or a slime reports as an empty rig.
+    assert_eq!(out.stats.clip_frames, 3);
+    assert_eq!(out.stats.voxels, 1 + 1 + 2 + 1);
+}
+
+#[test]
+fn a_clip_bone_still_hangs_off_its_joint() {
+    // The flipbook replaces the geometry, not the skeleton: the bone is posed
+    // exactly like a rigid one.
+    let out = convert(mixed_rig().as_bytes(), Path::new("."), Output::Demiurg).expect("converts");
+    let Loaded::Rig(rig) = project::from_bytes(&out.bytes).expect("loads") else {
+        panic!("expected a rig");
+    };
+    let posed = solved_positions(&rig, None, 0);
+    let offset = [
+        posed[1][0] - posed[0][0],
+        posed[1][1] - posed[0][1],
+        posed[1][2] - posed[0][2],
+    ];
+    for (got, want) in offset.iter().zip([0.0_f32, 0.0, -2.0]) {
+        assert!(
+            (got - want).abs() < 1e-3,
+            "clip bone at its joint; got {offset:?}"
+        );
+    }
+}
+
+#[test]
+fn rkc_carries_the_voxel_clip_too() {
+    // The engine container has to receive it, not just the editor project.
+    let out = convert(mixed_rig().as_bytes(), Path::new("."), Output::Rkc).expect("converts");
+    let rig = demiurg_core::Rig::from_rkc_bytes(&out.bytes).expect("parses as .rkc");
+    let clip = rig.bones[1]
+        .primary_clip
+        .as_ref()
+        .expect("clip survives .rkc");
+    assert_eq!(clip.frames.len(), 3);
+    assert_eq!(clip.frames[2].model.get(3, 3, 3), 0x8022_cc55);
+}
+
+#[test]
+fn skeletal_clips_can_own_disjoint_windows_of_one_timeline() {
+    // The way out of "one flipbook per bone": a bone's per-frame geometry is
+    // picked by the rig playhead, and a skeletal clip's `seq` holds *absolute*
+    // times — nothing says a clip must start at 0. Lay `walk` on 0..1000 and
+    // `idle` on 1000..2000, give the flipbook frames covering both, and each
+    // action reaches its own geometry.
+    let json = r#"{
+      "format": "demiurg-rig", "version": 1,
+      "bones": [
+        { "name": "root", "mesh": { "dims": [1, 1, 1], "pivot": [0.0, 0.0, 0.0],
+                                    "voxels": [[0, 0, 0, "ffffff"]] } },
+        { "name": "blob", "parent": "root", "joint": [0.0, 0.0, -2.0],
+          "clip": { "dims": [4, 4, 4], "frame_ms": 500, "loop": "loop", "frames": [
+            { "voxels": [[0, 0, 0, "111111"]] },
+            { "voxels": [[1, 0, 0, "111111"]] },
+            { "voxels": [[2, 0, 0, "222222"]] },
+            { "voxels": [[3, 0, 0, "222222"]] } ] } }
+      ],
+      "clips": [
+        { "name": "walk", "length_ms": 1000, "keys": [
+          { "t": 0, "pose": {} }, { "t": 500, "pose": {} } ] },
+        { "name": "idle", "length_ms": 2000, "keys": [
+          { "t": 1000, "pose": {} }, { "t": 1500, "pose": {} } ] }
+      ]
+    }"#;
+    let rig = load_rig(json);
+    let clip = rig.bones[1]
+        .primary_clip
+        .as_ref()
+        .expect("the blob deforms");
+    let playback = rig.bones[1].primary_playback;
+
+    // Each action's window reaches its own half of the flipbook.
+    assert_eq!(
+        clip.frame_at_playback(playback, 0),
+        0,
+        "walk sees its own frames"
+    );
+    assert_eq!(clip.frame_at_playback(playback, 600), 1);
+    assert_eq!(
+        clip.frame_at_playback(playback, 1000),
+        2,
+        "idle sees different geometry"
+    );
+    assert_eq!(clip.frame_at_playback(playback, 1600), 3);
+
+    // And the clips really are laid out where the manifest asked.
+    assert_eq!(rig.clip_keyframes(0)[0].tim, 0);
+    assert_eq!(rig.clip_keyframes(1)[0].tim, 1000);
+    assert_eq!(rig.clip_keyframes(1).len(), 2, "no stray key at t=0");
+}
+
+#[test]
+fn a_looping_clip_stays_inside_its_own_window() {
+    // The load-bearing detail: the solver's loop marker sets the playhead to
+    // its *own* first entry, not to zero. Without that, `idle` would wrap to
+    // 0 and start showing `walk`'s geometry on its second cycle.
+    let json = r#"{
+      "format": "demiurg-rig", "version": 1,
+      "bones": [
+        { "name": "root", "mesh": { "dims": [1, 1, 1], "pivot": [0.0, 0.0, 0.0],
+                                    "voxels": [[0, 0, 0, "ffffff"]] } },
+        { "name": "arm", "parent": "root", "joint": [0.0, 0.0, 1.0],
+          "mesh": { "dims": [1, 1, 1], "pivot": [0.0, 0.0, 0.0],
+                    "voxels": [[0, 0, 0, "ffffff"]] } }
+      ],
+      "clips": [
+        { "name": "walk", "length_ms": 1000, "keys": [ { "t": 0, "pose": {} } ] },
+        { "name": "idle", "length_ms": 2000, "keys": [
+          { "t": 1000, "pose": {} }, { "t": 1500, "pose": {} } ] }
+      ]
+    }"#;
+    let rig = load_rig(json);
+    let mut sprite = rig.to_character().to_kfa_sprite(Some(1)); // idle
+    sprite.kfatim = 1900;
+    sprite.animsprite(400); // past the loop marker at 2000
+    assert!(
+        (1000..2000).contains(&sprite.kfatim),
+        "idle looped to {} — outside its own 1000..2000 window",
+        sprite.kfatim
+    );
+}
+
+#[test]
+fn clip_mistakes_are_rejected_by_name() {
+    rejects(
+        r#"{ "format": "demiurg-rig", "version": 1, "bones": [
+             { "name": "blob", "mesh": { "dims": [1, 1, 1] },
+               "clip": { "dims": [1, 1, 1], "frames": [{ "voxels": [] }] } } ] }"#,
+        "one or the other",
+    );
+    rejects(
+        r#"{ "format": "demiurg-rig", "version": 1, "bones": [
+             { "name": "blob", "clip": { "dims": [1, 1, 1], "frames": [] } } ] }"#,
+        "at least one frame",
+    );
+    rejects(
+        r#"{ "format": "demiurg-rig", "version": 1, "bones": [
+             { "name": "blob", "clip": { "dims": [1, 1, 1], "loop": "boomerang",
+                                         "frames": [{ "voxels": [] }] } } ] }"#,
+        "boomerang",
+    );
+    rejects(
+        r#"{ "format": "demiurg-rig", "version": 1, "bones": [
+             { "name": "blob", "clip": { "dims": [2, 2, 2],
+                 "frames": [{ "voxels": [[9, 0, 0, "ffffff"]] }] } } ] }"#,
+        "outside dims",
+    );
+}
+
 #[test]
 fn a_child_bone_comes_out_animatable() {
     let rig = load_rig(&two_bone_rig());

@@ -162,6 +162,9 @@ def main():
     if converter:
         converter = os.path.abspath(converter)
 
+    import demiurg_export
+
+    demiurg_export.register()  # registers the per-object flags the export reads
     build_scene()
     summary, warnings = demiurg_op.export_document(
         bpy.context, out, voxels_per_unit=VOXELS_PER_UNIT, solid=True,

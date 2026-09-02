@@ -28,12 +28,13 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use demiurg_core::VoxelModel;
-use demiurg_core::rig::{Rig, RigBone};
+use demiurg_core::clip::{ClipDoc, ClipFrame, LoopMode};
+use demiurg_core::rig::{LayerPlayback as ClipPlayback, Rig, RigBone};
 use demiurg_core::vox;
 use roxlap_formats::kfa::{Hinge, Point3};
 use roxlap_formats::xform::{BoneXform, Quat};
 
-use crate::manifest::{BoneSpec, ClipSpec, Manifest, MeshSpec, VERSION};
+use crate::manifest::{BoneSpec, ClipSpec, Manifest, MeshSpec, VERSION, VoxelClipSpec};
 
 /// How far a keyframe may sit from the identity before it counts as an actual
 /// pose. Baked exports carry float noise, so an exact comparison would flag a
@@ -68,6 +69,18 @@ pub enum ConvertError {
     /// A mesh gave both `vox_file` and inline `dims`/`voxels`, or an inline
     /// mesh gave no `dims`.
     MeshSource(String),
+    /// A bone gave both a rigid `mesh` and a per-frame `clip`. The engine
+    /// draws one primary attachment, so only one can win.
+    MeshAndClip(String),
+    /// A voxel clip with no frames.
+    EmptyClip(String),
+    /// A voxel clip's `loop` is not one of the three the format has.
+    BadLoopMode {
+        /// The bone the clip belongs to.
+        bone: String,
+        /// The offending value.
+        value: String,
+    },
     /// A voxel's colour is not a 6-digit hex string.
     BadColor {
         /// Bone (or `"mesh"`) the voxel belongs to.
@@ -147,6 +160,15 @@ impl fmt::Display for ConvertError {
                 f,
                 "{at}: give either \"vox_file\" or inline \"dims\" (+ \"voxels\"), not both or neither"
             ),
+            Self::MeshAndClip(n) => write!(
+                f,
+                "bone {n:?} has both a \"mesh\" and a \"clip\"; a bone draws one or the other"
+            ),
+            Self::EmptyClip(n) => write!(f, "bone {n:?}: a \"clip\" needs at least one frame"),
+            Self::BadLoopMode { bone, value } => write!(
+                f,
+                "bone {bone:?}: loop {value:?} is not \"loop\", \"once\", or \"pingpong\""
+            ),
             Self::BadColor { at, value } => {
                 write!(
                     f,
@@ -213,14 +235,23 @@ pub fn build_rig(m: &Manifest, base_dir: &Path) -> Result<Rig, ConvertError> {
         // `bone_index` proved every parent name resolves, and the count fits.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let parent = spec.parent.as_ref().map_or(-1, |p| index[p] as i32);
-        let model = build_mesh(
-            spec.mesh.as_ref(),
-            &format!("bone {:?}", spec.name),
-            base_dir,
-        )?;
+        if spec.mesh.is_some() && spec.clip.is_some() {
+            return Err(ConvertError::MeshAndClip(spec.name.clone()));
+        }
+        // A clip primary leaves `model` an unused placeholder — the engine
+        // reads the flipbook instead — so don't spend a grid on it.
+        let model = if spec.clip.is_some() {
+            VoxelModel::new(1, 1, 1)
+        } else {
+            build_mesh(
+                spec.mesh.as_ref(),
+                &format!("bone {:?}", spec.name),
+                base_dir,
+            )?
+        };
         let axis =
             unit_axis(spec.axis).ok_or_else(|| ConvertError::DegenerateAxis(spec.name.clone()))?;
-        bones.push(RigBone::mesh(
+        let mut bone = RigBone::mesh(
             spec.name.clone(),
             model,
             Hinge {
@@ -243,7 +274,12 @@ pub fn build_rig(m: &Manifest, base_dir: &Path) -> Result<Rig, ConvertError> {
                 filler: [0; 7],
             },
             Vec::new(),
-        ));
+        );
+        if let Some(clip) = &spec.clip {
+            bone.primary_clip = Some(build_voxel_clip(clip, &spec.name)?);
+            bone.primary_playback = playback_of(clip);
+        }
+        bones.push(bone);
     }
 
     let mut rig = Rig {
@@ -338,6 +374,69 @@ fn add_clip(
     }
     rig.set_clip_loops(ci, spec.loops);
     Ok(())
+}
+
+/// Build a bone's per-frame flipbook.
+///
+/// Every frame shares the clip's grid and pivot — the engine's rule, not a
+/// simplification here — so the frames differ only in which voxels are filled.
+fn build_voxel_clip(spec: &VoxelClipSpec, bone: &str) -> Result<ClipDoc, ConvertError> {
+    if spec.frames.is_empty() {
+        return Err(ConvertError::EmptyClip(bone.to_string()));
+    }
+    let loop_mode = match spec.loop_mode.as_str() {
+        "loop" => LoopMode::Loop,
+        "once" => LoopMode::Once,
+        "pingpong" => LoopMode::PingPong,
+        other => {
+            return Err(ConvertError::BadLoopMode {
+                bone: bone.to_string(),
+                value: other.to_string(),
+            });
+        }
+    };
+    let mut doc = ClipDoc::new(spec.dims);
+    doc.name = bone.to_string();
+    doc.loop_mode = loop_mode;
+    doc.default_frame_ms = spec.frame_ms;
+    if let Some(p) = spec.pivot {
+        doc.pivot = p;
+    }
+    let at = format!("bone {bone:?} clip");
+    let mut frames = Vec::with_capacity(spec.frames.len());
+    for f in &spec.frames {
+        let mut model = VoxelModel::new(spec.dims[0], spec.dims[1], spec.dims[2]);
+        model.pivot = doc.pivot;
+        for v in &f.voxels {
+            let col = parse_color(&v.3).ok_or_else(|| ConvertError::BadColor {
+                at: at.clone(),
+                value: v.3.clone(),
+            })?;
+            if !model.set(v.0, v.1, v.2, col) {
+                return Err(ConvertError::VoxelOutOfBounds {
+                    at: at.clone(),
+                    pos: [v.0, v.1, v.2],
+                    dims: spec.dims,
+                });
+            }
+        }
+        frames.push(ClipFrame {
+            model,
+            duration_ms: f.duration_ms,
+        });
+    }
+    doc.frames = frames;
+    Ok(doc)
+}
+
+/// A clip's playback params. Speed is Q8 fixed point in the engine.
+fn playback_of(spec: &VoxelClipSpec) -> ClipPlayback {
+    #[allow(clippy::cast_possible_truncation)] // a sane rate is far inside i32
+    let speed_q8 = (spec.speed * 256.0).round() as i32;
+    ClipPlayback {
+        speed_q8,
+        start_phase_ms: spec.phase_ms,
+    }
 }
 
 /// Build one mesh. `at` labels it in error messages.

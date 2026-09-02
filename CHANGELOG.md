@@ -7,6 +7,56 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-28
+
+Geometry that changes shape. A skeleton moves rigid chunks and cannot reshape
+one, so anything that squashes — a slime, cloth, a wobbling blob — now exports
+as a per-frame voxel flipbook the engine plays, including different geometry
+per action. `--shot` composes it, so it can still be checked without opening
+the editor.
+
+### Added
+
+- **Meshes that deform export as per-frame voxel flipbooks.** A skeleton moves
+  rigid chunks and cannot reshape one, so a slime baked at rest and then pushed
+  around by bones came out wrong no matter how the rig was built. A bone can
+  now carry an animated voxel clip instead of a mesh — the engine has had the
+  attachment kind all along — and the Blender addon bakes one from any
+  deformation Blender evaluates: shape keys, lattices, sims, drivers. Tick
+  **Voxelize per frame** on the object; on its own it exports as a one-bone
+  flipbook, parented to a bone it deforms while the rest of the skeleton stays
+  rigid, so a hard-shelled character with a soft belly is one export.
+
+  **Clip fps** is the size knob, independent of the scene's frame rate: every
+  sample is a whole voxel grid, so it is what decides the cost. A bone's frames
+  are stored in its own frame with its skeletal pose removed, so a carried blob
+  is not posed twice. The manifest gained a `clip` on a bone (mutually
+  exclusive with `mesh`, and rejected by name if both appear), and the summary
+  reports clip frames, since a clip bone's voxels live in its frames rather
+  than its placeholder model.
+
+  **A deforming bone can hold different geometry per action.** One bone has one
+  flipbook and the rig playhead picks its frame, so a rig with both a deforming
+  bone and several actions gets those actions laid out on separate windows of
+  one timeline — `walk` on 0…1000 ms, `idle` on 1000…1800 — with the flipbook
+  concatenated to cover them. Each action reaches its own geometry and still
+  cycles inside its own window, since a clip's loop marker returns to its own
+  first key rather than to zero. `--shot` and `--dump-pose` take `--time`
+  relative to the chosen clip, so the layout stays an implementation detail.
+  Rigs without a deforming bone, or with one action, are laid out at 0 as
+  before.
+
+  An action a file holds but the armature cannot play — a shape key's, a
+  material's — is now skipped instead of aborting the export when Blender
+  refuses the binding.
+
+- **`--shot` composes a deforming bone's current frame.** A clip bone's limb
+  sprite is deliberately empty — the frames are drawn on top — so without this
+  a slime rendered as nothing at all, which would have made the whole feature
+  unverifiable. The frame-picking arithmetic moved into `demiurg-core`, shared
+  by the viewport and the headless shot so a screenshot cannot disagree with
+  the editor.
+
 ## [0.13.0] - 2026-08-28
 
 A bridge from Blender: model and animate a character there, export it, open it

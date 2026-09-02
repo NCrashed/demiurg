@@ -30,6 +30,7 @@
 
 use std::collections::BTreeMap;
 
+use roxlap_formats::character::ClipPlayback;
 use roxlap_formats::material::Material;
 use roxlap_formats::voxel_clip::{self, DecodeError, ParseError, VoxelClip};
 
@@ -291,6 +292,22 @@ impl ClipDoc {
     #[must_use]
     pub fn frame_at(&self, elapsed_ms: u32) -> usize {
         voxel_clip::frame_at(&self.durations(), self.loop_mode, elapsed_ms)
+    }
+
+    /// The frame this clip shows when it hangs off a rig at playhead
+    /// `time_ms`, advanced by its attachment's `playback` (Q8 speed, ms
+    /// phase). Lets a clip layer run on its own rate along the rig's clock.
+    ///
+    /// Lives here rather than in a caller so the viewport, the headless
+    /// `--shot`, and anything else drawing a rig all pick the same frame —
+    /// two copies of this arithmetic would drift apart at exactly the moment
+    /// someone is comparing a screenshot against the editor.
+    #[must_use]
+    pub fn frame_at_playback(&self, playback: ClipPlayback, time_ms: i32) -> usize {
+        let t = (i64::from(time_ms) * i64::from(playback.speed_q8) / 256
+            + i64::from(playback.start_phase_ms))
+        .max(0);
+        self.frame_at(u32::try_from(t).unwrap_or(u32::MAX))
     }
 
     /// The playback time (ms) at which frame `i` begins — the sum of all earlier

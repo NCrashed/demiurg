@@ -13,6 +13,7 @@ use roxlap_core::kfa_draw::solve_kfa_limbs;
 use roxlap_formats::OverlayColor;
 use roxlap_formats::character::{Clip, ClipData};
 use roxlap_formats::kfa::{Hinge, KfaSprite, Point3, Seq};
+use roxlap_formats::sprite::Sprite;
 use roxlap_formats::xform::BoneXform;
 
 use crate::{Line3, OrbitCamera};
@@ -254,18 +255,40 @@ impl KfaView {
         let pixels = (width as usize) * (height as usize);
         let mut fb = vec![sky_color; pixels];
         let mut zb = vec![f32::INFINITY; pixels];
+        let draw = |fb: &mut Vec<u32>, zb: &mut Vec<f32>, sprite: &Sprite| {
+            let _ = draw_sprite_dda(
+                fb,
+                zb,
+                width as usize,
+                width,
+                height,
+                &cam,
+                &settings,
+                sprite,
+            );
+        };
+        let time = self.time();
         for k in &self.kfas {
             for limb in &k.limbs {
-                let _ = draw_sprite_dda(
-                    &mut fb,
-                    &mut zb,
-                    width as usize,
-                    width,
-                    height,
-                    &cam,
-                    &settings,
-                    limb,
-                );
+                draw(&mut fb, &mut zb, limb);
+            }
+            // A bone whose geometry deforms carries a flipbook instead of a
+            // mesh, and its limb sprite is deliberately empty — the frames are
+            // composed on top, at the same solved transform. Without this a
+            // slime renders as nothing at all.
+            for (i, bone) in self.rig.bones.iter().enumerate() {
+                let (Some(clip), Some(limb)) = (&bone.primary_clip, k.limbs.get(i)) else {
+                    continue;
+                };
+                let frame = clip.frame_at_playback(bone.primary_playback, time);
+                let Some(cf) = clip.frames.get(frame) else {
+                    continue;
+                };
+                let mut sprite = Sprite::axis_aligned(cf.model.to_kv6(), limb.p);
+                sprite.s = limb.s;
+                sprite.h = limb.h;
+                sprite.f = limb.f;
+                draw(&mut fb, &mut zb, &sprite);
             }
         }
 
@@ -594,6 +617,68 @@ mod tests {
         let (red, green) = limb_pixels(&fb);
         assert!(green > 0, "the body limb drew");
         assert!(red > 0, "the arm limb drew too, not just bone 0");
+    }
+
+    /// A rig whose second bone deforms: a flipbook of two very different
+    /// frames instead of a rigid mesh.
+    fn clip_rig() -> Rig {
+        use demiurg_core::{ClipDoc, ClipFrame};
+
+        let mut rig = Rig::single_bone("root", Some(box_model(4, 4, 4, 0x8033_cc55)));
+        let idx = rig.add_bone(0);
+        let mut clip = ClipDoc::new([6, 6, 6]);
+        clip.default_frame_ms = 100;
+        let frame = |fill: u32, span: u32| {
+            let mut m = VoxelModel::new(6, 6, 6);
+            for z in 0..span {
+                for y in 0..span {
+                    for x in 0..span {
+                        m.set(x, y, z, fill);
+                    }
+                }
+            }
+            ClipFrame::new(m)
+        };
+        // Two frames of wildly different size, so a render that ignored the
+        // playhead could not accidentally match.
+        clip.frames = vec![frame(0x80cc_4433, 2), frame(0x80cc_4433, 6)];
+        rig.bones[idx].primary_clip = Some(clip);
+        rig
+    }
+
+    #[test]
+    fn the_headless_render_draws_a_bone_that_deforms() {
+        // A clip bone's limb sprite is deliberately empty — the frames are
+        // composed on top. Miss that and a slime renders as nothing, which is
+        // exactly what the shot tool exists to rule out.
+        let mut view = KfaView::from_rig(clip_rig(), None);
+        let cam = view.framing_camera();
+        let sky = 0x0020_3040;
+        let fb = view.render_cpu(&cam, 200, 200, sky, false, 1.0);
+        let (red, green) = limb_pixels(&fb);
+        assert!(green > 0, "the rigid bone drew");
+        assert!(red > 0, "the deforming bone's current frame drew too");
+    }
+
+    #[test]
+    fn a_deforming_bone_changes_shape_with_the_playhead() {
+        let mut view = KfaView::from_rig(clip_rig(), None);
+        let cam = view.framing_camera();
+        let sky = 0x0020_3040;
+        let shot = |view: &mut KfaView, t: i32| {
+            view.set_time(t);
+            let fb = view.render_cpu(&cam, 200, 200, sky, false, 1.0);
+            let (red, _) = limb_pixels(&fb);
+            red
+        };
+        // Frame 0 is a 2³ corner, frame 1 fills the 6³ grid: the second has to
+        // cover far more of the screen.
+        let small = shot(&mut view, 0);
+        let large = shot(&mut view, 150);
+        assert!(
+            large > small * 2,
+            "the flipbook must advance with the playhead: {small} then {large} pixels"
+        );
     }
 
     #[test]

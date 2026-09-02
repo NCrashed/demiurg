@@ -108,7 +108,67 @@ question; so does keeping bends modest.
 
 Geometry is always read at the **rest pose**, whatever frame the timeline sits
 on — the pose belongs in the clips, and baking it into the voxels as well would
-apply it twice.
+apply it twice. The exception is a mesh marked to deform, below, whose whole
+point is that its geometry changes.
+
+## Meshes that deform
+
+A skeleton moves rigid chunks; it cannot reshape one. Anything that *squashes*
+— a slime, a wobbling blob, cloth — needs its geometry voxelized **every
+frame** instead, and the engine plays the result as a flipbook.
+
+Tick **Voxelize per frame** in *Object Properties ▸ demiurg* on that mesh. It
+works either way round: on its own, the object exports as a one-bone rig that
+is nothing but the flipbook; parented to a bone, that bone plays the flipbook
+while the rest of the skeleton stays rigid. So a hard-shelled character with a
+soft belly is one export.
+
+The deformation can come from anywhere Blender evaluates — shape keys, a
+lattice, a cloth sim, drivers — because the exporter samples the result rather
+than reading any one mechanism.
+
+| Setting | What it does |
+| --- | --- |
+| **Voxelize per frame** (per object) | Marks the mesh as a flipbook |
+| **Clip fps** (export option) | How often to sample it |
+
+**Clip fps is the size knob.** Every sample is a whole voxel grid, so this
+decides what a deforming mesh costs — 12 fps reads as smooth for most motion
+and stores half of what 24 does. It is deliberately independent of the scene's
+frame rate: sampling every rendered frame usually spends file size on motion
+the eye can't tell apart.
+
+### Deforming differently per action
+
+A bone holds one flipbook, and the rig's playhead is what picks a frame from
+it. So when a rig has both a deforming bone and more than one action, the
+exporter lays the actions on **separate windows of one timeline** — `walk` on
+0…1000 ms, `idle` on 1000…1800 — and concatenates the flipbook to cover both.
+Each action then reaches its own geometry, and still cycles inside its own
+window, because a clip's loop marker returns to its own first key rather than
+to zero.
+
+The export warns when it does this. The visible consequences: a clip's
+keyframes no longer start at 0 (the editor's timeline shows `idle` beginning at
+1000 ms), and **the host must seek to a clip's own start** when it switches
+clips — automatic from the second cycle on, but not for the first. `--shot` and
+`--dump-pose` take `--time` relative to the chosen clip, so the layout stays
+invisible there.
+
+For the geometry to actually differ per action, the deformation has to *depend
+on* what the action drives — a driver reading a bone, a lattice or cloth the
+armature moves. A shape key animated on the mesh by itself evaluates the same
+under every action, so every window would hold the same shapes.
+
+Rigs without a deforming bone, or with a single action, are laid out as before,
+starting at 0.
+
+The bake covers the **scene frame range** with whatever animation is active
+(or each action's own range, when windowed), and the last frame is left out as
+a loop's duplicate of the first.
+
+If a bone's mesh is marked to deform, that replaces its rigid geometry rather
+than adding to it: the engine draws one thing per bone.
 
 Bones with no mesh export as empty — fine for a root or control bone, and
 reported so a forgotten mesh doesn't pass silently.
@@ -179,6 +239,10 @@ blender --background --python blender/tests/headless_export.py -- \
 # cuts a smoothly weighted mesh in two and checks where the seam landed
 blender --background --python blender/tests/headless_skin.py -- \
     --out /tmp/skinned.demiurg --converter ./target/debug/demiurg-convert
+
+# bakes a squashing blob and checks the frames really differ, at the asked rate
+blender --background --python blender/tests/headless_deform.py -- \
+    --out /tmp/slime.demiurg --converter ./target/debug/demiurg-convert --fps 8
 
 # installs the zip and drives the real operator
 cd blender && zip -qr /tmp/demiurg_export.zip demiurg_export && cd ..

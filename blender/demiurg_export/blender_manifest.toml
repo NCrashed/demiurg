@@ -5,7 +5,7 @@ id = "demiurg_export"
 # and its tags. A release build stamps its tag here
 # (scripts/package-blender-addon.sh --version), so this value is what a local
 # build carries.
-version = "0.13.0"
+version = "0.14.0"
 name = "demiurg rig export"
 tagline = "Voxelize an armature and export a demiurg project"
 maintainer = "Anton Gushcha <ncrashed@gmail.com>"

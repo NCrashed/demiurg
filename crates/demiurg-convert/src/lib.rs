@@ -79,8 +79,11 @@ pub struct Stats {
     pub clips: usize,
     /// Keyframes across every clip (excluding the trailing loop markers).
     pub keys: usize,
-    /// Occupied voxels across every mesh.
+    /// Occupied voxels across every mesh **and** every voxel-clip frame.
     pub voxels: usize,
+    /// Frames across every bone's voxel clip — the multiplier that makes a
+    /// deforming bone cost what it does, so it is worth seeing.
+    pub clip_frames: usize,
 }
 
 impl fmt::Display for Stats {
@@ -89,7 +92,11 @@ impl fmt::Display for Stats {
             f,
             "{} bones, {} clips, {} keys, {} voxels",
             self.bones, self.clips, self.keys, self.voxels
-        )
+        )?;
+        if self.clip_frames > 0 {
+            write!(f, " in {} voxel-clip frames", self.clip_frames)?;
+        }
+        Ok(())
     }
 }
 
@@ -157,7 +164,23 @@ pub fn convert(json: &[u8], base_dir: &Path, out: Output) -> Result<Converted, E
         keys: (0..rig.clips.len())
             .map(|i| rig.clip_keyframes(i).len())
             .sum(),
-        voxels: rig.bones.iter().map(|b| b.model.occupied_count()).sum(),
+        // A clip bone's `model` is an unused placeholder, so its voxels live
+        // in the frames — count those instead, or a deforming character would
+        // report as empty.
+        voxels: rig
+            .bones
+            .iter()
+            .map(|b| match &b.primary_clip {
+                Some(c) => c.frames.iter().map(|f| f.model.occupied_count()).sum(),
+                None => b.model.occupied_count(),
+            })
+            .sum(),
+        clip_frames: rig
+            .bones
+            .iter()
+            .filter_map(|b| b.primary_clip.as_ref())
+            .map(|c| c.frames.len())
+            .sum(),
     };
     let bytes = match out {
         Output::Demiurg => project::to_bytes_rig(&rig),

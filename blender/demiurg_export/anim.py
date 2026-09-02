@@ -57,6 +57,28 @@ def armature_actions(armature, all_actions=False):
     return found, used_fallback
 
 
+def _object_slot(action):
+    """A slot of `action` that can bind to an object, or `None`.
+
+    Blender 4.4+ keeps an action's channels in typed slots. A file's actions
+    are not all for objects — shape keys, materials and cameras have their own
+    — and binding the wrong kind raises.
+    """
+    for slot in getattr(action, "slots", None) or ():
+        if getattr(slot, "target_id_type", "OBJECT") == "OBJECT":
+            return slot
+    return None
+
+
+def action_swap(armature, action):
+    """Context manager that assigns `action` for sampling and restores after.
+
+    Exposed because the voxel-clip bake samples the same actions the skeletal
+    bake does, and both have to see the same evaluated scene.
+    """
+    return _ActionSwap(armature, action)
+
+
 class _ActionSwap:
     """Assign an action for sampling and put everything back afterwards.
 
@@ -75,18 +97,30 @@ class _ActionSwap:
             anim = self.armature.animation_data_create()
         self.anim = anim
         self.saved = (anim.action, getattr(anim, "action_slot", None), anim.use_nla)
+        self.ok = True
         anim.use_nla = False
-        anim.action = self.action
-        # Blender 4.4+ keeps an action's channels in slots; assigning the
-        # action alone can leave nothing bound, and every frame samples as rest.
-        slots = getattr(self.action, "slots", None)
-        if hasattr(anim, "action_slot") and anim.action_slot is None and slots:
-            anim.action_slot = slots[0]
+        try:
+            anim.action = self.action
+            # Blender 4.4+ keeps an action's channels in slots; assigning the
+            # action alone can leave nothing bound, and every frame samples as
+            # rest. Only a slot meant for objects will bind to an armature —
+            # a file's actions include ones for shape keys, materials, and
+            # cameras, and assigning those raises.
+            slot = _object_slot(self.action)
+            if hasattr(anim, "action_slot") and anim.action_slot is None and slot is not None:
+                anim.action_slot = slot
+        except (RuntimeError, TypeError):
+            # Not an action this armature can play — the caller skips it
+            # rather than the whole export dying on someone else's action.
+            self.ok = False
         return self
 
     def __exit__(self, *_):
         action, slot, use_nla = self.saved
-        self.anim.action = action
+        try:
+            self.anim.action = action
+        except (RuntimeError, TypeError):
+            pass
         if slot is not None and hasattr(self.anim, "action_slot"):
             self.anim.action_slot = slot
         self.anim.use_nla = use_nla
@@ -133,11 +167,15 @@ def _pose_snapshot(armature, voxels_per_unit, joints):
 
 
 def sample_action(context, armature, action, voxels_per_unit, joints):
-    """Bake `action` into a manifest clip, or `None` if it animates nothing.
+    """Bake `action` into `(keys, length_ms, frame_start, frame_end)`, or
+    `None` if it animates nothing.
 
     Sampled once per frame over the action's range. A last pose identical to
     the first is dropped and the clip length shortened to match, so a cycle
     authored with a duplicated end frame loops without a one-frame stutter.
+
+    The times are local — the clip's own 0 — and [`build_clips`] offsets them
+    if the rig needs its actions laid out on separate windows.
     """
     scene = context.scene
     fps = scene.render.fps / scene.render.fps_base
@@ -148,7 +186,9 @@ def sample_action(context, armature, action, voxels_per_unit, joints):
 
     poses = []
     try:
-        with _ActionSwap(armature, action):
+        with _ActionSwap(armature, action) as swap:
+            if not swap.ok:
+                return None  # not an action this armature can play
             for frame in range(start, end + 1):
                 scene.frame_set(frame)
                 poses.append(_pose_snapshot(armature, voxels_per_unit, joints))
@@ -167,11 +207,23 @@ def sample_action(context, armature, action, voxels_per_unit, joints):
         return round((index) / fps * 1000.0)
 
     keys = [rig.key_entry(at(i), pose) for i, pose in enumerate(poses)]
-    return rig.clip_entry(action.name, keys, at(frame_span), loops=True)
+    return keys, at(frame_span), start, end
 
 
-def build_clips(context, armature, voxels_per_unit, joints, all_actions=False):
-    """Every exportable action as a clip. Returns `(clips, warnings)`."""
+def build_clips(context, armature, voxels_per_unit, joints, all_actions=False,
+                windowed=False):
+    """Every exportable action as a clip. Returns `(clips, warnings, windows)`.
+
+    With `windowed`, the actions are laid **end to end on one timeline**
+    instead of each starting at 0. That is what lets a deforming bone hold
+    different geometry per action: its flipbook is picked by the rig playhead,
+    so the actions have to be distinguishable by time. A clip's loop marker
+    jumps to its own first entry, so each action still cycles inside its own
+    window.
+
+    `windows` describes the layout — `{name, start_ms, length_ms, frame_start,
+    frame_end, action}` per action — for the voxel bake to follow.
+    """
     actions, used_fallback = armature_actions(armature, all_actions)
     warnings = []
     if used_fallback and actions:
@@ -180,13 +232,28 @@ def build_clips(context, armature, voxels_per_unit, joints, all_actions=False):
             f"{len(actions)} action(s) in the file"
         )
     clips = []
+    windows = []
     skipped = []
+    cursor = 0
     for action in actions:
-        clip = sample_action(context, armature, action, voxels_per_unit, joints)
-        if clip is None:
+        baked = sample_action(context, armature, action, voxels_per_unit, joints)
+        if baked is None:
             skipped.append(action.name)
-        else:
-            clips.append(clip)
+            continue
+        keys, length_ms, frame_start, frame_end = baked
+        start_ms = cursor if windowed else 0
+        if start_ms:
+            keys = [rig.key_entry(k["t"] + start_ms, k["pose"]) for k in keys]
+        clips.append(rig.clip_entry(action.name, keys, start_ms + length_ms, loops=True))
+        windows.append({
+            "name": action.name,
+            "action": action,
+            "start_ms": start_ms,
+            "length_ms": length_ms,
+            "frame_start": frame_start,
+            "frame_end": frame_end,
+        })
+        cursor += length_ms
     if skipped:
         warnings.append("skipped action(s) that animate no bone: " + ", ".join(sorted(skipped)))
-    return clips, warnings
+    return clips, warnings, windows
