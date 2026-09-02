@@ -7,6 +7,19 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-02
+
+Shading. A character authored see-through in Blender arrived solid, because a
+rig had nowhere to keep per-colour materials and the engine's container has no
+material channel. It now carries them in an extra-chunk, the addon reads them
+off the Principled BSDF, and both renderers composite — including the headless
+`--shot`, so it stays checkable.
+
+Two fixes for what a real slime turned up: a mesh deformed by an armature
+modifier can be baked as a flipbook, and a Geometry Nodes modifier that eats
+vertex weights is now named as the cause instead of quietly producing a
+nonsense per-bone split.
+
 ### Added
 
 - **Transparency and glow survive the trip.** A rig had nowhere to put
