@@ -117,6 +117,42 @@ pub struct BoneSpec {
     /// freely, so a rigid skeleton with one soft part is fine.
     #[serde(default)]
     pub clip: Option<VoxelClipSpec>,
+    /// Extra pieces riding on the same bone, each with its own grid and its
+    /// own offset — an accessory beside a hand, a flame on a staff.
+    ///
+    /// The alternative is voxelizing them into the bone's one grid, which
+    /// works but makes that grid span everything: a sword held at arm's length
+    /// would inflate the hand's grid to cover both, most of it empty. A layer
+    /// keeps a tight grid and says where it goes.
+    #[serde(default)]
+    pub layers: Vec<LayerSpec>,
+}
+
+/// One extra attachment on a bone.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayerSpec {
+    /// Artist-facing name, shown in the editor's layer list. The engine has no
+    /// name of its own for an attachment; demiurg carries it alongside.
+    #[serde(default)]
+    pub name: String,
+    /// Where the layer's pivot sits relative to the **bone's**, in voxels.
+    /// This is what lets the mesh below keep a grid of its own size.
+    #[serde(default)]
+    pub offset: [f32; 3],
+    /// Rotation of the layer about its pivot, `[x, y, z, w]` — scalar last.
+    #[serde(default = "default_quat")]
+    pub rotation: [f32; 4],
+    /// Scale along the layer's own axes.
+    #[serde(default = "default_scale")]
+    pub scale: [f32; 3],
+    /// The layer's geometry. Mutually exclusive with [`Self::clip`].
+    #[serde(default)]
+    pub mesh: Option<MeshSpec>,
+    /// Per-frame geometry instead, played on the rig's clock — the same
+    /// flipbook a bone's own `clip` is, hung off the same bone.
+    #[serde(default)]
+    pub clip: Option<VoxelClipSpec>,
 }
 
 /// A bone's per-frame voxel flipbook.

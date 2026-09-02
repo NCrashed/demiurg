@@ -94,6 +94,13 @@ Either way of attaching a mesh works, and they can be mixed:
 *Ctrl+P ▸ Bone*). The engine draws each bone as one rigid sprite, so this maps
 straight across, and it is how voxel characters are usually built anyway.
 
+Several meshes on one bone are fine: the first by name becomes the bone's own
+mesh and the rest become **layers** — separate attachments, each keeping a grid
+of its own size and placed by an offset. That matters for anything held away
+from its bone: folding a sword into the hand's mesh would stretch that grid to
+span both, most of it empty. A layer takes the object's name, and its origin
+becomes the pivot it rotates about.
+
 **One skinned mesh, bound with an armature modifier.** Since a bone is drawn as
 one rigid sprite, there is no such thing as a voxel shared between two bones:
 the mesh is **cut up**, each voxel going to the bone that weighs most on the
@@ -250,7 +257,7 @@ combined with rotation is approximate; uniform scale is exact.
 
 ## Not exported yet
 
-Extra attachment layers.
+Textures — a textured mesh exports as its material's flat colour.
 
 ## Testing
 

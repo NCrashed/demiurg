@@ -438,6 +438,98 @@ fn material_mistakes_are_rejected_by_name() {
     );
 }
 
+/// A hand holding a sword: the sword is its own layer, so it keeps a tight
+/// grid instead of stretching the hand's to reach it.
+fn layered_rig() -> &'static str {
+    r#"{
+      "format": "demiurg-rig", "version": 1,
+      "bones": [
+        { "name": "hand",
+          "mesh": { "dims": [2, 2, 2], "pivot": [1.0, 1.0, 1.0],
+                    "voxels": [[0, 0, 0, "ddbb88"]] },
+          "layers": [
+            { "name": "sword", "offset": [0.0, 0.0, -12.0],
+              "mesh": { "dims": [1, 1, 16], "pivot": [0.5, 0.5, 15.0],
+                        "voxels": [[0, 0, 0, "c0c0c0"], [0, 0, 15, "884422"]] } },
+            { "name": "flame", "offset": [0.0, 0.0, -20.0],
+              "clip": { "dims": [3, 3, 3], "frame_ms": 60, "frames": [
+                { "voxels": [[1, 1, 0, "ff8800"]] },
+                { "voxels": [[1, 1, 1, "ffcc00"]] } ] } }
+          ] }
+      ]
+    }"#
+}
+
+#[test]
+fn layers_survive_both_formats() {
+    for output in [Output::Demiurg, Output::Rkc] {
+        let out = convert(layered_rig().as_bytes(), Path::new("."), output).expect("converts");
+        let rig = match output {
+            Output::Demiurg => match project::from_bytes(&out.bytes).expect("loads") {
+                Loaded::Rig(r) => r,
+                _ => panic!("expected a rig"),
+            },
+            Output::Rkc => demiurg_core::Rig::from_rkc_bytes(&out.bytes).expect("parses"),
+        };
+        let bone = &rig.bones[0];
+        assert_eq!(bone.extras.len(), 2, "{output:?}: both layers survive");
+
+        let sword = &bone.extras[0];
+        assert_eq!(
+            sword.name, "sword",
+            "{output:?}: the name rides the DLAY chunk"
+        );
+        assert_eq!(sword.model.dims(), (1, 1, 16), "a grid of its own size");
+        assert!(
+            (sword.offset.t[2] + 12.0).abs() < 1e-6,
+            "placed by its offset"
+        );
+        assert!(sword.clip.is_none());
+
+        let flame = &bone.extras[1];
+        assert_eq!(flame.name, "flame");
+        let clip = flame.clip.as_ref().expect("a layer can be a flipbook too");
+        assert_eq!(clip.frames.len(), 2);
+    }
+}
+
+#[test]
+fn a_layer_is_placed_by_its_offset_not_by_a_bigger_grid() {
+    // The whole point: the sword sits 12 voxels from the hand while its grid
+    // stays 16 tall. Folding it into the bone's mesh would have needed a grid
+    // spanning both, mostly empty.
+    let rig = load_rig(layered_rig());
+    assert_eq!(rig.bones[0].model.dims(), (2, 2, 2), "the hand stays small");
+    assert_eq!(rig.bones[0].extras[0].model.dims(), (1, 1, 16));
+    assert_eq!(
+        rig.bones[0].extras[0].model.occupied_count(),
+        2,
+        "and carries its own voxels"
+    );
+}
+
+#[test]
+fn layer_mistakes_are_rejected_by_name() {
+    rejects(
+        r#"{ "format": "demiurg-rig", "version": 1, "bones": [
+             { "name": "hand", "layers": [ { "name": "sword" } ] } ] }"#,
+        "\"sword\"",
+    );
+    rejects(
+        r#"{ "format": "demiurg-rig", "version": 1, "bones": [
+             { "name": "hand", "layers": [ { "name": "sword",
+                 "mesh": { "dims": [1, 1, 1] },
+                 "clip": { "dims": [1, 1, 1], "frames": [{ "voxels": [] }] } } ] } ] }"#,
+        "not both or neither",
+    );
+    // An unnamed layer is still findable in the message.
+    rejects(
+        r#"{ "format": "demiurg-rig", "version": 1, "bones": [
+             { "name": "hand", "layers": [ {} ] } ] }"#,
+        "#0",
+    );
+}
+
 #[test]
 fn clip_mistakes_are_rejected_by_name() {
     rejects(

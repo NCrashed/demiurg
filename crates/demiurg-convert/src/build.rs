@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use demiurg_core::VoxelModel;
 use demiurg_core::clip::{ClipDoc, ClipFrame, LoopMode};
-use demiurg_core::rig::{LayerPlayback as ClipPlayback, Rig, RigBone};
+use demiurg_core::rig::{LayerPlayback as ClipPlayback, Rig, RigAttachment, RigBone};
 use demiurg_core::vox;
 use roxlap_formats::kfa::{Hinge, Point3};
 use roxlap_formats::material::{BlendMode, Material};
@@ -75,6 +75,13 @@ pub enum ConvertError {
     /// A bone gave both a rigid `mesh` and a per-frame `clip`. The engine
     /// draws one primary attachment, so only one can win.
     MeshAndClip(String),
+    /// A layer gave both a `mesh` and a `clip`, or neither.
+    LayerSource {
+        /// The bone the layer hangs off.
+        bone: String,
+        /// The layer's name, or its index when unnamed.
+        layer: String,
+    },
     /// A voxel clip with no frames.
     EmptyClip(String),
     /// A material's `mode` is not one of the three the format has.
@@ -184,6 +191,10 @@ impl fmt::Display for ConvertError {
             Self::DuplicateMaterial(c) => write!(
                 f,
                 "two materials claim colour {c:?}; the renderer keys them by colour, so only one can win"
+            ),
+            Self::LayerSource { bone, layer } => write!(
+                f,
+                "bone {bone:?} layer {layer}: give either a \"mesh\" or a \"clip\", not both or neither"
             ),
             Self::EmptyClip(n) => write!(f, "bone {n:?}: a \"clip\" needs at least one frame"),
             Self::BadLoopMode { bone, value } => write!(
@@ -300,6 +311,7 @@ pub fn build_rig(m: &Manifest, base_dir: &Path) -> Result<Rig, ConvertError> {
             bone.primary_clip = Some(build_voxel_clip(clip, &spec.name)?);
             bone.primary_playback = playback_of(clip);
         }
+        bone.extras = build_layers(spec, base_dir)?;
         bones.push(bone);
     }
 
@@ -441,6 +453,58 @@ fn build_materials(specs: &[MaterialSpec]) -> Result<BTreeMap<u32, Material>, Co
         if out.insert(color, material).is_some() {
             return Err(ConvertError::DuplicateMaterial(spec.color.clone()));
         }
+    }
+    Ok(out)
+}
+
+/// Build a bone's extra attachments.
+///
+/// Each keeps its own grid and is placed by its offset, so a piece far from
+/// the bone costs a grid of its own size rather than stretching the bone's to
+/// reach it.
+fn build_layers(spec: &BoneSpec, base_dir: &Path) -> Result<Vec<RigAttachment>, ConvertError> {
+    let mut out = Vec::with_capacity(spec.layers.len());
+    for (i, layer) in spec.layers.iter().enumerate() {
+        let label = if layer.name.is_empty() {
+            format!("#{i}")
+        } else {
+            format!("{:?}", layer.name)
+        };
+        if layer.mesh.is_some() == layer.clip.is_some() {
+            return Err(ConvertError::LayerSource {
+                bone: spec.name.clone(),
+                layer: label,
+            });
+        }
+        let offset = BoneXform {
+            t: layer.offset,
+            r: Quat {
+                x: layer.rotation[0],
+                y: layer.rotation[1],
+                z: layer.rotation[2],
+                w: layer.rotation[3],
+            }
+            .normalize(),
+            s: layer.scale,
+        };
+        let name = if layer.name.is_empty() {
+            format!("layer {}", i + 1)
+        } else {
+            layer.name.clone()
+        };
+        let mut attachment = if let Some(mesh) = &layer.mesh {
+            let at = format!("bone {:?} layer {label}", spec.name);
+            RigAttachment::mesh(build_mesh(Some(mesh), &at, base_dir)?, offset, name)
+        } else {
+            // A clip layer keeps an empty placeholder mesh, like a clip
+            // primary does.
+            RigAttachment::mesh(VoxelModel::new(1, 1, 1), offset, name)
+        };
+        if let Some(clip) = &layer.clip {
+            attachment.clip = Some(build_voxel_clip(clip, &spec.name)?);
+            attachment.playback = playback_of(clip);
+        }
+        out.push(attachment);
     }
     Ok(out)
 }

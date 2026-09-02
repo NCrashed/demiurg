@@ -9,7 +9,7 @@
 
 use demiurg_core::{Easing, Rig, RigBone, VoxelModel};
 use glam::DVec3;
-use roxlap_core::kfa_draw::solve_kfa_limbs;
+use roxlap_core::kfa_draw::{compose_attachment, solve_kfa_limbs};
 use roxlap_formats::OverlayColor;
 use roxlap_formats::character::{Clip, ClipData};
 use roxlap_formats::kfa::{Hinge, KfaSprite, Point3, Seq};
@@ -342,6 +342,35 @@ impl KfaView {
                 sprite.f = limb.f;
                 sprite.material_map.clone_from(&material_map);
                 draw(&mut fb, &mut zb, &sprite);
+            }
+            // Extra layers: a piece riding the same bone at its own offset —
+            // an accessory beside a hand, a flame on a staff. The KFA limb
+            // path draws one mesh per bone and nothing else, so without this
+            // an exported layer would be in the file and absent from the shot.
+            for (i, bone) in self.rig.bones.iter().enumerate() {
+                let Some(limb) = k.limbs.get(i) else { continue };
+                for extra in &bone.extras {
+                    let kv6 = match &extra.clip {
+                        Some(clip) => {
+                            let frame = clip.frame_at_playback(extra.playback, time);
+                            match clip.frames.get(frame) {
+                                Some(cf) => cf.model.to_kv6(),
+                                None => continue,
+                            }
+                        }
+                        None => extra.model.to_kv6(),
+                    };
+                    // The same composition the host's pass uses, so a shot and
+                    // the viewport place a layer identically.
+                    let (s, h, f, p) =
+                        compose_attachment(limb.s, limb.h, limb.f, limb.p, &extra.offset);
+                    let mut sprite = Sprite::axis_aligned(kv6, p);
+                    sprite.s = s;
+                    sprite.h = h;
+                    sprite.f = f;
+                    sprite.material_map.clone_from(&material_map);
+                    draw(&mut fb, &mut zb, &sprite);
+                }
             }
         }
 
@@ -787,6 +816,32 @@ mod tests {
         for limb in &view.kfas[0].limbs {
             assert!(!limb.material_map.is_empty(), "every limb carries the map");
         }
+    }
+
+    #[test]
+    fn the_headless_render_draws_extra_layers() {
+        use demiurg_core::RigAttachment;
+        use roxlap_formats::xform::BoneXform;
+
+        // A layer rides the same bone at its own offset. The KFA limb path
+        // draws one mesh per bone and nothing else, so an exported layer would
+        // otherwise be in the file and absent from every shot of it.
+        let mut rig = Rig::single_bone("hand", Some(box_model(4, 4, 4, 0x8033_cc55)));
+        let mut offset = BoneXform::IDENTITY;
+        offset.t = [0.0, 0.0, -14.0]; // held well clear of the hand
+        rig.bones[0].extras.push(RigAttachment::mesh(
+            box_model(3, 3, 3, 0x80cc_4433),
+            offset,
+            "sword".to_string(),
+        ));
+
+        let mut view = KfaView::from_rig(rig, None);
+        let mut cam = view.framing_camera();
+        cam.dist *= 2.0; // both pieces in frame
+        let fb = view.render_cpu(&cam, 220, 220, 0x0020_3040, false, 1.0);
+        let (red, green) = limb_pixels(&fb);
+        assert!(green > 0, "the bone's own mesh drew");
+        assert!(red > 0, "so did the layer hanging off it");
     }
 
     #[test]

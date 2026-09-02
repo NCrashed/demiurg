@@ -7,6 +7,22 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- **Several meshes on one bone export as layers.** They used to be voxelized
+  into the bone's single grid, which works until something is held away from
+  its bone: a sword in a hand stretched that grid to span both, most of it
+  empty. Each extra object now becomes its own attachment — a grid of its own
+  size, placed by an offset, named after the object, with the object's origin
+  as the pivot it rotates about. A layer can be a flipbook too, so a flame can
+  ride a staff.
+
+  The manifest gained `layers` on a bone, `--shot` composes them at their
+  offsets (the KFA limb path draws one mesh per bone and nothing else, so an
+  exported layer would otherwise be in the file and missing from every
+  screenshot of it), and the export summary counts them — it previously
+  reported a sword-wielding character as unchanged by the sword.
+
 ## [0.16.0] - 2026-09-02
 
 The other half of shading: a rig's transparency is now editable in demiurg

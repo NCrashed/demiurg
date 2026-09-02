@@ -128,6 +128,16 @@ def clip_entry(name, keys, length_ms, loops=True):
     }
 
 
+def layer_entry(name, offset, mesh=None, clip=None):
+    """One extra attachment on a bone: its own grid, placed by `offset`."""
+    entry = {"name": name, "offset": [round(float(c), 4) for c in offset]}
+    if mesh is not None:
+        entry["mesh"] = mesh
+    if clip is not None:
+        entry["clip"] = clip
+    return entry
+
+
 def material_entry(color, alpha, mode):
     """One per-colour render material."""
     return {"color": color, "alpha": int(alpha), "mode": mode}

@@ -93,8 +93,12 @@ def build_scene():
         colored("orange", (0.8, 0.35, 0.05, 1.0), alpha=0.5),
     )
     fist = box("fist", (0.35, 0.0, 0.2), (0.2, 0.2, 0.2), colored("pale", (0.85, 0.7, 0.5, 1.0)))
+    # A second object on the hand bone, held well clear of it: it has to come
+    # out as a layer with a grid of its own, not folded into the hand's.
+    sword = box("sword", (0.35, 0.0, -0.6), (0.06, 0.06, 1.2),
+                colored("steel", (0.7, 0.7, 0.75, 1.0)))
 
-    for obj, bone in ((body, "torso"), (limb, "arm"), (fist, "hand")):
+    for obj, bone in ((body, "torso"), (limb, "arm"), (fist, "hand"), (sword, "hand")):
         world = obj.matrix_world.copy()
         obj.parent = armature
         obj.parent_type = "BONE"
@@ -188,6 +192,19 @@ def main():
         print(f"WARNING: {w}")
     with open(os.path.splitext(out)[0] + ".json", encoding="utf-8") as f:
         manifest = json.load(f)
+    hand = next(b for b in manifest["bones"] if b["name"] == "hand")
+    layers = hand.get("layers", [])
+    print(f"LAYERS on hand: {[(l['name'], l['mesh']['dims'], l['offset']) for l in layers]}")
+    assert len(layers) == 1, f"the sword should be one layer, got {layers}"
+    layer = layers[0]
+    assert layer["name"] == "sword", layer
+    # A tight grid: the sword is 0.12 x 0.12 x 1.2 units at 10 voxels/unit.
+    assert layer["mesh"]["dims"][2] >= 10, f"the sword keeps its length: {layer['mesh']['dims']}"
+    assert max(layer["mesh"]["dims"][:2]) <= 3, f"and stays thin: {layer['mesh']['dims']}"
+    # The hand's own grid stays small — the point of a layer.
+    assert max(hand["mesh"]["dims"]) <= 6, f"the hand's grid did not inflate: {hand['mesh']['dims']}"
+    assert abs(layer["offset"][2]) > 1.0, f"placed away from the bone: {layer['offset']}"
+
     materials = manifest.get("materials", [])
     print(f"MATERIALS: {materials}")
     assert len(materials) == 1, f"expected the translucent arm's material, got {materials}"

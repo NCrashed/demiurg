@@ -84,6 +84,8 @@ pub struct Stats {
     /// Frames across every bone's voxel clip — the multiplier that makes a
     /// deforming bone cost what it does, so it is worth seeing.
     pub clip_frames: usize,
+    /// Extra attachments across every bone.
+    pub layers: usize,
 }
 
 impl fmt::Display for Stats {
@@ -95,6 +97,9 @@ impl fmt::Display for Stats {
         )?;
         if self.clip_frames > 0 {
             write!(f, " in {} voxel-clip frames", self.clip_frames)?;
+        }
+        if self.layers > 0 {
+            write!(f, ", {} layers", self.layers)?;
         }
         Ok(())
     }
@@ -167,19 +172,42 @@ pub fn convert(json: &[u8], base_dir: &Path, out: Output) -> Result<Converted, E
         // A clip bone's `model` is an unused placeholder, so its voxels live
         // in the frames — count those instead, or a deforming character would
         // report as empty.
+        // Extras count too — a bone's layers are geometry the file carries,
+        // and a summary that ignored them would report a sword-wielding
+        // character as unchanged by the sword.
         voxels: rig
             .bones
             .iter()
-            .map(|b| match &b.primary_clip {
-                Some(c) => c.frames.iter().map(|f| f.model.occupied_count()).sum(),
-                None => b.model.occupied_count(),
+            .map(|b| {
+                let primary: usize = match &b.primary_clip {
+                    Some(c) => c.frames.iter().map(|f| f.model.occupied_count()).sum(),
+                    None => b.model.occupied_count(),
+                };
+                let layers: usize = b
+                    .extras
+                    .iter()
+                    .map(|e| match &e.clip {
+                        Some(c) => c.frames.iter().map(|f| f.model.occupied_count()).sum(),
+                        None => e.model.occupied_count(),
+                    })
+                    .sum();
+                primary + layers
             })
             .sum(),
+        layers: rig.bones.iter().map(|b| b.extras.len()).sum(),
         clip_frames: rig
             .bones
             .iter()
-            .filter_map(|b| b.primary_clip.as_ref())
-            .map(|c| c.frames.len())
+            .map(|b| {
+                let primary = b.primary_clip.as_ref().map_or(0, |c| c.frames.len());
+                let layers: usize = b
+                    .extras
+                    .iter()
+                    .filter_map(|e| e.clip.as_ref())
+                    .map(|c| c.frames.len())
+                    .sum();
+                primary + layers
+            })
             .sum(),
     };
     let bytes = match out {

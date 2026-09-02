@@ -530,6 +530,7 @@ def build_manifest(context, armature, voxels_per_unit, solid,
     skin_voxels = {}
     orphans = {}
     parented_voxels = {}
+    layer_fields = {}
     with _RestPose(context, armature):
         if skinned and _weighted_vertex_count(context, skinned, set(heads)) == 0:
             warnings.append(
@@ -549,9 +550,28 @@ def build_manifest(context, armature, voxels_per_unit, solid,
             orphans = field.pop(None, {})
             skin_voxels = field
         for name, objects in by_bone.items():
+            # Sorted so the choice of which object is the bone's own mesh is
+            # reproducible rather than depending on scene order.
+            objects = sorted(objects, key=lambda o: o.name)
             parented_voxels[name] = _voxel_field(
-                context, objects, to_space, voxels_per_unit, solid, limit=MAX_BONE_DIM
+                context, objects[:1], to_space, voxels_per_unit, solid, limit=MAX_BONE_DIM
             ).get(None, {})
+            # Everything else on the bone becomes a layer with a grid of its
+            # own. Folding them into the bone's mesh would stretch that grid to
+            # span the lot — a sword held at arm's length would inflate the
+            # hand's grid to cover both, most of it empty.
+            for obj in objects[1:]:
+                field = _voxel_field(
+                    context, [obj], to_space, voxels_per_unit, solid, limit=MAX_BONE_DIM
+                ).get(None, {})
+                if not field:
+                    continue
+                # The object's own origin is the layer's pivot — what an artist
+                # expects the layer to rotate about.
+                origin = axes.to_voxels(
+                    (to_space @ obj.matrix_world).translation, voxels_per_unit
+                )
+                layer_fields.setdefault(name, []).append((obj.name, origin, field))
 
     if skinned:
         if orphans:
@@ -579,6 +599,16 @@ def build_manifest(context, armature, voxels_per_unit, solid,
             # A deforming bone replaces its geometry every frame, so it has a
             # flipbook where a rigid one has a mesh — never both, since the
             # engine draws one primary attachment.
+            # Layers first: a bone can carry them whether its own geometry is
+            # a rigid mesh or a flipbook.
+            layers = []
+            for layer_name, origin, field in layer_fields.get(name, []):
+                layer_mesh = _mesh_entry(field, origin)
+                if layer_mesh is None:
+                    continue
+                offset = tuple(origin[i] - heads[name][i] for i in range(3))
+                layers.append(rig.layer_entry(layer_name, offset, layer_mesh))
+
             deforming = list(by_clip_bone.get(name, []))
             if clip_skinned and name == root_bone:
                 deforming.extend(clip_skinned)
@@ -596,6 +626,8 @@ def build_manifest(context, armature, voxels_per_unit, solid,
                     warnings.append(f"bone {name!r}: nothing to voxelize per frame")
                 else:
                     entry["clip"] = clip
+                if layers:
+                    entry["layers"] = layers
                 entries.append(entry)
                 continue
 
@@ -611,7 +643,10 @@ def build_manifest(context, armature, voxels_per_unit, solid,
             # A bone with no mesh is legal (the converter gives it an empty
             # model), but it is usually an oversight worth naming.
             warnings.append(f"bone {name!r} has no geometry")
-        entries.append(rig.bone_entry(name, parent, joint, mesh))
+        entry = rig.bone_entry(name, parent, joint, mesh)
+        if layers:
+            entry["layers"] = layers
+        entries.append(entry)
 
     # Every mesh that reached the export, whichever path it took.
     contributing = list(skinned) + list(clip_skinned)
