@@ -7,6 +7,23 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A deforming mesh bound by an armature modifier can now be baked as a
+  flipbook.** Marking one was refused with "parent it to a bone", which is the
+  wrong answer for the commonest way to build a soft character: an object
+  parented to the armature with weights. It is now baked whole onto the root
+  bone — everything the armature did to it is already in the frames, so there
+  is nothing left for the skeleton to move, which the export says plainly.
+
+- **A Geometry Nodes modifier silently produced a nonsense per-bone split.**
+  A voxelizer or remesh rebuilds the geometry and does not carry vertex groups
+  across, so a mesh fully weighted in the outliner arrives at the exporter with
+  no weights at all. Every voxel then fell to the nearest-bone fallback and the
+  character came apart along nothing in particular. The export now checks the
+  *evaluated* mesh and names the cause, pointing at the flag that doesn't need
+  weights.
+
 ## [0.14.0] - 2026-08-28
 
 Geometry that changes shape. A skeleton moves rigid chunks and cannot reshape

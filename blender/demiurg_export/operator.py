@@ -73,6 +73,7 @@ def _bone_meshes(armature):
     by_bone = {}
     by_clip_bone = {}
     skinned = []
+    clip_skinned = []
     for obj in armature.children:
         if obj.type != "MESH":
             continue
@@ -83,8 +84,42 @@ def _bone_meshes(armature):
             target = by_clip_bone if is_voxel_clip(obj) else by_bone
             target.setdefault(obj.parent_bone, []).append(obj)
         elif any(m.type == "ARMATURE" for m in obj.modifiers):
-            skinned.append(obj)
-    return by_bone, by_clip_bone, skinned
+            # An armature-deformed mesh is cut up by weight — unless it is
+            # marked to deform, in which case the whole thing is baked frame
+            # by frame and the weights stop mattering.
+            (clip_skinned if is_voxel_clip(obj) else skinned).append(obj)
+    return by_bone, by_clip_bone, skinned, clip_skinned
+
+
+def _weighted_vertex_count(context, objects, bone_names):
+    """How many *evaluated* vertices carry a weight for one of `bone_names`.
+
+    Not the original mesh's: a Geometry Nodes modifier — a voxelizer, a
+    remesh, a scatter — rebuilds the geometry and does not carry vertex groups
+    across, so a mesh that is fully weighted in the outliner can arrive here
+    with nothing at all. That reads as "no weights" to the segmentation, which
+    then falls back to nearest-bone and produces a nonsense split, so it is
+    worth naming rather than leaving the artist to guess.
+    """
+    depsgraph = context.evaluated_depsgraph_get()
+    total = 0
+    for obj in objects:
+        groups = {i for i, g in enumerate(obj.vertex_groups) if g.name in bone_names}
+        if not groups:
+            continue
+        evaluated = obj.evaluated_get(depsgraph)
+        mesh = evaluated.to_mesh()
+        if mesh is None:
+            continue
+        try:
+            total += sum(
+                1
+                for v in mesh.vertices
+                if any(e.group in groups and e.weight > 0.0 for e in v.groups)
+            )
+        finally:
+            evaluated.to_mesh_clear()
+    return total
 
 
 class _RestPose:
@@ -391,16 +426,8 @@ def build_manifest(context, armature, voxels_per_unit, solid,
             raise ValueError("the selected meshes have no faces to voxelize")
         return rig.model_manifest(meshes[0].name, entry, stamp), warnings
 
-    by_bone, by_clip_bone, skinned = _bone_meshes(armature)
-    flagged_skin = [o.name for o in skinned if is_voxel_clip(o)]
-    if flagged_skin:
-        warnings.append(
-            "marked 'Voxelize per frame' but bound by an armature modifier: "
-            + ", ".join(sorted(flagged_skin))
-            + " — parent it to a bone (Ctrl+P > Bone) to bake it as a flipbook; "
-            "cut into rigid chunks instead"
-        )
-    if not by_bone and not by_clip_bone and not skinned:
+    by_bone, by_clip_bone, skinned, clip_skinned = _bone_meshes(armature)
+    if not by_bone and not by_clip_bone and not skinned and not clip_skinned:
         raise ValueError(
             "no mesh is attached to this armature: parent one to a bone "
             "(Ctrl+P > Bone), or bind it with an armature modifier"
@@ -419,6 +446,20 @@ def build_manifest(context, armature, voxels_per_unit, solid,
         for b in bones
     }
 
+    # A skinned mesh marked to deform is baked whole, onto the root: the
+    # flipbook already contains everything the armature did to it, so there is
+    # nothing left for weights to divide.
+    root_bone = next((b.name for b in bones if parent_of[b.name] is None), None)
+    if clip_skinned and root_bone is None:
+        raise ValueError("the armature has no root bone to carry the flipbook")
+    if clip_skinned:
+        warnings.append(
+            "baked " + ", ".join(sorted(o.name for o in clip_skinned))
+            + f" whole onto bone {root_bone!r} as a flipbook: it is armature-deformed, "
+            "so the deformation is already in the frames and the skeleton no longer "
+            "moves it"
+        )
+
     # Clips first, because a deforming bone's flipbook has to follow their
     # layout. When several actions share a rig that has one, they are laid out
     # on separate windows of one timeline — the playhead is what picks a
@@ -427,7 +468,7 @@ def build_manifest(context, armature, voxels_per_unit, solid,
     windows = []
     if export_animation:
         actions, _ = anim.armature_actions(armature, all_actions)
-        windowed = bool(by_clip_bone) and len(actions) > 1
+        windowed = bool(by_clip_bone or clip_skinned) and len(actions) > 1
         clips, clip_warnings, windows = anim.build_clips(
             context, armature, voxels_per_unit, joints, all_actions, windowed
         )
@@ -435,7 +476,7 @@ def build_manifest(context, armature, voxels_per_unit, solid,
         if windowed and len(windows) > 1:
             warnings.append(
                 f"laid {len(windows)} actions on separate windows of one timeline so "
-                + ", ".join(sorted(by_clip_bone))
+                + ", ".join(sorted(set(by_clip_bone) | {root_bone} if clip_skinned else by_clip_bone))
                 + " can deform differently in each; the host seeks to a clip's own start"
             )
 
@@ -445,6 +486,16 @@ def build_manifest(context, armature, voxels_per_unit, solid,
     orphans = {}
     parented_voxels = {}
     with _RestPose(context, armature):
+        if skinned and _weighted_vertex_count(context, skinned, set(heads)) == 0:
+            warnings.append(
+                "no evaluated vertex of "
+                + ", ".join(sorted(o.name for o in skinned))
+                + " carries an armature weight — a Geometry Nodes modifier "
+                "(a voxelizer, a remesh) rebuilds the mesh and drops vertex "
+                "groups. The per-bone split has nothing to go on and falls "
+                "back to the nearest bone. Tick 'Voxelize per frame' on the "
+                "object to bake it whole instead"
+            )
         if skinned:
             field = _voxel_field(
                 context, skinned, to_space, voxels_per_unit, solid,
@@ -483,14 +534,17 @@ def build_manifest(context, armature, voxels_per_unit, solid,
             # A deforming bone replaces its geometry every frame, so it has a
             # flipbook where a rigid one has a mesh — never both, since the
             # engine draws one primary attachment.
-            if name in by_clip_bone:
+            deforming = list(by_clip_bone.get(name, []))
+            if clip_skinned and name == root_bone:
+                deforming.extend(clip_skinned)
+            if deforming:
                 if name in by_bone or name in skin_voxels:
                     warnings.append(
                         f"bone {name!r} also has rigid geometry, which the flipbook replaces"
                     )
                 entry = rig.bone_entry(name, parent, joint)
                 clip = _bake_voxel_clip(
-                    context, by_clip_bone[name], armature, name,
+                    context, deforming, armature, name,
                     voxels_per_unit, solid, clip_fps, windows,
                 )
                 if clip is None:

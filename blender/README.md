@@ -118,10 +118,26 @@ A skeleton moves rigid chunks; it cannot reshape one. Anything that *squashes*
 frame** instead, and the engine plays the result as a flipbook.
 
 Tick **Voxelize per frame** in *Object Properties ▸ demiurg* on that mesh. It
-works either way round: on its own, the object exports as a one-bone rig that
-is nothing but the flipbook; parented to a bone, that bone plays the flipbook
-while the rest of the skeleton stays rigid. So a hard-shelled character with a
-soft belly is one export.
+works whichever way the mesh is attached:
+
+| How the mesh is attached | What the flag does |
+| --- | --- |
+| Nothing (no armature) | Exports as a one-bone rig that is nothing but the flipbook |
+| Parented to a bone | That bone plays the flipbook; the rest of the skeleton stays rigid |
+| Armature modifier + weights | Baked whole onto the root bone — the deformation is already in the frames, so the skeleton no longer moves it |
+
+So a hard-shelled character with a soft belly is one export.
+
+**If a Geometry Nodes modifier rebuilds the mesh** — a voxelizer, a remesh, a
+scatter — the vertex groups do not survive it. The evaluated mesh reaches the
+exporter with no weights at all, the per-bone split has nothing to go on, and
+the result is a nonsense division across bones. The export says so by name when
+it happens; the answer is this flag, which does not need weights.
+
+**If something else already voxelized the mesh**, match **Voxels per unit** to
+its voxel size (`1 / size`) or the two grids fight: a coarser export grid
+samples one block in every two or four and chews the edges. Or drop the other
+voxelizer and let this one do it once.
 
 The deformation can come from anywhere Blender evaluates — shape keys, a
 lattice, a cloth sim, drivers — because the exporter samples the result rather
