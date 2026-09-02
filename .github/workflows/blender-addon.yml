@@ -56,10 +56,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # An older image on purpose: the binary links against the runner's
-          # glibc, and building on the newest Ubuntu would refuse to start on
-          # an artist's older distro.
-          - { os: ubuntu-22.04, tag: linux-x86_64, target: x86_64-unknown-linux-gnu }
+          # musl, statically: a glibc build carries an ELF interpreter path
+          # that NixOS does not have ("cannot run dynamically linked
+          # executables intended for generic linux environments") and a glibc
+          # version floor that an older distro would trip over. A static
+          # binary has neither, so the runner image stops mattering.
+          - { os: ubuntu-latest, tag: linux-x86_64, target: x86_64-unknown-linux-musl }
           # `crt-static` folds in the MSVC runtime, so the .exe needs no
           # redistributable installed — an artist should not have to chase a
           # "vcruntime140.dll is missing" dialog.
@@ -156,6 +158,13 @@ jobs:
             [ -n "$found" ] || { echo "no converter for $tag in $zip" >&2; exit 1; }
             echo "  $tag: $(basename "$found")"
           done
+          # The Linux one has to be static, or it won't start on NixOS and
+          # will refuse any distro whose glibc is older than the runner's.
+          # A dropped `--target` would silently undo that.
+          linux=$(find check/demiurg_export/bin/linux-x86_64 -type f | head -1)
+          file "$linux"
+          file "$linux" | grep -q "statically linked" \
+            || { echo "the linux converter is dynamically linked" >&2; exit 1; }
           grep -m1 '^version' check/demiurg_export/blender_manifest.toml
 
       - uses: actions/upload-artifact@v4

@@ -109,8 +109,19 @@ fi
 bundled_tags=()
 if [[ "$host_build" == 1 ]]; then
     echo "building demiurg-convert (release) for $host_tag"
-    cargo build --release -p demiurg-convert
-    install -Dm755 "target/release/demiurg-convert$exe" \
+    # Linux builds static against musl: a glibc binary carries an ELF
+    # interpreter path NixOS does not have, and a glibc floor an older distro
+    # would trip over — both of which travel with the zip.
+    host_target=""
+    [[ "$host_os" == linux ]] && host_target="x86_64-unknown-linux-musl"
+    if [[ -n "$host_target" ]]; then
+        cargo build --release -p demiurg-convert --target "$host_target"
+        built="target/$host_target/release/demiurg-convert$exe"
+    else
+        cargo build --release -p demiurg-convert
+        built="target/release/demiurg-convert$exe"
+    fi
+    install -Dm755 "$built" \
         "$STAGE/demiurg_export/bin/$host_tag/demiurg-convert$exe"
     echo "  bundled $host_tag"
     bundled_tags=("$host_tag")

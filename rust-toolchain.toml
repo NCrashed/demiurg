@@ -7,9 +7,21 @@
 [toolchain]
 channel = "nightly-2026-04-15"
 components = ["rustc", "cargo", "rust-src", "rustfmt", "clippy", "rust-analyzer"]
-# `x86_64-pc-windows-gnu` builds the `demiurg-convert` binary that ships inside
-# the Blender addon for artists on Windows (scripts/package-blender-addon.sh
-# --cross windows). It needs the mingw-w64 linker, which the devShell provides;
-# nothing else in the workspace targets Windows.
-targets = ["wasm32-unknown-unknown", "x86_64-pc-windows-gnu"]
+# The two extra targets build the `demiurg-convert` binary that ships inside
+# the Blender addon:
+#
+# * `x86_64-pc-windows-gnu` for artists on Windows (needs the mingw-w64 linker,
+#   which the devShell provides).
+# * `x86_64-unknown-linux-musl` for Linux, statically. A glibc build carries an
+#   ELF interpreter path that does not exist on NixOS ("cannot run dynamically
+#   linked executables intended for generic linux environments"), and would
+#   also refuse to start on a distro with an older glibc than the build host's.
+#   A static binary has no interpreter and no version floor.
+#
+# Nothing else in the workspace targets either.
+targets = [
+    "wasm32-unknown-unknown",
+    "x86_64-pc-windows-gnu",
+    "x86_64-unknown-linux-musl",
+]
 profile = "minimal"

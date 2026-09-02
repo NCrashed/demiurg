@@ -7,6 +7,18 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The bundled Linux converter would not start on NixOS.** Built against the
+  runner's glibc, it carried an ELF interpreter path NixOS does not have, so
+  Blender reported "cannot run dynamically linked executables intended for
+  generic linux environments" and the export died at the last step. It is now
+  linked statically against musl — no interpreter, no glibc version floor — so
+  the distro that built it stops mattering, which also retires the
+  older-runner pin that was standing in for the same problem. CI checks the
+  shipped binary really is static, since a dropped `--target` would undo it
+  silently.
+
 ### Added
 
 - **Several meshes on one bone export as layers.** They used to be voxelized

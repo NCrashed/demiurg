@@ -55,6 +55,13 @@ Send that one file; the addon picks the binary for whatever the artist is on.
 Drop `--cross windows` for a host-only zip (then the file name carries the
 platform, so a folder of releases stays readable).
 
+The Linux converter is linked **statically against musl**. A glibc build
+carries an ELF interpreter path that NixOS does not have — it refuses with
+*"cannot run dynamically linked executables intended for generic linux
+environments"* — and a glibc version floor an older distro would trip over.
+Neither applies to a static binary, so the machine that built it stops
+mattering.
+
 The Windows build is a real cross-compile from Linux: the target's std comes
 from the pinned toolchain, the linker from mingw-w64, and everything links
 statically, so the `.exe` imports nothing but system DLLs — no runtime
