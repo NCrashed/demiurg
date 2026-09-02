@@ -7,6 +7,14 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-02
+
+Layers, and a Linux binary that starts everywhere. Several meshes on one bone
+are no longer melted into a single grid — each becomes its own attachment,
+sized and placed for itself, so a sword in a hand costs a sword-shaped grid
+rather than stretching the hand's to reach it. And the converter shipped inside
+the addon is now static, after it turned out not to run on NixOS at all.
+
 ### Fixed
 
 - **The bundled Linux converter would not start on NixOS.** Built against the
