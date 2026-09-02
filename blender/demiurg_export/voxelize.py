@@ -76,6 +76,30 @@ def _is_behind(point, location, normal):
     return d[0] * normal[0] + d[1] * normal[1] + d[2] * normal[2] > 0.0
 
 
+def lattice_pitch(coords, minimum_samples=8):
+    """The spacing of `coords` when they sit on a regular lattice, else `None`.
+
+    An already-voxelized mesh — a Voxelity modifier, a remesh — has its
+    vertices on a grid, and every gap between distinct coordinates is a whole
+    multiple of one spacing. Exporting such a mesh onto a grid of a different
+    size resamples one lattice through the other and chews the edges, so it is
+    worth spotting and reporting.
+
+    Pure, so the fiddly part is testable: a smooth mesh must not be mistaken
+    for a lattice, or the export would nag about a number that means nothing.
+    """
+    distinct = sorted({round(c, 5) for c in coords})
+    if len(distinct) < minimum_samples:
+        return None
+    gaps = sorted({round(b - a, 5) for a, b in zip(distinct, distinct[1:]) if b - a > 1e-5})
+    if not gaps:
+        return None
+    smallest = gaps[0]
+    if all(abs(g / smallest - round(g / smallest)) < 0.01 for g in gaps):
+        return smallest
+    return None
+
+
 def linear_to_srgb(c):
     """Blender stores colours linear; the manifest's hex is sRGB, which is what
     a colour picker showed the artist. Skipping this makes every export come

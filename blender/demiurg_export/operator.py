@@ -129,6 +129,95 @@ def _materials_of(objects):
     return entries, warnings
 
 
+def _shape_signature(context, obj):
+    """A cheap fingerprint of `obj`'s evaluated shape at the current frame."""
+    depsgraph = context.evaluated_depsgraph_get()
+    evaluated = obj.evaluated_get(depsgraph)
+    mesh = evaluated.to_mesh()
+    if mesh is None:
+        return None
+    try:
+        count = len(mesh.vertices)
+        if count == 0:
+            return (0, 0.0, 0.0, 0.0)
+        lo = [min(v.co[i] for v in mesh.vertices) for i in range(3)]
+        hi = [max(v.co[i] for v in mesh.vertices) for i in range(3)]
+        return (count, *(round(hi[i] - lo[i], 4) for i in range(3)))
+    finally:
+        evaluated.to_mesh_clear()
+
+
+def deforming_meshes(context, objects, armature):
+    """Which of `objects` change shape in a way the skeleton cannot express.
+
+    Two tests, because deformation reaches the exporter two ways:
+
+    * **Topology changes over time.** A rigid transform moves vertices; it
+      never adds or removes them. A mesh whose evaluated vertex count differs
+      between two frames is therefore not something bones can carry, whatever
+      drives it — and a Geometry Nodes voxelizer downstream of an armature is
+      exactly this: the bones squash the mesh, the nodes re-block the result,
+      and the blocks do not move rigidly.
+    * **Shape changes with the armature at rest.** With bone motion frozen,
+      anything still moving is a shape key, a lattice, a sim — deformation the
+      skeleton never had a claim on.
+
+    Both are tests rather than guesses, which is why the export acts on them
+    instead of only mentioning them.
+    """
+    scene = context.scene
+    saved = scene.frame_current
+    frames = (scene.frame_start, (scene.frame_start + scene.frame_end) // 2)
+    if frames[0] == frames[1]:
+        return []
+    found = {}
+    try:
+        # Posed, watching the vertex count.
+        counts = []
+        for frame in frames:
+            scene.frame_set(frame)
+            counts.append(
+                {o.name: (_shape_signature(context, o) or (0,))[0] for o in objects}
+            )
+        for obj in objects:
+            if counts[0].get(obj.name) != counts[1].get(obj.name):
+                found[obj.name] = obj
+
+        # At rest, watching the whole shape.
+        with _RestPose(context, armature):
+            shapes = []
+            for frame in frames:
+                scene.frame_set(frame)
+                shapes.append({o.name: _shape_signature(context, o) for o in objects})
+            for obj in objects:
+                first, second = (sig.get(obj.name) for sig in shapes)
+                if first is not None and first != second:
+                    found[obj.name] = obj
+    finally:
+        scene.frame_set(saved)
+    return [o for o in objects if o.name in found]
+
+
+def voxel_pitch(context, obj):
+    """The spacing of `obj`'s evaluated vertices along X, when it is regular.
+
+    An already-voxelized mesh — Voxelity's modifier, a remesh — sits on a
+    lattice, and exporting it onto a grid of a different size resamples one
+    lattice through another: the edges come out chewed. Reporting the pitch
+    lets the artist match `Voxels per unit` to it. `None` when the mesh isn't
+    on an obvious lattice.
+    """
+    depsgraph = context.evaluated_depsgraph_get()
+    evaluated = obj.evaluated_get(depsgraph)
+    mesh = evaluated.to_mesh()
+    if mesh is None:
+        return None
+    try:
+        return voxelize.lattice_pitch([v.co.x for v in mesh.vertices])
+    finally:
+        evaluated.to_mesh_clear()
+
+
 def _weighted_vertex_count(context, objects, bone_names):
     """How many *evaluated* vertices carry a weight for one of `bone_names`.
 
@@ -427,7 +516,8 @@ def _mesh_entry(voxels, head_vox):
 
 
 def build_manifest(context, armature, voxels_per_unit, solid,
-                   export_animation=True, all_actions=False, clip_fps=12.0):
+                   export_animation=True, all_actions=False, clip_fps=12.0,
+                   detect_deforming=True):
     """The manifest for `armature` (or, with `armature=None`, for the selected
     meshes as a model or a lone deforming blob). Returns `(manifest, warnings)`."""
     stamp = f"written by the demiurg Blender addon from {bpy.data.filepath or 'an unsaved file'}"
@@ -472,6 +562,47 @@ def build_manifest(context, armature, voxels_per_unit, solid,
         return rig.model_manifest(meshes[0].name, entry, stamp, materials), warnings
 
     by_bone, by_clip_bone, skinned, clip_skinned = _bone_meshes(armature)
+
+    # A mesh whose shape changes with the armature at rest cannot be carried by
+    # bones at all, so bake it frame by frame whether or not anyone remembered
+    # the per-object flag — the alternative is exporting its rest shape and
+    # letting rigid bones shove it around, which is the wrong model and looks
+    # like it.
+    if detect_deforming:
+        candidates = list(skinned) + [o for objs in by_bone.values() for o in objs]
+        moved = deforming_meshes(context, candidates, armature)
+        if moved:
+            warnings.append(
+                "baking " + ", ".join(sorted(o.name for o in moved))
+                + " as per-frame flipbook(s): the shape changes in a way no arrangement "
+                "of bones could reproduce. Tick 'Voxelize per frame' on the object to "
+                "make that explicit, or untick 'Detect deforming meshes' to force rigid"
+            )
+            for obj in moved:
+                if obj in skinned:
+                    skinned.remove(obj)
+                    clip_skinned.append(obj)
+                else:
+                    for bone_name, objs in by_bone.items():
+                        if obj in objs:
+                            objs.remove(obj)
+                            by_clip_bone.setdefault(bone_name, []).append(obj)
+                            break
+            by_bone = {k: v for k, v in by_bone.items() if v}
+
+    # An already-voxelized mesh sits on a lattice of its own; exporting it onto
+    # a grid of a different size resamples one through the other and chews the
+    # edges. The fix is a number, so give the number.
+    for obj in list(skinned) + list(clip_skinned) + [o for v in by_bone.values() for o in v] \
+            + [o for v in by_clip_bone.values() for o in v]:
+        pitch = voxel_pitch(context, obj)
+        if pitch and abs(pitch * voxels_per_unit - 1.0) > 0.02:
+            warnings.append(
+                f"{obj.name!r} is already voxelized at {pitch:g} units per voxel, but this "
+                f"export samples at {1.0 / voxels_per_unit:g} — the two grids disagree and "
+                f"the edges will come out ragged. Set 'Voxels per unit' to "
+                f"{round(1.0 / pitch)}"
+            )
     if not by_bone and not by_clip_bone and not skinned and not clip_skinned:
         raise ValueError(
             "no mesh is attached to this armature: parent one to a bone "
@@ -661,7 +792,7 @@ def build_manifest(context, armature, voxels_per_unit, solid,
 
 def export_document(context, filepath, voxels_per_unit=10.0, solid=True,
                     export_animation=True, all_actions=False, clip_fps=12.0,
-                    converter=None, keep_manifest=False):
+                    detect_deforming=True, converter=None, keep_manifest=False):
     """Voxelize the scene and write `filepath` through `demiurg-convert`.
 
     Returns `(summary, warnings)`. Raises `ValueError` for a scene the exporter
@@ -676,7 +807,8 @@ def export_document(context, filepath, voxels_per_unit=10.0, solid=True,
         )
     armature = _pick_armature(context)
     manifest, warnings = build_manifest(
-        context, armature, voxels_per_unit, solid, export_animation, all_actions, clip_fps
+        context, armature, voxels_per_unit, solid, export_animation, all_actions, clip_fps,
+        detect_deforming,
     )
 
     if keep_manifest:
@@ -768,6 +900,16 @@ class DEMIURG_OT_export_rig(bpy.types.Operator, ExportHelper):
         ),
         default=True,
     )
+    detect_deforming: BoolProperty(
+        name="Detect deforming meshes",
+        description=(
+            "Bake a mesh as a per-frame flipbook when its shape changes in a "
+            "way bones cannot carry — its vertex count varies over time, or it "
+            "keeps moving with the armature held at rest. Ticking 'Voxelize "
+            "per frame' on the object forces it regardless"
+        ),
+        default=True,
+    )
     all_actions: BoolProperty(
         name="All actions",
         description=(
@@ -805,6 +947,7 @@ class DEMIURG_OT_export_rig(bpy.types.Operator, ExportHelper):
                 export_animation=self.export_animation,
                 all_actions=self.all_actions,
                 clip_fps=self.clip_fps,
+                detect_deforming=self.detect_deforming,
                 converter=converter,
                 keep_manifest=self.keep_manifest,
             )

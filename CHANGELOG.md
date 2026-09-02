@@ -7,6 +7,26 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- **The Blender export finds deforming meshes by itself.** A squashing mesh has
+  to be baked frame by frame, and until now that meant knowing to tick
+  **Voxelize per frame** on the object; forgetting it exported the rest shape
+  and let rigid bones shove it around, which looks like garbage rather than
+  like a mistake. The new **Detect deforming meshes** option (on by default)
+  tests each mesh over two frames instead: a vertex count that varies, or a
+  shape that still moves with the armature held at rest, is deformation no
+  arrangement of bones could reproduce, so the export bakes it as a flipbook
+  and says which meshes it did that to. Both are tests rather than guesses,
+  which is why it acts on them. The per-object flag still forces it, and
+  unticking the option forces everything rigid.
+- **A mesh that is already voxelized reports the resolution to use.** A
+  Voxelity modifier or a remesh leaves the geometry on a lattice of its own,
+  and exporting it onto a grid of a different size resamples one through the
+  other and chews the edges. The export now measures that lattice and names the
+  **Voxels per unit** that matches it, rather than leaving the artist to work
+  out why a clean model came out ragged.
+
 ## [0.17.0] - 2026-09-02
 
 Layers, and a Linux binary that starts everywhere. Several meshes on one bone

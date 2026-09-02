@@ -116,6 +116,32 @@ class TestVoxelize(unittest.TestCase):
         self.assertEqual(filled[(0, 0, 0)], voxelize.DEFAULT_COLOR)
 
 
+class TestLatticePitch(unittest.TestCase):
+    """Spotting a mesh that is already voxelized."""
+
+    def test_a_grid_reports_its_spacing(self):
+        # Voxelity's default: blocks every 0.05 units, with gaps where the
+        # shape is hollow — every gap still a whole multiple.
+        coords = [i * 0.05 for i in range(12)] + [i * 0.05 for i in range(20, 26)]
+        self.assertAlmostEqual(voxelize.lattice_pitch(coords), 0.05, places=5)
+
+    def test_a_smooth_mesh_is_not_a_lattice(self):
+        # A UV sphere's x coordinates are irregular; reporting a pitch here
+        # would nag the artist about a number that means nothing.
+        from math import cos, pi
+
+        coords = [cos(pi * i / 30) for i in range(31)]
+        self.assertIsNone(voxelize.lattice_pitch(coords))
+
+    def test_too_few_samples_says_nothing(self):
+        self.assertIsNone(voxelize.lattice_pitch([0.0, 0.1, 0.2]))
+        self.assertIsNone(voxelize.lattice_pitch([]))
+
+    def test_a_single_plane_says_nothing(self):
+        # Every coordinate identical: no gaps to measure.
+        self.assertIsNone(voxelize.lattice_pitch([0.5] * 20))
+
+
 class TestColor(unittest.TestCase):
     def test_linear_becomes_srgb(self):
         self.assertEqual(voxelize.to_hex((0.0, 0.0, 0.0)), "000000")

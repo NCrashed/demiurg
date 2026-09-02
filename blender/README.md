@@ -87,6 +87,7 @@ file `.rkc` instead to write the engine character directly.
 | **Voxels per unit** | Resolution: how many voxels one Blender unit becomes. 10 means a 2 m character is 20 voxels tall. |
 | **Fill interior** | Fill inside the mesh, not just its surface. Needs closed geometry — turn it off for open or non-manifold meshes. |
 | **Animation** | Bake actions into clips. |
+| **Detect deforming meshes** | Bake a mesh that squashes as a per-frame flipbook, since bones cannot carry one. See [Meshes that deform](#meshes-that-deform). |
 | **All actions** | Export every action in the file, not just the ones this armature uses. |
 | **Keep manifest** | Write the intermediate JSON next to the output. The first thing to look at when a result surprises you. |
 
@@ -131,8 +132,16 @@ A skeleton moves rigid chunks; it cannot reshape one. Anything that *squashes*
 — a slime, a wobbling blob, cloth — needs its geometry voxelized **every
 frame** instead, and the engine plays the result as a flipbook.
 
-Tick **Voxelize per frame** in *Object Properties ▸ demiurg* on that mesh. It
-works whichever way the mesh is attached:
+**The export usually works this out on its own.** With **Detect deforming
+meshes** on (the default) it watches each mesh over two frames and bakes it as a
+flipbook when it changes in a way bones cannot carry — its vertex count varies,
+or it keeps moving with the armature held at rest. It says which meshes it did
+that to, so the decision is visible rather than silent. Untick the option to
+force everything rigid.
+
+Tick **Voxelize per frame** in *Object Properties ▸ demiurg* to state it
+outright instead of relying on the test. Either way it works whichever way the
+mesh is attached:
 
 | How the mesh is attached | What the flag does |
 | --- | --- |
@@ -146,11 +155,14 @@ So a hard-shelled character with a soft belly is one export.
 scatter — the vertex groups do not survive it. The evaluated mesh reaches the
 exporter with no weights at all, the per-bone split has nothing to go on, and
 the result is a nonsense division across bones. The export says so by name when
-it happens; the answer is this flag, which does not need weights.
+it happens; the answer is the flipbook path, which does not need weights. (This
+is also the case detection catches for you: a voxelizer downstream of an
+armature changes its vertex count as the bones squash it.)
 
 **If something else already voxelized the mesh**, match **Voxels per unit** to
 its voxel size (`1 / size`) or the two grids fight: a coarser export grid
-samples one block in every two or four and chews the edges. Or drop the other
+samples one block in every two or four and chews the edges. The export measures
+the mesh's own lattice and tells you the number to use. Or drop the other
 voxelizer and let this one do it once.
 
 The deformation can come from anywhere Blender evaluates — shape keys, a
@@ -159,7 +171,8 @@ than reading any one mechanism.
 
 | Setting | What it does |
 | --- | --- |
-| **Voxelize per frame** (per object) | Marks the mesh as a flipbook |
+| **Detect deforming meshes** (export option) | Finds them itself; on by default |
+| **Voxelize per frame** (per object) | Marks the mesh as a flipbook outright |
 | **Clip fps** (export option) | How often to sample it |
 
 **Clip fps is the size knob.** Every sample is a whole voxel grid, so this
