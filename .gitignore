@@ -2,9 +2,19 @@
 **/*.rs.bk
 Cargo.lock.bak
 
-# demiurg project files written during manual editing sessions live in
-# the user's own asset dirs, not the repo; ignore any stray exports.
+# Assets — the scenes and exports made while trying something out. They live in
+# whoever made them's own asset dirs, not here; a test slime that lands in the
+# repo root while debugging an export should not have to be remembered about.
+*.demiurg
 *.demiurg.bak
+*.rkc
+*.rvc
+*.blend
+*.blend1
+
+# Screenshots dropped at the root to point at something in a conversation. The
+# ones the docs use are under screenshots/ and stay tracked, hence the anchor.
+/*.png
 
 # Build output: the wasm bundle (trunk) and the packaged Blender addon.
 /dist
