@@ -7,6 +7,13 @@ matching a `vX.Y.Z` tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-02
+
+A translucent material stays translucent. A slime built the usual way — some
+alpha, some transmission — was exported as very nearly solid, because the two
+inputs were read as rival statements of one thing rather than as the two
+separate things the shader multiplies together.
+
 ### Fixed
 
 - **A translucent Blender material could export as a solid one.** Alpha and
